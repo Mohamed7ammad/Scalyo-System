@@ -1,0 +1,976 @@
+const express      = require('express');
+const pool         = require('../config/db');
+const authenticate = require('../middleware/auth');
+const { requireAdmin } = require('../middleware/roleGuard');
+const { getExternalAffiliateStats } = require('../services/externalAffiliate');
+
+const router = express.Router();
+
+/* ── Egypt UTC-offset helper ─────────────────────────────────────────
+   Egypt observes DST: UTC+2 (winter) and UTC+3 (summer, roughly
+   April–October).  This function detects the correct offset for any
+   given date by asking the Intl API what hour it is in Cairo at noon
+   UTC on that day, then deriving the offset from the difference.
+
+   Example:
+     2026-01-15 → Cairo noon = 14:xx → offset +02:00 (EET)
+     2026-05-25 → Cairo noon = 15:xx → offset +03:00 (EEST)
+
+   Falls back to '+02:00' if Intl throws (shouldn't happen on Node 12+).
+   ─────────────────────────────────────────────────────────────────── */
+function getEgyptOffset(dateStr) {
+  try {
+    const noonUtc = new Date(dateStr + 'T12:00:00.000Z');
+    const cairoHour = parseInt(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Africa/Cairo',
+        hour:     '2-digit',
+        hour12:   false,
+      }).format(noonUtc),
+      10
+    );
+    const offsetHours = cairoHour - 12; // 2 (winter) or 3 (summer)
+    const sign = offsetHours >= 0 ? '+' : '-';
+    return `${sign}${String(Math.abs(offsetHours)).padStart(2, '0')}:00`;
+  } catch (_) {
+    return '+02:00'; // safe fallback (winter / standard Egypt time)
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   buildJoinOn(params, startDate, endDate)
+   ─────────────────────────────────────────────────────────────────────
+   Builds the LEFT JOIN … ON (…) string.  All date logic lives here —
+   NOTHING related to dates goes into the WHERE clause.
+
+   Why ON and not WHERE?
+   ─────────────────────
+   A WHERE predicate on an outer-joined column silently converts the
+   LEFT JOIN into an INNER JOIN.  If an agent has zero matching orders
+   for the period, o.* is all NULL, the WHERE fails, and the agent row
+   disappears entirely — producing an empty table instead of a row of
+   zeros.  The ON clause only decides which orders are joined; it never
+   removes agent rows.
+
+   Date comparison strategy — timestamp boundaries in Node.js:
+   ───────────────────────────────────────────────────────────
+   All previous attempts using DATE() / AT TIME ZONE in SQL were
+   fragile because they depend on whether "updatedAt" is TIMESTAMPTZ or
+   TIMESTAMP WITHOUT TIME ZONE, and on the PostgreSQL server's
+   TimeZone GUC (almost always UTC on hosted services).
+
+   The foolproof fix: compute exact UTC boundaries in JavaScript and
+   pass them as ISO-8601 strings with an explicit offset.  PostgreSQL
+   then normalises them to UTC automatically, regardless of column type
+   or server timezone.
+
+     '2026-05-25T00:00:00+03:00'  →  '2026-05-24T21:00:00Z' in UTC
+     '2026-05-25T23:59:59+03:00'  →  '2026-05-25T20:59:59Z' in UTC
+
+   The offset is determined dynamically per date via getEgyptOffset()
+   so DST transitions (April / October) are handled automatically.
+
+   'جديد' backlog rule:
+   ────────────────────
+   Unactioned orders (Status = 'جديد') must always be visible
+   regardless of the date filter.  They are included via:
+     (date_range_condition) OR (Status = 'جديد')
+   The AssignedTo check sits outside the OR, so only the correct
+   agent's orders can ever be joined.                                  */
+function buildJoinOn(params, startDate, endDate, bizIdx) {
+  /* TENANT ISOLATION: only orders belonging to the caller's tenant may ever be
+     joined onto a user row.  bizIdx is the $-position of req.user.business_id. */
+  const bizClause = `o.business_id = $${bizIdx}::integer`;
+
+  if (!startDate && !endDate) {
+    // No date filter — join ALL of the tenant's orders for the agent.
+    return `o."AssignedTo" = u.email AND ${bizClause}`;
+  }
+
+  const rangeParts = [];
+
+  if (startDate) {
+    const offset = getEgyptOffset(startDate);
+    // Midnight Cairo on startDate, expressed as a UTC-anchored ISO string.
+    params.push(`${startDate}T00:00:00${offset}`);
+    rangeParts.push(`o."updatedAt" >= $${params.length}::timestamptz`);
+  }
+
+  if (endDate) {
+    const offset = getEgyptOffset(endDate);
+    // Last second of endDate in Cairo time.
+    params.push(`${endDate}T23:59:59${offset}`);
+    rangeParts.push(`o."updatedAt" <= $${params.length}::timestamptz`);
+  }
+
+  return [
+    `o."AssignedTo" = u.email`,
+    `AND ${bizClause}`,
+    `AND (`,
+    `  (${rangeParts.join(' AND ')})`,
+    `  OR o."Status" = 'جديد'`,
+    `)`,
+  ].join('\n          ');
+}
+
+/* ── Shared SELECT / GROUP BY fragment ──────────────────────────────
+   Receives the pre-built ON-clause string and a WHERE clause string
+   (role filter or email filter — never date conditions).             */
+function buildAgentSql(joinOnClause, whereClause) {
+  return `
+    SELECT
+      u.id                                                              AS agent_id,
+      COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '@', 1)) AS agent_name,
+      u.email                                                           AS agent_email,
+      COALESCE(u.is_active, true)                                       AS is_active,
+
+      /* ── Granular commission matrix ── */
+      COALESCE(u.comm_confirmed,  0)                                    AS comm_confirmed,
+      COALESCE(u.comm_delivered,  0)                                    AS comm_delivered,
+      COALESCE(u.comm_rejected,   0)                                    AS comm_rejected,
+      COALESCE(u.comm_no_answer,  0)                                    AS comm_no_answer,
+
+      COUNT(o.id)                                                       AS total_assigned,
+
+      COUNT(o.id) FILTER (WHERE o."Status" = 'جديد')                   AS status_new,
+      COUNT(o.id) FILTER (WHERE o."Status" = 'لا يرد')                AS status_no_answer,
+      COUNT(o.id) FILTER (WHERE o."Status" = 'مؤجل')                  AS status_postponed,
+      COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')              AS status_cancelled,
+      COUNT(o.id) FILTER (WHERE o."Status" IN (
+        'تم التأكيد', 'تم الشحن', 'تم التوصيل',
+        'جاري الإعادة', 'تم الإرجاع'
+      ))                                                                AS status_confirmed,
+      COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')            AS status_delivered,
+      COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع'))
+                                                                        AS status_returned,
+
+      /* NDR: returned / (delivered + returned) × 100 */
+      ROUND(
+        COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع'))::numeric
+        / NULLIF(
+            COUNT(o.id) FILTER (WHERE o."Status" IN (
+              'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'
+            )), 0
+          ) * 100,
+        1
+      )                                                                 AS ndr_pct,
+
+      /* commission = confirmed×cc + delivered×cd + rejected×cr + noAnswer×cn */
+      ROUND(
+          COUNT(o.id) FILTER (WHERE o."Status" IN (
+            'تم التأكيد', 'تم الشحن', 'تم التوصيل',
+            'جاري الإعادة', 'تم الإرجاع'
+          )) * COALESCE(u.comm_confirmed, 0)
+        + COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')
+            * COALESCE(u.comm_delivered, 0)
+        + COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')
+            * COALESCE(u.comm_rejected, 0)
+        + COUNT(o.id) FILTER (WHERE o."Status" IN ('لا يرد', 'مؤجل'))
+            * COALESCE(u.comm_no_answer, 0),
+        2
+      )                                                                 AS earned_commission
+
+    FROM  users u
+    LEFT  JOIN orders o ON (
+          ${joinOnClause}
+    )
+    ${whereClause}
+    GROUP BY u.id, u.name, u.email, u.is_active,
+             u.comm_confirmed, u.comm_delivered, u.comm_rejected, u.comm_no_answer
+  `;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   GET /api/analytics/overview  — Admin only
+   ─────────────────────────────────────────────────────────────────
+   Returns date-filtered financial KPIs for the main dashboard.
+   Two independent queries run in parallel:
+
+     1. expenses table  — DATE column, so a plain ::date cast is enough;
+        no timezone conversion needed (the date the expense was logged).
+
+     2. orders table    — uses the same Egypt-local UTC boundaries as
+        buildJoinOn() so the result matches what the analytics endpoints
+        show for the same period.  We sum ProductPrice only for orders
+        that are in status 'تم التوصيل' (Delivered).
+
+   When no dates are provided both queries return the all-time totals.
+   ══════════════════════════════════════════════════════════════════ */
+const PRICE_EXPR = `
+  COALESCE(
+    NULLIF(
+      REGEXP_REPLACE(COALESCE("ProductPrice"::text, ''), '[^0-9.]', '', 'g'),
+      ''
+    )::numeric,
+    0
+  )`;
+
+/* Ensure the SKU-attribution columns exist before any route handles a request.
+   These are the same migrations as in meta.js — duplicated here so the
+   profitability endpoint never fails with "column does not exist" even if the
+   meta sync has never been run on this instance.                             */
+pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS sku            VARCHAR(100)`)
+  .catch(() => {});
+pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS meta_sync     BOOLEAN NOT NULL DEFAULT FALSE`)
+  .catch(() => {});
+pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS meta_purchases INT     DEFAULT 0`)
+  .catch(() => {});
+
+/* Ensure "rejectionReason" exists on the orders table.
+   The column is defined in schema.sql but that file is run manually.
+   This guard means the dashboard rejection-reasons query never fails with
+   "column does not exist" on a DB provisioned from an older dump.           */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "rejectionReason" VARCHAR(255)`)
+  .catch(() => {});
+
+router.get('/overview', authenticate, requireAdmin, async (req, res) => {
+  const { startDate, endDate } = req.query;
+
+  try {
+    /* ── Query A: filtered expense sum (tenant-scoped) ────────────── */
+    const expParams = [req.user.business_id];   // $1 = tenant
+    let expWhere = ` AND business_id = $1::integer`;
+    if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      expParams.push(startDate);
+      expWhere += ` AND expense_date >= $${expParams.length}::date`;
+    }
+    if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      expParams.push(endDate);
+      expWhere += ` AND expense_date <= $${expParams.length}::date`;
+    }
+    const expSql = `
+      SELECT COALESCE(SUM(amount), 0) AS total_expenses
+      FROM   expenses
+      WHERE  1=1${expWhere}
+    `;
+
+    /* ── Query B: delivered orders revenue (tenant-scoped) ────────── */
+    const ordParams = [req.user.business_id];   // $1 = tenant
+    let ordWhere = `"Status" = 'تم التوصيل' AND business_id = $1::integer`;
+
+    if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      const offset = getEgyptOffset(startDate);
+      ordParams.push(`${startDate}T00:00:00${offset}`);
+      ordWhere += ` AND "updatedAt" >= $${ordParams.length}::timestamptz`;
+    }
+    if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      const offset = getEgyptOffset(endDate);
+      ordParams.push(`${endDate}T23:59:59${offset}`);
+      ordWhere += ` AND "updatedAt" <= $${ordParams.length}::timestamptz`;
+    }
+    const ordSql = `
+      SELECT COALESCE(SUM(${PRICE_EXPR}), 0) AS total_sales_delivered
+      FROM   orders
+      WHERE  ${ordWhere}
+    `;
+
+    /* ── Run both in parallel ─────────────────────────────────────── */
+    const [expRes, ordRes] = await Promise.all([
+      pool.query(expSql, expParams),
+      pool.query(ordSql, ordParams),
+    ]);
+
+    const total_expenses        = parseFloat(expRes.rows[0].total_expenses)        || 0;
+    const total_sales_delivered = parseFloat(ordRes.rows[0].total_sales_delivered) || 0;
+    const net_profit            = total_sales_delivered - total_expenses;
+
+    res.json({ total_expenses, total_sales_delivered, net_profit });
+
+  } catch (err) {
+    console.error('[analytics/overview] Error:', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── GET /api/analytics/agents — Admin only ──────────────────────── */
+router.get('/agents', authenticate, requireAdmin, async (req, res) => {
+  const { startDate, endDate } = req.query;
+  const params = [req.user.business_id];        // $1 = tenant
+  const bizIdx = params.length;
+  const joinOn = buildJoinOn(params, startDate, endDate, bizIdx);
+
+  const sql = buildAgentSql(joinOn, `WHERE u.role = 'agent' AND u.business_id = $${bizIdx}::integer`) + `
+    ORDER BY
+      COUNT(o.id) FILTER (WHERE o."Status" IN (
+        'تم التأكيد', 'تم الشحن', 'تم التوصيل',
+        'جاري الإعادة', 'تم الإرجاع'
+      )) DESC,
+      COUNT(o.id) DESC,
+      u.email ASC
+  `;
+
+  try {
+    const result = await pool.query(sql, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[analytics/agents] SQL error:', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── GET /api/analytics/my-performance — Any authenticated user ───── */
+router.get('/my-performance', authenticate, async (req, res) => {
+  const { startDate, endDate } = req.query;
+  const params = [req.user.email];           // $1 is always the email
+  params.push(req.user.business_id);         // $2 = tenant
+  const bizIdx = params.length;
+  const joinOn = buildJoinOn(params, startDate, endDate, bizIdx);
+
+  const sql = buildAgentSql(joinOn, `WHERE u.email = $1 AND u.business_id = $${bizIdx}::integer`);
+
+  try {
+    const result = await pool.query(sql, params);
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'المستخدم غير موجود' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('[analytics/my-performance] SQL error:', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GET /api/analytics/products-profitability  — Admin only
+   ─────────────────────────────────────────────────────────────────────────
+   For every product in the catalogue this returns:
+
+     units_delivered     — confirmed-delivered orders in the period
+                           (matched via orders.sku = products.sku)
+     delivered_revenue   — sum of ProductPrice for those orders
+     attributed_ad_spend — sum of Meta-sync expense rows whose parsed
+                           sku matches the product SKU (case-insensitive)
+     cogs                — cost_price × units_delivered
+     net_profit          — delivered_revenue − cogs − attributed_ad_spend
+     cpa                 — attributed_ad_spend / total_confirmed_orders
+
+   Order date filter: uses Egypt-local timestamps against "updatedAt"
+   (same strategy as every other analytics endpoint — matches Ads Manager).
+
+   Expense date filter: plain DATE comparison against expense_date.
+
+   Matching order: UPPER(sku) on both sides — survives any capitalisation
+   difference between campaign names and the products catalogue.
+   ══════════════════════════════════════════════════════════════════════════ */
+router.get('/products-profitability', authenticate, async (req, res) => {
+  const role = req.user?.role;
+  if (role !== 'admin' && role !== 'media_buyer') {
+    return res.status(403).json({ error: 'غير مصرح لك بعرض ربحية المنتجات' });
+  }
+
+  const { startDate, endDate } = req.query;
+
+  /* ── EXPENSE DATE PARAMS: hardcoded as $1 / $2 ──────────────────────────────
+     Expense dates MUST occupy the first two positions so the expense_stats CTE
+     can use literal $1 / $2 with no dynamic string building.
+     Both are always present (null when absent); IS NULL OR in the SQL makes a
+     null param act as "no bound" — same semantics as before without any risk of
+     the template string evaluating to an empty filter.                          */
+  const params = [
+    (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,  // $1 expense start
+    (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,  // $2 expense end
+  ];
+
+  /* ── ORDER TIMESTAMP BOUNDS: appended after expense params ($3, $4 …) ─────
+     Filter on "createdAt" (order placement date).  "updatedAt" is auto-stamped
+     on every status change and would drag old orders into the current window.  */
+  let ordFilter = '';
+  if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+    const offset = getEgyptOffset(startDate);
+    params.push(`${startDate}T00:00:00${offset}`);
+    ordFilter += ` AND o."createdAt" >= $${params.length}::timestamptz`;
+  }
+  if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    const offset = getEgyptOffset(endDate);
+    params.push(`${endDate}T23:59:59${offset}`);
+    ordFilter += ` AND o."createdAt" <= $${params.length}::timestamptz`;
+  }
+
+  /* ── Role-based scoping (multi-tenant) ──────────────────────────────────────
+     Media Buyer → expense_stats scoped to their assigned meta_account_id(s)
+                   ($accIdx) and the product list limited to the SKUs they
+                   advertise ($skuIdx).  Admin → both params null (no scope).   */
+  let accIdx = 'NULL';   // SQL literal NULL → no expense-account scope
+  let skuIdx = 'NULL';   // SQL literal NULL → no product-SKU scope
+  if (role === 'media_buyer') {
+    const accRes = await pool.query(
+      `SELECT id FROM meta_accounts WHERE assigned_user_id = $1 AND business_id = $2::integer`,
+      [req.user.id, req.user.business_id]
+    );
+    const accountIds = accRes.rows.map((r) => r.id);
+    if (accountIds.length === 0) return res.json([]);   // no accounts → empty
+
+    const skuRes = await pool.query(
+      `SELECT DISTINCT UPPER(sku) AS sku
+         FROM expenses
+        WHERE meta_account_id = ANY($1)
+          AND business_id = $2::integer
+          AND sku IS NOT NULL
+          AND sku NOT IN ('UNATTRIBUTED', '')`,
+      [accountIds, req.user.business_id]
+    );
+    const advertisedSkus = skuRes.rows.map((r) => r.sku);
+    if (advertisedSkus.length === 0) return res.json([]); // nothing advertised
+
+    params.push(accountIds);
+    accIdx = `$${params.length}`;
+    params.push(advertisedSkus);
+    skuIdx = `$${params.length}`;
+  }
+
+  /* ── TENANT ISOLATION param — appended after any media-buyer scope params ──
+     Captures the $-position of req.user.business_id, referenced in every CTE
+     below so products / orders / expenses are all locked to the caller's tenant. */
+  params.push(req.user.business_id);
+  const bizIdx = `$${params.length}`;
+
+  /* Inline price parser for delivered revenue (references orders alias "o") */
+  const PRICE_O = `
+    COALESCE(
+      NULLIF(REGEXP_REPLACE(COALESCE(o."ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric,
+      0
+    )`;
+
+  const sql = `
+    WITH order_stats AS (
+      /* ── Join products → orders to count confirmed/delivered per product ──────
+         Two matching strategies handle the fact that "sku" on orders is a
+         late-added nullable column (many existing orders have NULL sku):
+
+           PRIMARY   – orders.sku is set and matches products.sku (exact, case-insensitive)
+           FALLBACK  – orders.sku is NULL/empty → match on ProductName vs products.name
+
+         COUNT(DISTINCT o.id) prevents double-counting if both conditions fire for
+         a single order.  Date filter uses "createdAt" (placement date).          */
+      SELECT
+        p.id                                                                AS product_id,
+        COUNT(DISTINCT o.id) FILTER (WHERE o."Status" = 'تم التوصيل')     AS units_delivered,
+        COUNT(DISTINCT o.id) FILTER (WHERE o."Status" IN (
+          'تم التأكيد','تم الشحن','تم التوصيل',
+          'جاري الإعادة','تم الإرجاع'
+        ))                                                                  AS total_confirmed,
+        COALESCE(SUM(
+          CASE WHEN o."Status" = 'تم التوصيل' THEN ${PRICE_O} ELSE 0 END
+        ), 0)                                                               AS delivered_revenue
+      FROM   products p
+      JOIN   orders   o ON (
+        o.business_id = ${bizIdx}::integer
+        AND (
+          /* SKU match — preferred when the sku column is populated */
+          ( COALESCE(o.sku, '') <> '' AND UPPER(o.sku) = UPPER(p.sku) )
+          OR
+          /* ProductName fallback — for older orders where sku is NULL */
+          ( COALESCE(o.sku, '') = '' AND UPPER(COALESCE(o."ProductName", '')) = UPPER(p.name) )
+        )
+      )
+      WHERE  p.business_id = ${bizIdx}::integer${ordFilter}
+      GROUP  BY p.id
+    ),
+    expense_stats AS (
+      /* Sum of Meta-synced spend + reported purchases per SKU in the date range.
+         Date bounds use hardcoded $1 and $2 (expense startDate / endDate).
+         IS NULL OR makes each bound optional; null param skips the condition.
+         Alias meta_orders_total keeps the JS mapping below unambiguous.        */
+      SELECT
+        UPPER(e.sku)                              AS sku,
+        SUM(e.amount)                             AS attributed_spend,
+        COALESCE(SUM(e.meta_purchases), 0)        AS meta_orders_total
+      FROM   expenses e
+      WHERE  e.meta_sync = TRUE
+        AND  e.business_id = ${bizIdx}::integer
+        AND  e.sku IS NOT NULL AND e.sku <> ''
+        AND  ($1::date IS NULL OR e.expense_date >= $1::date)
+        AND  ($2::date IS NULL OR e.expense_date <= $2::date)
+        AND  (${accIdx}::int[] IS NULL OR e.meta_account_id = ANY(${accIdx}))
+      GROUP  BY UPPER(e.sku)
+    )
+    SELECT
+      p.id::text                               AS product_id,
+      p.name                                   AS product_name,
+      p.sku,
+      COALESCE(p.cost_price::numeric,   0)     AS cost_price,
+      COALESCE(os.units_delivered,      0)     AS units_delivered,
+      COALESCE(os.total_confirmed,      0)     AS erp_order_count,
+      COALESCE(os.delivered_revenue,    0)     AS delivered_revenue,
+      COALESCE(es.attributed_spend,     0)     AS attributed_ad_spend,
+      COALESCE(es.meta_orders_total,    0)     AS meta_orders_total
+    FROM   products p
+    LEFT   JOIN order_stats   os ON os.product_id = p.id
+    LEFT   JOIN expense_stats es ON es.sku = UPPER(p.sku)
+    WHERE  p.business_id = ${bizIdx}::integer
+      AND  (${skuIdx}::text[] IS NULL OR UPPER(p.sku) = ANY(${skuIdx}))
+    ORDER  BY COALESCE(os.delivered_revenue, 0) DESC,
+              COALESCE(es.attributed_spend,  0) DESC,
+              p.name ASC
+  `;
+
+  try {
+    const { rows } = await pool.query(sql, params).catch((err) => {
+      /* Surface the FULL PostgreSQL error (message + detail + hint) so we can
+         diagnose column-name typos, type mismatches, etc. in the backend log. */
+      console.error('[Product API Error] SQL failed:');
+      console.error('  message:', err.message);
+      console.error('  detail: ', err.detail  ?? '—');
+      console.error('  hint:   ', err.hint    ?? '—');
+      console.error('  query:  ', err.query   ?? '(not attached)');
+      throw err;   // re-throw so the outer catch sends the 500 with details
+    });
+
+    /* Compute derived metrics in JS to keep the SQL readable */
+    const result = rows.map((r) => {
+      const costPrice        = parseFloat(r.cost_price)          || 0;
+      const unitsDelivered   = parseInt(r.units_delivered,  10)  || 0;
+      /* erp_order_count — ERP-internal confirmed count (kept for pixel efficiency).
+         Column was renamed from total_orders → erp_order_count in the SQL above
+         to prevent confusion with the authoritative Meta-sourced total_orders.    */
+      const erpOrderCount    = parseInt(r.erp_order_count,  10)  || 0;
+      const deliveredRevenue = parseFloat(r.delivered_revenue)   || 0;
+      const attributedSpend  = parseFloat(r.attributed_ad_spend) || 0;
+
+      /* metaOrders — read from the explicitly named meta_orders_total column.
+         If the expense row has no SKU match the value is 0 (LEFT JOIN → NULL →
+         COALESCE 0); that is a data attribution issue, not a code bug.          */
+      const metaOrders  = parseInt(r.meta_orders_total, 10) || 0;
+      const cogs        = parseFloat((costPrice * unitsDelivered).toFixed(2));
+      const netProfit   = parseFloat((deliveredRevenue - cogs - attributedSpend).toFixed(2));
+      const cpa         = metaOrders > 0
+        ? parseFloat((attributedSpend / metaOrders).toFixed(2))
+        : null;
+
+      return {
+        product_id:          r.product_id ?? null,
+        product_name:        r.product_name ?? '',   // never null — frontend renders directly
+        sku:                 r.sku ?? '',             // never null — used in .toUpperCase() joins
+        cost_price:          costPrice,
+        units_delivered:     unitsDelivered,
+        total_orders:        metaOrders,          // Meta-reported (authoritative) — from meta_orders_total
+        erp_orders:          erpOrderCount,       // ERP internal count — for pixel efficiency calculation
+        delivered_revenue:   deliveredRevenue,
+        attributed_ad_spend: attributedSpend,
+        cogs,
+        net_profit:          netProfit,
+        cpa,
+        meta_orders:         metaOrders,          // backward-compat alias (identical to total_orders)
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    /* Full error is already logged by the inner .catch() above; we just
+       forward the message to the frontend so it can display it in the UI. */
+    console.error('[Product API Error]:', err);
+    res.status(500).json({ error: 'خطأ في الخادم', details: err.message });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GET /api/analytics/dashboard  — Admin + Media Buyer (role-scoped)
+   ─────────────────────────────────────────────────────────────────────────
+   Unified payload containing:
+     overview           — order counts + revenue + expenses, date-filtered
+     daily_chart_stats  — per-day breakdown (orders / revenue / ad spend)
+     governorates_stats — per-city breakdown
+     rejection_reasons  — cancelled orders grouped by rejectionReason
+
+   MULTI-TENANT SCOPING (Objective 4):
+     • Admin       → aggregates ALL Meta accounts + ALL orders.
+     • Media Buyer → only the Meta account(s) assigned to them. Expenses are
+                     scoped by meta_account_id; orders are scoped via the SKU
+                     bridge (the SKUs their account(s) advertise, with a
+                     ProductName fallback for legacy orders missing a sku).
+     • Agent       → 403 (not permitted to view analytics).
+   ══════════════════════════════════════════════════════════════════════════ */
+router.get('/dashboard', authenticate, async (req, res) => {
+  try {
+  /* ── Role gate ─────────────────────────────────────────────────────────── */
+  const role = req.user?.role;
+  if (role !== 'admin' && role !== 'media_buyer') {
+    return res.status(403).json({ error: 'غير مصرح لك بعرض لوحة التحليلات' });
+  }
+
+  const { startDate, endDate } = req.query;
+
+  console.log(`[DASHBOARD DEBUG] role=${role} user=${req.user?.id} range:`, startDate, endDate);
+
+  /* ── Order timestamp boundaries (Egypt TZ) ─────────────────────────────── */
+  /* NOTE: We filter on "createdAt" (when the order was placed), NOT "updatedAt".
+     "updatedAt" is auto-stamped by a trigger on every status change, so an order
+     created 30 days ago but confirmed today would appear in today's bucket when
+     filtered by "updatedAt" — collapsing the entire history into a single day.   */
+  const ordParams = [req.user.business_id];   // $1 = tenant
+  let ordFilter   = ` AND business_id = $1::integer`;
+  if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+    const offset = getEgyptOffset(startDate);
+    ordParams.push(`${startDate}T00:00:00${offset}`);
+    ordFilter += ` AND "createdAt" >= $${ordParams.length}::timestamptz`;
+  }
+  if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    const offset = getEgyptOffset(endDate);
+    ordParams.push(`${endDate}T23:59:59${offset}`);
+    ordFilter += ` AND "createdAt" <= $${ordParams.length}::timestamptz`;
+  }
+
+  /* ── Expense date boundaries — plain string params ($1 / $2) ────────────────
+     Both params are always present in the array; null when the bound is absent.
+
+     The SQL uses:
+       TO_CHAR(expense_date, 'YYYY-MM-DD') >= $1
+     instead of the type-cast form  expense_date >= $1::date.
+
+     Why string comparison?
+       • Completely timezone-independent — TO_CHAR produces 'YYYY-MM-DD' text
+         without any UTC-offset conversion.
+       • No risk of implicit DATE↔TIMESTAMPTZ coercion that can shift boundaries
+         by one day on servers whose TimeZone GUC differs from the client.
+       • $1 IS NULL (not $1::date IS NULL) — avoids cast failure on drivers that
+         send null as an untyped OID.
+       • 'YYYY-MM-DD' lexicographic order is identical to chronological order,
+         so string >= / <= behaves exactly like date >= / <=.                   */
+  const expParams = [
+    (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,
+    (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,
+  ];
+
+  /* ── Role-based scoping (multi-tenant) ──────────────────────────────────────
+     For a Media Buyer we restrict:
+       expenses → meta_account_id IN (their assigned account ids)   [$3 below]
+       orders   → SKU bridge: only orders whose product SKU (or ProductName
+                  fallback) is advertised by one of their assigned accounts.
+     For an Admin we leave both unscoped (expAccountIds = null, no order clause). */
+  let expAccountIds = null;   // $3 for both expense queries; null = no scope (admin)
+
+  if (role === 'media_buyer') {
+    /* 1. Resolve the accounts assigned to this Media Buyer (tenant-scoped). */
+    const accRes = await pool.query(
+      `SELECT id FROM meta_accounts WHERE assigned_user_id = $1 AND business_id = $2::integer`,
+      [req.user.id, req.user.business_id]
+    );
+    expAccountIds = accRes.rows.map((r) => r.id);
+
+    /* No accounts assigned → empty (but valid) dashboard, not an error. */
+    if (expAccountIds.length === 0) {
+      return res.json({
+        overview: {
+          total_orders: 0, total_confirmed: 0, total_delivered: 0,
+          total_rejected: 0, total_returned: 0, total_pending: 0,
+          total_revenue: 0, total_expenses: 0, meta_spend: 0,
+        },
+        daily_chart_stats: [], governorates_stats: [], rejection_reasons: [],
+        externalStats: await getExternalAffiliateStats(req.user.business_id),
+      });
+    }
+
+    /* 2. SKUs those accounts advertise (the bridge to orders). */
+    const skuRes = await pool.query(
+      `SELECT DISTINCT UPPER(sku) AS sku
+         FROM expenses
+        WHERE meta_account_id = ANY($1)
+          AND business_id = $2::integer
+          AND sku IS NOT NULL
+          AND sku NOT IN ('UNATTRIBUTED', '')`,
+      [expAccountIds, req.user.business_id]
+    );
+    const advertisedSkus = skuRes.rows.map((r) => r.sku);
+
+    /* 3. Product names for the ProductName fallback (legacy orders w/o sku). */
+    let advertisedNames = [];
+    if (advertisedSkus.length) {
+      const nameRes = await pool.query(
+        `SELECT DISTINCT UPPER(name) AS name FROM products WHERE UPPER(sku) = ANY($1) AND business_id = $2::integer`,
+        [advertisedSkus, req.user.business_id]
+      );
+      advertisedNames = nameRes.rows.map((r) => r.name);
+    }
+
+    /* 4. Append the order-scoping clause onto the shared ordFilter.
+       If the buyer advertises no SKUs yet there is nothing to show → 1=0. */
+    if (advertisedSkus.length === 0) {
+      ordFilter += ` AND 1=0`;
+    } else {
+      ordParams.push(advertisedSkus);
+      const skuIdx = ordParams.length;
+      ordParams.push(advertisedNames);
+      const nameIdx = ordParams.length;
+      ordFilter += ` AND (
+        ( COALESCE(sku, '') <> '' AND UPPER(sku) = ANY($${skuIdx}) )
+        OR
+        ( COALESCE(sku, '') = '' AND UPPER(COALESCE("ProductName", '')) = ANY($${nameIdx}) )
+      )`;
+    }
+  }
+
+  /* Expense scope param is ALWAYS $3 (null for admin → no-op via IS NULL OR). */
+  expParams.push(expAccountIds);
+  /* TENANT ISOLATION: business_id is ALWAYS $4 for both expense queries. */
+  expParams.push(req.user.business_id);
+
+  /* Inline ProductPrice parser (same as other endpoints) */
+  const P = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
+
+  /* ── 1. Overview: order counts + delivered revenue ── */
+  const overviewSql = `
+    SELECT
+      COUNT(id)                                                                       AS total_orders,
+      COUNT(id) FILTER (WHERE "Status" IN (
+        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
+      ))                                                                              AS total_confirmed,
+      COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل')                              AS total_delivered,
+      COUNT(id) FILTER (WHERE "Status" = 'تم الرفض')                                AS total_rejected,
+      COUNT(id) FILTER (WHERE "Status" IN ('جاري الإعادة','تم الإرجاع'))            AS total_returned,
+      COUNT(id) FILTER (WHERE "Status" IN ('جديد','لا يرد'))                       AS total_pending,
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0)       AS total_revenue
+    FROM orders
+    WHERE 1=1${ordFilter}
+  `;
+
+  /* ── 2. Expense totals (all + Meta-only + Meta purchase count) ──────────────
+     $1 = startDate::date, $2 = endDate::date  — hardcoded positions, NO dynamic
+     string interpolation.  IS NULL OR makes each bound optional:
+       • When the caller sends a date  → filters to that bound.
+       • When the param is null        → condition is TRUE (no bound applied).
+     total_expenses    = ALL expenses (manual + Meta) in the date window.
+     meta_spend        = only Meta-synced rows  (via FILTER).
+     meta_total_orders = SUM of meta_purchases from ALL meta-synced rows (FILTER).
+       ↳ Intentionally has NO "sku <> 'UNATTRIBUTED'" guard — purchases from
+         campaigns that could not be matched to a product SKU must still count
+         toward the Total Orders KPI.  Per-product attribution is handled
+         separately in the products-profitability CTE.                          */
+  const expSql = `
+    SELECT
+      COALESCE(SUM(amount),                                              0) AS total_expenses,
+      COALESCE(SUM(amount)         FILTER (WHERE meta_sync = true),      0) AS meta_spend,
+      COALESCE(SUM(meta_purchases) FILTER (WHERE meta_sync = true),      0) AS meta_total_orders
+    FROM expenses
+    WHERE business_id = $4::integer
+      AND ($1::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') >= $1)
+      AND ($2::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') <= $2)
+      AND ($3::int[] IS NULL OR meta_account_id = ANY($3))
+  `;
+
+  /* ── 3. Daily orders grouped by Egypt-local creation date ── */
+  /* Group on "createdAt" (when the order was placed).
+     We shift by +3h before casting to ::date — this converts the UTC-stored
+     TIMESTAMP to its Egypt-summer-time (EEST, UTC+3) calendar date without
+     requiring an IANA timezone-name lookup, which avoids a class of silent
+     errors on some hosted PostgreSQL configurations.
+     e.g. an order stored as 2026-05-24 22:30 UTC → +3h → 2026-05-25 01:30
+          → ::date → 2026-05-25  (correct Cairo date)                        */
+  /* TO_CHAR forces the date column into a plain 'YYYY-MM-DD' text value.
+     Without it the pg driver may return a JavaScript Date object (midnight UTC),
+     and serialising that with toISOString() in certain server timezones produces
+     the previous calendar day — causing the chart to shift one day to the left.  */
+  const dailySql = `
+    SELECT
+      TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD') AS stat_date,
+      COUNT(id)                                                        AS orders,
+      COUNT(id) FILTER (WHERE "Status" IN (
+        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
+      ))                                                               AS confirmed,
+      COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل')               AS delivered,
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0) AS revenue
+    FROM orders
+    WHERE 1=1${ordFilter}
+    GROUP BY TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
+    ORDER BY stat_date ASC
+  `;
+
+  /* ── 4. Daily Meta ad spend + Meta purchase count for chart ─────────────────
+     Uses the SAME $1 / $2 params as expSql above (expParams is shared).
+     TO_CHAR forces DATE → 'YYYY-MM-DD' text so the pg driver never returns a
+     JS Date object that would shift the day by one in some timezones.
+     meta_orders = SUM of meta_purchases only — NEVER falls back to ERP count.
+     IS NULL OR makes both date bounds optional (same semantics as expSql).      */
+  const dailyExpSql = `
+    SELECT
+      TO_CHAR(expense_date, 'YYYY-MM-DD')       AS stat_date,
+      COALESCE(SUM(amount),         0)          AS ads_spend,
+      COALESCE(SUM(meta_purchases), 0)          AS meta_orders
+    FROM expenses
+    WHERE meta_sync = true
+      AND business_id = $4::integer
+      AND ($1::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') >= $1)
+      AND ($2::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') <= $2)
+      AND ($3::int[] IS NULL OR meta_account_id = ANY($3))
+    GROUP BY TO_CHAR(expense_date, 'YYYY-MM-DD')
+    ORDER BY stat_date ASC
+  `;
+
+  /* ── 5. Governorates breakdown ── */
+  const govSql = `
+    SELECT
+      COALESCE(NULLIF(TRIM("City"),''), 'غير محدد')                               AS governorate,
+      COUNT(*)                                                                      AS total_orders,
+      COUNT(*) FILTER (WHERE "Status" IN (
+        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
+      ))                                                                            AS confirmed,
+      COUNT(*) FILTER (WHERE "Status" = 'تم التوصيل')                             AS delivered,
+      COUNT(*) FILTER (WHERE "Status" IN ('جاري الإعادة','تم الإرجاع'))           AS returned,
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0)     AS revenue
+    FROM orders
+    WHERE 1=1${ordFilter}
+    GROUP BY COALESCE(NULLIF(TRIM("City"),''), 'غير محدد')
+    ORDER BY delivered DESC, total_orders DESC
+    LIMIT 50
+  `;
+
+  /* ── 6. Rejection reasons ── */
+  const rejSql = `
+    SELECT
+      COALESCE(NULLIF(TRIM("rejectionReason"),''), 'غير محدد')   AS reason,
+      COUNT(*)                                                      AS count
+    FROM orders
+    WHERE "Status" = 'تم الرفض'${ordFilter}
+    GROUP BY COALESCE(NULLIF(TRIM("rejectionReason"),''), 'غير محدد')
+    ORDER BY count DESC
+    LIMIT 10
+  `;
+
+  /* Run all 6 queries concurrently.  Each has its own .catch() so a single
+     broken query (e.g. a missing column) returns an empty result set instead
+     of crashing the entire payload.  The exact failure is logged to the
+     backend terminal so you can identify which query went wrong.           */
+  const [ovRes, exRes, dayRes, dayExpRes, govRes, rejRes] = await Promise.all([
+    pool.query(overviewSql, ordParams).catch(err => {
+      console.error('[dashboard/overview]   QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [{ total_orders: 0, total_confirmed: 0, total_delivered: 0,
+                        total_rejected: 0, total_returned: 0, total_pending: 0,
+                        total_revenue: 0 }] };
+    }),
+    pool.query(expSql, expParams).catch(err => {
+      console.error('[dashboard/expenses]   QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [{ total_expenses: 0, meta_spend: 0, meta_total_orders: 0 }] };
+    }),
+    pool.query(dailySql, ordParams).catch(err => {
+      console.error('[dashboard/daily]      QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [] };
+    }),
+    pool.query(dailyExpSql, expParams).catch(err => {
+      console.error('[dashboard/daily-exp]  QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [] };
+    }),
+    pool.query(govSql, ordParams).catch(err => {
+      console.error('[dashboard/gov]        QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [] };
+    }),
+    pool.query(rejSql, ordParams).catch(err => {
+      console.error('[dashboard/rejection]  QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [] };
+    }),
+  ]);
+
+    /* ── Build overview ──
+       Defensive fallback: if either query result is somehow empty (should
+       never happen given the COALESCE + per-query .catch() above, but belt
+       and suspenders) substitute safe zero-objects so the rest of the build
+       never throws a "cannot read property of undefined" error.             */
+    const ov = ovRes.rows[0] ?? {
+      total_orders: 0, total_confirmed: 0, total_delivered: 0,
+      total_rejected: 0, total_returned: 0, total_pending: 0, total_revenue: 0,
+    };
+    const ex = exRes.rows[0] ?? { total_expenses: 0, meta_spend: 0, meta_total_orders: 0 };
+
+    const overview = {
+      /* total_orders = Meta-reported purchases (authoritative) — NOT the ERP row count.
+         Source: SUM(meta_purchases) FILTER (WHERE meta_sync = true) from expenses,
+         bounded strictly to the requested date window via hardcoded $1/$2 params.
+         REMOVED: metaDailyTotal fallback — it was summing dayExpRes.rows (potentially
+         the entire 30-day table when the filter was empty) and producing 1384 regardless
+         of the active date filter.  Now if meta_total_orders = 0 we show 0. */
+      total_orders:    parseInt(ex.meta_total_orders, 10) || 0,
+      total_confirmed: parseInt(ov.total_confirmed, 10) || 0,
+      total_delivered: parseInt(ov.total_delivered, 10) || 0,
+      total_rejected:  parseInt(ov.total_rejected,  10) || 0,
+      total_returned:  parseInt(ov.total_returned,  10) || 0,
+      total_pending:   parseInt(ov.total_pending,   10) || 0,
+      total_revenue:   parseFloat(parseFloat(ov.total_revenue  || 0).toFixed(2)),
+      total_expenses:  parseFloat(parseFloat(ex.total_expenses || 0).toFixed(2)),
+      meta_spend:      parseFloat(parseFloat(ex.meta_spend     || 0).toFixed(2)),
+    };
+
+    /* ── Build daily chart stats ──
+       Primary "orders" line = Meta-reported purchases (meta_orders) sourced from the
+       expenses table.  ERP order count is kept as "erp_orders" for pixel-efficiency.
+       We union all dates from both sources so days with ad spend but zero ERP orders
+       (or vice-versa) still appear in the chart.                                      */
+
+    /* TO_CHAR in the SQL guarantees stat_date is always a plain 'YYYY-MM-DD' string.
+       We keep the instanceof guard as a belt-and-suspenders safety net only.       */
+    const expByDate = new Map();
+    for (const row of dayExpRes.rows) {
+      const key = row.stat_date instanceof Date
+        ? row.stat_date.toISOString().split('T')[0]   // safety fallback (should not fire)
+        : String(row.stat_date);                       // always 'YYYY-MM-DD' via TO_CHAR
+      expByDate.set(key, {
+        ads_spend:   parseFloat(row.ads_spend)     || 0,
+        meta_orders: parseInt(row.meta_orders, 10) || 0,
+      });
+    }
+
+    const erpByDate = new Map();
+    for (const row of dayRes.rows) {
+      const key = row.stat_date instanceof Date
+        ? row.stat_date.toISOString().split('T')[0]   // safety fallback
+        : String(row.stat_date);                       // always 'YYYY-MM-DD' via TO_CHAR
+      erpByDate.set(key, {
+        erp_orders: parseInt(row.orders,    10) || 0,
+        confirmed:  parseInt(row.confirmed, 10) || 0,
+        delivered:  parseInt(row.delivered, 10) || 0,
+        revenue:    parseFloat(row.revenue)     || 0,
+      });
+    }
+
+    /* Union of all dates from Meta expenses AND ERP orders, sorted ascending */
+    const allDates = Array.from(new Set([...expByDate.keys(), ...erpByDate.keys()])).sort();
+    const daily_chart_stats = allDates.map((dateKey) => {
+      /* IMPORTANT: when a date exists only in ERP (no Meta expense row), the
+         default object supplies meta_orders = 0, NOT erp_orders.  This is
+         intentional — we never substitute ERP orders for Meta orders, so the
+         "Total Orders" line on the chart stays strictly Meta-sourced.          */
+      const exp = expByDate.get(dateKey) ?? { ads_spend: 0, meta_orders: 0 };
+      const erp = erpByDate.get(dateKey) ?? { erp_orders: 0, confirmed: 0, delivered: 0, revenue: 0 };
+      return {
+        date:       dateKey,
+        orders:     exp.meta_orders,    // ← strictly Meta purchases; NEVER falls back to erp_orders
+        erp_orders: erp.erp_orders,     // ← ERP count kept separately for pixel-efficiency only
+        confirmed:  erp.confirmed,
+        delivered:  erp.delivered,
+        revenue:    parseFloat(erp.revenue.toFixed(2)),
+        ads_spend:  parseFloat(exp.ads_spend.toFixed(2)),
+      };
+    });
+
+    /* ── Build governorates stats ── */
+    const governorates_stats = govRes.rows.map((row) => ({
+      governorate:  row.governorate,
+      total_orders: parseInt(row.total_orders, 10) || 0,
+      confirmed:    parseInt(row.confirmed,    10) || 0,
+      delivered:    parseInt(row.delivered,    10) || 0,
+      returned:     parseInt(row.returned,     10) || 0,
+      revenue:      parseFloat(row.revenue)        || 0,
+    }));
+
+    /* ── Build rejection reasons ── */
+    const rejection_reasons = rejRes.rows.map((row) => ({
+      reason: row.reason,
+      count:  parseInt(row.count, 10) || 0,
+    }));
+
+    /* ── External Affiliate Networks (affiliate-plan exclusive) ──────────────
+       Pulls Taager / Safqa revenue when the tenant has saved API keys. Mock
+       service for now; resolves to zeros when no keys are configured, so this
+       is always safe to include in the payload for any plan. */
+    const externalStats = await getExternalAffiliateStats(req.user.business_id);
+
+    res.json({ overview, daily_chart_stats, governorates_stats, rejection_reasons, externalStats });
+
+  } catch (error) {
+    /* Log the FULL error object so PostgreSQL detail / hint are visible in the terminal */
+    console.error('[Dashboard API Error]:', error);
+    return res.status(500).json({
+      error:   'Failed to fetch dashboard data',
+      details: error.message,
+    });
+  }
+});
+
+module.exports = router;
