@@ -19,6 +19,25 @@ Promise.all(saasMigrations.map((sql) => pool.query(sql)))
   .then(() => console.log('✅  Auth: SaaS multi-tenant schema ready'))
   .catch((err) => console.error('⚠️  Auth SaaS migration failed:', err.message));
 
+/* ── Email-verification (OTP) columns + one-time grandfather ──────────────────
+   Runs SEQUENTIALLY so the backfill never executes before the columns exist.
+   Crucially, every EXISTING account (no pending OTP) is marked verified so the
+   new login gate can NEVER lock out current users/owners. Only brand-new staff
+   (who are created WITH an otp_code) start unverified and get challenged.      */
+(async () => {
+  try {
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_code       VARCHAR(6)`);
+    await pool.query(
+      `UPDATE users SET email_verified = true
+        WHERE email_verified IS NOT TRUE AND otp_code IS NULL`
+    );
+    console.log('✅  Auth: email-verification columns ready (existing users grandfathered)');
+  } catch (err) {
+    console.warn('⚠️  Auth email-verification migration skipped:', err.message);
+  }
+})();
+
 const VALID_PLANS = ['affiliate', 'ecommerce'];
 
 // Lazy-initialised so the app still starts if the vars are absent
@@ -82,36 +101,41 @@ router.post('/login', async (req, res) => {
 
     // ── 2. Try local bcrypt verification first ────────────────────────
     const isSupabaseManaged = user?.password_hash === 'SUPABASE_AUTH_MANAGED';
-    const localPasswordOk   =
+    let authOk =
       user && !isSupabaseManaged && (await bcrypt.compare(password, user.password_hash));
-
-    if (localPasswordOk) {
-      // Fast path — regular local user
-      return res.json({
-        token : signToken(user),
-        user  : publicUser(user),
-      });
-    }
 
     // ── 3. Fall back to Supabase Auth ─────────────────────────────────
     //    Triggered when:
     //      a) password_hash === 'SUPABASE_AUTH_MANAGED'  (explicit sentinel), OR
     //      b) local check failed but the user record still exists (safety net)
-    if (user) {
+    if (!authOk && user) {
       const { data: sbData, error: sbError } = await getSupabase()
         .auth.signInWithPassword({ email, password });
-
-      if (!sbError && sbData?.user) {
-        // Supabase confirmed the credentials — issue our own JWT
-        return res.json({
-          token : signToken(user),
-          user  : publicUser(user),
-        });
-      }
+      if (!sbError && sbData?.user) authOk = true;
     }
 
-    // ── 4. Both paths failed ──────────────────────────────────────────
-    return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
+    // ── 4. Reject bad credentials ─────────────────────────────────────
+    if (!authOk) {
+      return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
+    }
+
+    // ── 5. Email-verification gate ────────────────────────────────────
+    //    Only challenge users who are unverified AND have a pending OTP
+    //    (i.e. newly-created staff). Existing users/owners were grandfathered
+    //    at boot, so they pass straight through — no lockout.
+    if (!user.email_verified && user.otp_code) {
+      return res.status(403).json({
+        requires_otp: true,
+        email:        user.email,
+        message:      'يرجى تأكيد بريدك الإلكتروني عبر الرمز المُرسَل إلى بريدك.',
+      });
+    }
+
+    // ── 6. Success — issue JWT ────────────────────────────────────────
+    return res.json({
+      token: signToken(user),
+      user:  publicUser(user),
+    });
 
   } catch (err) {
     console.error('Login error:', err);
@@ -157,8 +181,8 @@ router.post('/register', async (req, res) => {
     const business = bpRes.rows[0];
 
     const userRes = await client.query(
-      `INSERT INTO users (email, password_hash, role, business_id, permissions)
-       VALUES ($1, $2, 'admin', $3, $4)
+      `INSERT INTO users (email, password_hash, role, business_id, permissions, email_verified)
+       VALUES ($1, $2, 'admin', $3, $4, true)
        RETURNING id, email, role, permissions, business_id`,
       [email, password_hash, business.id, ['orders', 'analytics', 'inventory']]
     );
@@ -178,6 +202,56 @@ router.post('/register', async (req, res) => {
     res.status(500).json({ error: 'تعذّر إنشاء الحساب، حاول مرة أخرى' });
   } finally {
     client.release();
+  }
+});
+
+/* ── POST /api/auth/verify-otp ────────────────────────────────────────────────
+   Body: { email, otp }. Confirms the 6-digit code sent to a newly-created staff
+   member, flips email_verified=true, clears the code, and returns a normal login
+   payload (token + user) so the client proceeds straight to the dashboard.     */
+router.post('/verify-otp', async (req, res) => {
+  const rawEmail = (req.body?.email || '').trim().toLowerCase();
+  const otp      = String(req.body?.otp || '').trim();
+
+  if (!rawEmail || !otp) {
+    return res.status(400).json({ error: 'البريد الإلكتروني والرمز مطلوبان' });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT u.*, bp.plan_type AS plan_type
+         FROM users u
+         LEFT JOIN business_profile bp ON bp.id = u.business_id
+        WHERE u.email = $1`,
+      [rawEmail]
+    );
+    const user = result.rows[0];
+
+    // Generic error — never reveal whether the email exists.
+    if (!user) return res.status(400).json({ error: 'رمز التحقق غير صحيح' });
+
+    // Idempotent: already verified → just issue a token.
+    if (user.email_verified) {
+      return res.json({ token: signToken(user), user: publicUser(user) });
+    }
+
+    if (!user.otp_code || String(user.otp_code) !== otp) {
+      return res.status(400).json({ error: 'رمز التحقق غير صحيح' });
+    }
+
+    await pool.query(
+      `UPDATE users SET email_verified = true, otp_code = NULL WHERE id = $1`,
+      [user.id]
+    );
+
+    const verifiedUser = { ...user, email_verified: true, otp_code: null };
+    return res.json({
+      token: signToken(verifiedUser),
+      user:  publicUser(verifiedUser),
+    });
+  } catch (err) {
+    console.error('verify-otp error:', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
 

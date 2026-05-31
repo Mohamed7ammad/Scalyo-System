@@ -6,6 +6,12 @@ const AGENT_ALLOWED_FIELDS = new Set([
   'ProductName',
   'PostponedDate',
   'rejectionReason',  // sent alongside Status='تم الرفض' from the rejection picker modal
+  // Quick-edit customer / shipping details — agents fix customer typos
+  // (wrong phone, missing detailed address, etc.) from the orders table.
+  'FullName',
+  'Phone',
+  'City',
+  'Address',
 ]);
 
 function requireAdmin(req, res, next) {

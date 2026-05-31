@@ -170,6 +170,154 @@ router.post('/auto-distribute', authenticate, requireAdmin, async (req, res) => 
   }
 });
 
+/* ── Largest-remainder (Hamilton) apportionment ──────────────────────────────
+   Splits `total` into integer counts proportional to `weights` (percentages),
+   guaranteeing the counts sum EXACTLY to `total`. e.g. 10 with [33,33,34] → [3,3,4].
+   The leftover units go to the agents with the largest fractional parts.        */
+function apportion(total, weights) {
+  const raw  = weights.map((w) => (total * w) / 100);
+  const base = raw.map(Math.floor);
+  const used = base.reduce((a, b) => a + b, 0);
+  let remainder = total - used;
+
+  /* Hand out the remaining units to the largest fractional parts first. */
+  const order = raw
+    .map((v, i) => ({ i, frac: v - base[i] }))
+    .sort((a, b) => b.frac - a.frac);
+
+  const counts = [...base];
+  for (let k = 0; remainder > 0 && k < order.length; k++, remainder--) {
+    counts[order[k].i] += 1;
+  }
+  return counts;
+}
+
+/* ── POST /api/orders/distribute — admin only ────────────────────────────────
+   Distributes ALL 'جديد' orders across agents, either equally or by custom %.
+   Body:
+     { mode: 'equal' }                                  → split evenly across
+                                                           present, active agents
+     { mode: 'custom', allocations: [{ agentId, percentage }, …] }
+                                                        → exact %-based split
+                                                          (percentages must sum to 100)
+   The backend owns the math (atomic, no order IDs round-tripped to the client). */
+router.post('/distribute', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  const mode = req.body?.mode === 'custom' ? 'custom' : 'equal';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    /* 1. All pending 'جديد' orders for this tenant, stable order. */
+    const ordRes = await client.query(
+      `SELECT id FROM orders WHERE "Status" = 'جديد' AND business_id = $1 ORDER BY id ASC`,
+      [businessId]
+    );
+    const orderIds = ordRes.rows.map((r) => r.id);
+    if (orderIds.length === 0) {
+      await client.query('ROLLBACK');
+      return res.json({ message: 'لا توجد طلبات بحالة جديد', distributed: 0, breakdown: [] });
+    }
+
+    /* 2. Resolve the target agents + their weights. */
+    let targets;   // [{ email, weight }]
+    if (mode === 'custom') {
+      const allocations = Array.isArray(req.body.allocations) ? req.body.allocations : [];
+      if (allocations.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'لم يتم تحديد نسب التوزيع' });
+      }
+
+      /* Validate percentages sum to exactly 100 (integers). */
+      const sum = allocations.reduce((s, a) => s + (Number(a.percentage) || 0), 0);
+      if (Math.round(sum) !== 100) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `مجموع النسب يجب أن يساوي 100% (الحالي: ${sum}%)` });
+      }
+
+      /* Map each agentId → email, scoped to active agents in this tenant.
+         users.id is VARCHAR in this DB (auth UUIDs), so compare as text — NOT
+         int[] (which throws "invalid input syntax for integer" / type mismatch). */
+      const ids = allocations.map((a) => String(a.agentId));
+      const usersRes = await client.query(
+        `SELECT id, email FROM users
+          WHERE id::text = ANY($1::text[]) AND role = 'agent'
+            AND COALESCE(is_active, true) = true AND business_id = $2`,
+        [ids, businessId]
+      );
+      const emailById = new Map(usersRes.rows.map((u) => [String(u.id), u.email]));
+
+      targets = allocations
+        .map((a) => ({ email: emailById.get(String(a.agentId)), weight: Number(a.percentage) || 0 }))
+        .filter((t) => t.email && t.weight > 0);   // drop unknown agents / 0%
+
+      if (targets.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'لا يوجد موظفون صالحون في نسب التوزيع' });
+      }
+    } else {
+      /* Equal mode — present, active agents share evenly. */
+      const agentsRes = await client.query(
+        `SELECT email FROM users
+          WHERE role = 'agent' AND COALESCE(is_active, true) = true
+            AND COALESCE(is_absent, false) = false AND business_id = $1
+          ORDER BY id ASC`,
+        [businessId]
+      );
+      if (agentsRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'لا يوجد موظفون حاضرون لتوزيع الطلبات عليهم' });
+      }
+      const equalWeight = 100 / agentsRes.rows.length;
+      targets = agentsRes.rows.map((r) => ({ email: r.email, weight: equalWeight }));
+    }
+
+    /* 3. Exact integer counts via largest-remainder. */
+    const counts = apportion(orderIds.length, targets.map((t) => t.weight));
+
+    /* 4. Assign sequential slices of the order list to each agent. */
+    let cursor = 0;
+    const breakdown = [];
+    for (let t = 0; t < targets.length; t++) {
+      const slice = orderIds.slice(cursor, cursor + counts[t]);
+      cursor += counts[t];
+      if (slice.length > 0) {
+        await client.query(
+          /* Re-assert "Status" = 'جديد' on the UPDATE so a processed order
+             (confirmed / rejected / shipped …) can NEVER be reassigned, even if
+             its status changed between the SELECT above and this write. */
+          `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+            WHERE id = ANY($2::int[]) AND business_id = $3 AND "Status" = 'جديد'`,
+          [targets[t].email, slice, businessId]
+        );
+      }
+      breakdown.push({ email: targets[t].email, count: slice.length });
+    }
+
+    await client.query('COMMIT');
+    console.log(`[Distribute] ✅ ${mode} — ${orderIds.length} orders → ${targets.length} agents`);
+
+    res.json({
+      message:     `تم توزيع ${orderIds.length} طلب على ${targets.length} موظف`,
+      distributed: orderIds.length,
+      mode,
+      breakdown,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    /* Full PostgreSQL detail in the terminal for diagnosis. */
+    console.error('[distribute] Transaction error:');
+    console.error('  message:', err.message);
+    console.error('  detail: ', err.detail ?? '—');
+    console.error('  hint:   ', err.hint   ?? '—');
+    console.error(err);
+    res.status(500).json({ error: 'فشل التوزيع', details: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 /* ── POST /api/orders/transfer — admin only ──────────────────────────────────
    Transfers a specific set of order IDs to a target agent (identified by DB
    user id).  Looks up the agent's email and updates AssignedTo for each row.  */
@@ -210,6 +358,35 @@ router.post('/transfer', authenticate, requireAdmin, async (req, res) => {
     });
   } catch (err) {
     console.error('[transfer]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── Bulk delete — admin only ───────────────────────────────────────────────
+   Deletes many orders in ONE query. Strictly tenant-scoped (business_id) so a
+   tenant can never delete another tenant's rows. Registered BEFORE DELETE /:id
+   so the literal "/bulk" path is matched first (Express matches in order).    */
+router.delete('/bulk', authenticate, requireAdmin, async (req, res) => {
+  const { ids } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids (array) مطلوب' });
+  }
+  /* Coerce to integers and drop anything non-numeric — defends the int[] cast. */
+  const cleanIds = ids.map((n) => parseInt(n, 10)).filter(Number.isInteger);
+  if (cleanIds.length === 0) {
+    return res.status(400).json({ error: 'لا توجد معرّفات صالحة للحذف' });
+  }
+
+  try {
+    const result = await pool.query(
+      'DELETE FROM orders WHERE id = ANY($1::int[]) AND business_id = $2 RETURNING id',
+      [cleanIds, req.user.business_id]
+    );
+    console.log(`[Bulk Delete] 🗑️  ${result.rows.length} order(s) deleted for tenant ${req.user.business_id}`);
+    res.json({ message: `تم حذف ${result.rows.length} طلب`, deleted: result.rows.length });
+  } catch (err) {
+    console.error('[bulk-delete]', err);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });

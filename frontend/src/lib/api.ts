@@ -66,6 +66,17 @@ export type AdminUpdate = Partial<Omit<Order, 'id' | 'createdAt'>>;
 export const login = (email: string, password: string) =>
   api.post<{ token: string; user: User }>('/api/auth/login', { email, password });
 
+/** Shape returned (HTTP 403) when the account must verify its email via OTP. */
+export interface RequiresOtp {
+  requires_otp: true;
+  email:        string;
+  message:      string;
+}
+
+/** Verify the 6-digit OTP for an unverified staff account → returns login payload. */
+export const verifyOtp = (email: string, otp: string) =>
+  api.post<{ token: string; user: User }>('/api/auth/verify-otp', { email, otp });
+
 export interface RegisterPayload {
   email:      string;
   password:   string;
@@ -85,6 +96,10 @@ export const updateOrder = (id: number, data: AgentUpdate | AdminUpdate) =>
 export const deleteOrder = (id: number) =>
   api.delete(`/api/orders/${id}`);
 
+/** Bulk-delete orders by id. Admin only. Tenant-scoped server-side. */
+export const bulkDeleteOrders = (ids: number[]) =>
+  api.delete<{ message: string; deleted: number }>('/api/orders/bulk', { data: { ids } });
+
 export const bulkTransfer = (fromAgent: string, toAgent: string) =>
   api.post<{ message: string; transferred: number }>('/api/orders/bulk-transfer', { fromAgent, toAgent });
 
@@ -99,6 +114,32 @@ export interface TransferResult {
   transferred: number;
   targetEmail: string;
 }
+
+/* ── Flexible order distribution (equal or custom %) ─────────────────────────── */
+export interface DistributionAllocation {
+  agentId:    number;
+  percentage: number;   // 0–100; for custom mode the set must sum to exactly 100
+}
+
+export interface DistributeResult {
+  message:     string;
+  distributed: number;
+  mode:        'equal' | 'custom';
+  breakdown:   { email: string; count: number }[];
+}
+
+/**
+ * Distribute all 'جديد' orders across agents. The backend owns the exact math
+ * (largest-remainder), so counts always sum precisely to the order total.
+ *   • Equal  → distributeOrders('equal')
+ *   • Custom → distributeOrders('custom', [{ agentId, percentage }, …])
+ * Admin only.
+ */
+export const distributeOrders = (
+  mode: 'equal' | 'custom',
+  allocations?: DistributionAllocation[],
+) =>
+  api.post<DistributeResult>('/api/orders/distribute', { mode, allocations });
 
 /** Distribute all unassigned 'جديد' orders evenly across present agents. */
 export const autoDistributeOrders = () =>
@@ -282,6 +323,10 @@ export const updateStaff = (id: number, data: UpdateStaffPayload) =>
 
 export const toggleAttendance = (id: number, isAbsent: boolean) =>
   api.post<ToggleAttendanceResult>(`/api/staff/${id}/toggle-attendance`, { isAbsent });
+
+/** Delete a staff member. Admin only. Server protects self + founding admin. */
+export const deleteStaff = (id: number) =>
+  api.delete<{ message: string; id: string }>(`/api/staff/${id}`);
 
 /* ── Purchase History ────────────────────────────────────────────── */
 export interface PurchaseHistoryItem {

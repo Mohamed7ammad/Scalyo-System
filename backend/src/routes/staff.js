@@ -3,6 +3,13 @@ const bcrypt       = require('bcryptjs');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
+const { sendWelcomeOTP } = require('../utils/mailer');
+const { checkAndSendStaffAlerts } = require('../services/alerts');
+
+/** Cryptographically-simple 6-digit OTP as a zero-padded string. */
+function generateOTP() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
 
 const router = express.Router();
 
@@ -23,6 +30,9 @@ const migrations = [
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS comm_delivered  NUMERIC(10,2) DEFAULT 0`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS comm_rejected   NUMERIC(10,2) DEFAULT 0`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS comm_no_answer  NUMERIC(10,2) DEFAULT 0`,
+  /* ── Email verification (OTP) ── */
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified  BOOLEAN       DEFAULT false`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_code        VARCHAR(6)`,
 ];
 
 migrations.forEach((sql) =>
@@ -100,17 +110,21 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
   const perms = Array.isArray(permissions) && permissions.length > 0
     ? permissions : ['orders'];
 
+  const cleanEmail = email.trim().toLowerCase();
+  const otp = generateOTP();   // 6-digit verification code
+
   try {
     const password_hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
       `INSERT INTO users
          (name, email, password_hash, role, is_active, is_absent,
-          permissions, commission_rate, comm_confirmed, comm_delivered, comm_rejected, comm_no_answer, business_id)
-       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,$11)
+          permissions, commission_rate, comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
+          email_verified, otp_code, business_id)
+       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,false,$11,$12)
        ${RETURNING}`,
       [
         name.trim() || null,
-        email.trim().toLowerCase(),
+        cleanEmail,
         password_hash,
         role,
         perms,
@@ -119,10 +133,16 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
         parseFloat(comm_delivered)  || 0,
         parseFloat(comm_rejected)   || 0,
         parseFloat(comm_no_answer)  || 0,
+        otp,                       // $11 — stored OTP
         req.user.business_id,
       ]
     );
-    res.status(201).json(result.rows[0]);
+
+    /* Fire the welcome OTP email — best-effort, never blocks/breaks creation.
+       (Awaited so we can surface delivery status, but mailer never throws.) */
+    const mail = await sendWelcomeOTP(cleanEmail, otp);
+
+    res.status(201).json({ ...result.rows[0], email_sent: mail.sent });
   } catch (err) {
     console.error('[POST /staff]', err);
     if (err.code === '23505')
@@ -187,6 +207,79 @@ router.patch('/:id', authenticate, requireAdmin, async (req, res) => {
     console.error('[PATCH /staff/:id]', err);
     if (err.code === '23505')
       return res.status(409).json({ error: 'البريد الإلكتروني مستخدم بالفعل' });
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── POST /api/staff/trigger-alerts ──────────────────────────────────────────
+   Admin-only manual trigger for the delayed-orders alert flow — lets an admin
+   test instantly without waiting for the 12-hour cron.                         */
+router.post('/trigger-alerts', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await checkAndSendStaffAlerts();
+    if (result.error) {
+      return res.status(500).json({ success: false, error: result.error });
+    }
+    res.json({ success: true, alerted_staff_count: result.alerted_staff_count });
+  } catch (err) {
+    console.error('[POST /staff/trigger-alerts]', err);
+    res.status(500).json({ success: false, error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── DELETE /api/staff/:id ───────────────────────────────────────────────────
+   Hard-deletes a staff member. Safe because:
+     • orders."AssignedTo" is a loose email string (no FK) — we NULL it first so
+       no orphaned assignment lingers.
+     • meta_accounts.assigned_user_id is ON DELETE SET NULL (handled by the DB).
+   Guards against lockout:
+     • cannot delete your own account.
+     • cannot delete the tenant's founding admin (earliest-created admin = owner).
+   Strictly tenant-scoped (business_id) throughout.                            */
+router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
+  const { id }     = req.params;
+  const businessId = req.user.business_id;
+
+  try {
+    /* 1. Resolve the target within the caller's tenant. */
+    const { rows } = await pool.query(
+      `SELECT id, email, role FROM users WHERE id = $1 AND business_id = $2`,
+      [id, businessId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الموظف غير موجود' });
+    const target = rows[0];
+
+    /* 2. Never let an admin delete themselves (prevents self-lockout). */
+    if (String(target.id) === String(req.user.id)) {
+      return res.status(403).json({ error: 'لا يمكنك حذف حسابك الخاص' });
+    }
+
+    /* 3. Protect the tenant's founding admin (the system owner). */
+    const { rows: ownerRows } = await pool.query(
+      `SELECT id FROM users
+        WHERE business_id = $1 AND role = 'admin'
+        ORDER BY created_at ASC NULLS FIRST, id ASC
+        LIMIT 1`,
+      [businessId]
+    );
+    const ownerId = ownerRows[0]?.id;
+    if (ownerId != null && String(ownerId) === String(target.id)) {
+      return res.status(403).json({ error: 'لا يمكن حذف حساب المدير الرئيسي للنظام' });
+    }
+
+    /* 4. Unassign their orders (AssignedTo holds the email). */
+    await pool.query(
+      `UPDATE orders SET "AssignedTo" = NULL WHERE "AssignedTo" = $1 AND business_id = $2`,
+      [target.email, businessId]
+    );
+
+    /* 5. Hard delete. */
+    await pool.query(`DELETE FROM users WHERE id = $1 AND business_id = $2`, [id, businessId]);
+
+    console.log(`[Staff Delete] 🗑️  ${target.email} (${id}) removed from tenant ${businessId}`);
+    res.json({ message: 'تم حذف الموظف بنجاح', id });
+  } catch (err) {
+    console.error('[DELETE /staff/:id]', err);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });

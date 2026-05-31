@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation';
 import {
   getOrders, updateOrder, deleteOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
-  getStaff, autoDistributeOrders, transferOrders, getBulkAwb,
+  getStaff, distributeOrders, transferOrders, bulkDeleteOrders, getBulkAwb,
+  DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
   BostaFollowUps, BostaFollowUpOrder,
@@ -18,6 +19,12 @@ const getShortName = (name?: string) => {
   if (!name) return '';
   return name.trim().split(/\s+/).slice(0, 3).join(' ');
 };
+
+/* Normalise an order status for comparison — guards against hidden whitespace
+   and Unicode-normalisation differences between the DB value and the UI literals
+   (e.g. a stray RTL mark or NFC/NFD mismatch). Used by BOTH the status filter
+   and the pill/stat counts so they can never diverge. */
+const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
 
 interface Toast { message: string; type: 'success' | 'error' }
 
@@ -83,10 +90,15 @@ export default function DashboardPage() {
   /* ── Staff / routing state ───────────────────────────────────── */
   const [staff,         setStaff]         = useState<StaffMember[]>([]);
   const [distributing,  setDistributing]  = useState(false);
+  /* Distribution modal */
+  const [showDistModal, setShowDistModal] = useState(false);
+  const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
+  const [distPercents,  setDistPercents]  = useState<Record<number, string>>({});
   const [selectedIds,   setSelectedIds]   = useState<number[]>([]);   // bulk checkbox selection
   const [showXferModal, setShowXferModal] = useState(false);
   const [xferTargetId,  setXferTargetId]  = useState<number | ''>('');
   const [xferSaving,    setXferSaving]    = useState(false);
+  const [bulkDeleting,  setBulkDeleting]  = useState(false);
 
   /* ── Auth guard ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -261,25 +273,32 @@ export default function DashboardPage() {
     }
   };
 
-  /* ── Auto-distribute ────────────────────────────────────────── */
-  const handleAutoDistribute = async () => {
+  /* ── Distribute orders (equal or custom %) ──────────────────── */
+  const handleConfirmDistribute = async () => {
     setDistributing(true);
     try {
-      const res = await autoDistributeOrders();
-      const { distributed, agentsCount } = res.data;
+      let res;
+      if (distMode === 'custom') {
+        const allocations: DistributionAllocation[] = activeAgentsForDist.map((a) => ({
+          agentId:    a.id,
+          percentage: Number(distPercents[a.id] ?? 0) || 0,
+        }));
+        res = await distributeOrders('custom', allocations);
+      } else {
+        res = await distributeOrders('equal');
+      }
+      const { distributed } = res.data;
       if (distributed === 0) {
         showToast('لا توجد طلبات غير موزعة حالياً', 'error');
       } else {
-        showToast(
-          `تم توزيع ${distributed} طلب بالتساوي على ${agentsCount} موظف حاضر بنجاح! 🎉`,
-          'success'
-        );
+        showToast(`تم توزيع ${distributed} طلب بنجاح! 🎉`, 'success');
         await fetchOrders();
       }
+      setShowDistModal(false);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'فشل التوزيع التلقائي';
+        'فشل التوزيع';
       showToast(msg, 'error');
     } finally {
       setDistributing(false);
@@ -508,10 +527,54 @@ export default function DashboardPage() {
     }
   };
 
+  /* ── Bulk delete (selected orders) ───────────────────────────── */
+  const handleBulkDelete = async () => {
+    if (!selectedIds.length || bulkDeleting) return;
+    if (!window.confirm('هل أنت متأكد من حذف الطلبات المحددة نهائياً؟')) return;
+
+    setBulkDeleting(true);
+    try {
+      const res = await bulkDeleteOrders(selectedIds);
+      const idSet = new Set(selectedIds);
+      setOrders((prev) => prev.filter((o) => !idSet.has(o.id)));
+      showToast(`تم حذف ${res.data.deleted} طلب بنجاح`, 'success');
+      setSelectedIds([]);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل حذف الطلبات';
+      showToast(msg, 'error');
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   /* ── Present agents (for transfer modal dropdown) ───────────── */
   const presentAgents = staff.filter(
     (m) => m.role === 'agent' && m.is_active && !m.is_absent
   );
+
+  /* ── Distribution: active agents + live percentage sum ───────── */
+  const activeAgentsForDist = staff.filter((m) => m.role === 'agent' && m.is_active);
+  const distSum = activeAgentsForDist.reduce(
+    (s, a) => s + (Number(distPercents[a.id] ?? 0) || 0), 0
+  );
+
+  /* Open the distribution modal — seed an equal split as a sensible default. */
+  const openDistModal = () => {
+    setDistMode('equal');
+    const n = activeAgentsForDist.length;
+    const seed: Record<number, string> = {};
+    if (n > 0) {
+      const base = Math.floor(100 / n);
+      let rem = 100 - base * n;
+      activeAgentsForDist.forEach((a) => {
+        seed[a.id] = String(base + (rem-- > 0 ? 1 : 0));
+      });
+    }
+    setDistPercents(seed);
+    setShowDistModal(true);
+  };
 
   /* ── Role-based privacy fence ────────────────────────────────── */
   // This is the ONLY place that enforces visibility.
@@ -555,6 +618,19 @@ export default function DashboardPage() {
       ? agentFiltered
       : agentFiltered.filter((o) => getShortName(o.ProductName) === activeProduct);
 
+  // 2.5 Date scope — applied BEFORE status/search so every stat, pill count, and
+  //     the table all reflect the selected day range. Timezone-safe (local day).
+  const isInDateRange = (o: Order): boolean => {
+    if (!startDate && !endDate) return true;
+    const day = new Date(o.createdAt);
+    if (Number.isNaN(day.getTime())) return false;     // unparseable → excluded when filtering
+    const orderDay = day.toLocaleDateString('en-CA');  // 'YYYY-MM-DD' in local time
+    if (startDate && orderDay < startDate) return false;
+    if (endDate   && orderDay > endDate)   return false;
+    return true;
+  };
+  const dateScoped = productFiltered.filter(isInDateRange);
+
   // 3a. Helper — true when a postponed order needs re-confirmation within 3 days
   const needsReconfirmation = (o: Order): boolean => {
     if (o.Status !== 'مؤجل' || !o.PostponedDate) return false;
@@ -581,15 +657,10 @@ export default function DashboardPage() {
         (a, b) => new Date(a.PostponedDate!).getTime() - new Date(b.PostponedDate!).getTime()
       );
     }
-    return productFiltered
-      .filter((o) => activeFilter === 'الكل' || o.Status === activeFilter)
-      .filter((o) => {
-        if (!startDate && !endDate) return true;
-        const d = new Date(o.createdAt);
-        if (startDate && d < new Date(startDate))             return false;
-        if (endDate   && d > new Date(endDate + 'T23:59:59')) return false;
-        return true;
-      });
+    // Build on the date-scoped set so the table matches the date-aware counts.
+    return dateScoped.filter(
+      (o) => activeFilter === 'الكل' || normStatus(o.Status) === normStatus(activeFilter)
+    );
   })();
 
   // 4. Search — final layer; composable on top of every other filter
@@ -605,13 +676,13 @@ export default function DashboardPage() {
 
   /* ── Stats (product scope so tabs affect cards) ──────────────── */
   const stats = {
-    total:     productFiltered.length,
-    new:       productFiltered.filter((o) => o.Status === 'جديد').length,
-    confirmed: productFiltered.filter((o) => o.Status === 'تم التأكيد').length,
-    rejected:  productFiltered.filter((o) => o.Status === 'تم الرفض').length,
-    postponed: productFiltered.filter((o) => o.Status === 'مؤجل').length,
-    noAnswer:  productFiltered.filter((o) => o.Status === 'لا يرد').length,
-    shipped:   productFiltered.filter((o) => o.Status === 'تم الشحن').length,
+    total:     dateScoped.length,
+    new:       dateScoped.filter((o) => normStatus(o.Status) === 'جديد').length,
+    confirmed: dateScoped.filter((o) => normStatus(o.Status) === 'تم التأكيد').length,
+    rejected:  dateScoped.filter((o) => normStatus(o.Status) === 'تم الرفض').length,
+    postponed: dateScoped.filter((o) => normStatus(o.Status) === 'مؤجل').length,
+    noAnswer:  dateScoped.filter((o) => normStatus(o.Status) === 'لا يرد').length,
+    shipped:   dateScoped.filter((o) => normStatus(o.Status) === 'تم الشحن').length,
   };
   const pct = (n: number) =>
     stats.total ? Math.round((n / stats.total) * 100) : 0;
@@ -798,6 +869,154 @@ export default function DashboardPage() {
                 </button>
               ))}
 
+            </div>
+          </div>
+        )}
+
+        {/* ── Distribution Modal (equal / custom %) ─────────────────── */}
+        {showDistModal && (
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={(e) => e.target === e.currentTarget && !distributing && setShowDistModal(false)}
+          >
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
+              border border-slate-200 dark:border-slate-700/60 w-full max-w-md flex flex-col max-h-[90vh]" dir="rtl">
+
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-6 pb-4 border-b border-slate-100 dark:border-slate-800">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white leading-tight">توزيع الطلبات</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    توزيع الطلبات الجديدة (<span className="font-semibold">{stats.new}</span>) على الموظفين
+                  </p>
+                </div>
+                <button onClick={() => setShowDistModal(false)} disabled={distributing}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200
+                    hover:bg-slate-100 dark:hover:bg-slate-800 transition disabled:opacity-40" aria-label="إغلاق">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Mode tabs */}
+              <div className="px-6 pt-4">
+                <div className="flex gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
+                  {([
+                    { v: 'equal',  label: 'توزيع بالتساوي' },
+                    { v: 'custom', label: 'توزيع مخصص (%)' },
+                  ] as { v: 'equal' | 'custom'; label: string }[]).map((t) => (
+                    <button key={t.v} onClick={() => setDistMode(t.v)}
+                      className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all duration-150
+                        ${distMode === t.v
+                          ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-400 shadow-sm'
+                          : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'}`}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="px-6 py-4 flex-1 overflow-y-auto">
+                {activeAgentsForDist.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-sm text-amber-700 dark:text-amber-400
+                    bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/50 rounded-xl">
+                    لا يوجد موظفون نشطون للتوزيع عليهم
+                  </div>
+                ) : distMode === 'equal' ? (
+                  <div className="space-y-2">
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                      سيتم توزيع الطلبات بالتساوي على الموظفين الحاضرين ({presentAgents.length}).
+                    </p>
+                    {presentAgents.map((a) => (
+                      <div key={a.id} className="flex items-center gap-2 px-3 py-2 rounded-xl
+                        bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60 text-sm">
+                        <span className="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/60
+                          text-indigo-700 dark:text-indigo-300 flex items-center justify-center text-xs font-bold shrink-0">
+                          {(a.name?.trim()?.[0] || a.email[0]).toUpperCase()}
+                        </span>
+                        <span className="text-slate-700 dark:text-slate-300 truncate">
+                          {a.name?.trim() || a.email.split('@')[0]}
+                        </span>
+                      </div>
+                    ))}
+                    {presentAgents.length === 0 && (
+                      <p className="text-xs text-amber-600 dark:text-amber-400">لا يوجد موظفون حاضرون حالياً.</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {activeAgentsForDist.map((a) => (
+                      <div key={a.id} className="flex items-center gap-2.5 px-3 py-2 rounded-xl
+                        bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60">
+                        <span className="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/60
+                          text-indigo-700 dark:text-indigo-300 flex items-center justify-center text-xs font-bold shrink-0">
+                          {(a.name?.trim()?.[0] || a.email[0]).toUpperCase()}
+                        </span>
+                        <span className="flex-1 min-w-0 text-sm text-slate-700 dark:text-slate-300 truncate">
+                          {a.name?.trim() || a.email.split('@')[0]}
+                        </span>
+                        <div className="relative shrink-0">
+                          <input
+                            type="number" min={0} max={100}
+                            value={distPercents[a.id] ?? ''}
+                            onChange={(e) => setDistPercents((p) => ({ ...p, [a.id]: e.target.value }))}
+                            className="w-20 px-2 py-1.5 pl-6 text-sm text-center rounded-lg outline-none
+                              bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600
+                              text-slate-800 dark:text-slate-100
+                              focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                          />
+                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-slate-400">%</span>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Live sum validation */}
+                    <div className={`flex items-center justify-between px-3 py-2 rounded-xl text-sm font-semibold mt-2
+                      ${distSum === 100
+                        ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50'
+                        : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800/50'}`}>
+                      <span>إجمالي النسب</span>
+                      <span>{distSum}% {distSum === 100 ? '✓' : `(يجب أن يساوي 100%)`}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 pb-6 pt-4 border-t border-slate-100 dark:border-slate-800 flex gap-3">
+                <button
+                  onClick={handleConfirmDistribute}
+                  disabled={
+                    distributing ||
+                    activeAgentsForDist.length === 0 ||
+                    (distMode === 'custom' && distSum !== 100) ||
+                    (distMode === 'equal' && presentAgents.length === 0)
+                  }
+                  className="flex-1 inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl
+                    text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white
+                    shadow-md shadow-emerald-600/20 disabled:opacity-50 disabled:cursor-not-allowed
+                    transition-all duration-150 active:scale-[0.98]"
+                >
+                  {distributing ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                      جارٍ التوزيع…
+                    </>
+                  ) : 'تأكيد التوزيع'}
+                </button>
+                <button onClick={() => setShowDistModal(false)} disabled={distributing}
+                  className="px-5 py-2.5 rounded-xl text-sm font-semibold
+                    bg-slate-100 hover:bg-slate-200 text-slate-700
+                    dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300
+                    disabled:opacity-50 transition">
+                  إلغاء
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1528,7 +1747,7 @@ export default function DashboardPage() {
             onClick={() => setActiveFilter('مؤجل')} />
           <StatCard label="لا يرد"     value={stats.noAnswer}
             valueColor="text-slate-500 dark:text-slate-400"
-            pct={pct(stats.new + stats.noAnswer)} pctLabel="لم يرد + جديد"
+            pct={pct(stats.noAnswer)} pctLabel="نسبة عدم الرد"
             active={activeFilter === 'لا يرد'}
             onClick={() => setActiveFilter('لا يرد')} />
           <StatCard label="تم الشحن"  value={stats.shipped}
@@ -1591,7 +1810,7 @@ export default function DashboardPage() {
               {f}
               {f !== 'الكل' && (
                 <span className={`mr-1.5 text-xs ${activeFilter === f ? 'text-indigo-200' : 'text-gray-400'}`}>
-                  ({productFiltered.filter((o) => o.Status === f).length})
+                  ({dateScoped.filter((o) => normStatus(o.Status) === normStatus(f)).length})
                 </span>
               )}
             </button>
@@ -1798,12 +2017,12 @@ export default function DashboardPage() {
               </button>
             )}
 
-            {/* ── Auto-distribute button — admin only ─────────────── */}
+            {/* ── Distribute button — admin only (opens distribution modal) ── */}
             {isAdmin && (
               <button
-                onClick={handleAutoDistribute}
+                onClick={openDistModal}
                 disabled={distributing}
-                title="توزيع الطلبات الجديدة غير الموزعة بالتساوي على الموظفين الحاضرين"
+                title="توزيع الطلبات الجديدة على الموظفين (بالتساوي أو بنسب مخصصة)"
                 className="relative flex items-center gap-2 px-4 py-2
                   bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800
                   dark:bg-emerald-700 dark:hover:bg-emerald-600
@@ -1812,23 +2031,11 @@ export default function DashboardPage() {
                   transition-all duration-150
                   disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {distributing ? (
-                  <>
-                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                    </svg>
-                    جارٍ التوزيع…
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M4 6h16M4 12h16M4 18h7" />
-                    </svg>
-                    توزيع الطلبات بالتساوي
-                  </>
-                )}
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M4 6h16M4 12h16M4 18h7" />
+                </svg>
+                توزيع الطلبات
               </button>
             )}
 
@@ -1847,6 +2054,33 @@ export default function DashboardPage() {
                     d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
                 </svg>
                 نقل {selectedIds.length} طلب محدد
+              </button>
+            )}
+
+            {/* ── Bulk delete selected button — danger themed ── */}
+            {isAdmin && selectedIds.length > 0 && (
+              <button
+                onClick={handleBulkDelete}
+                disabled={bulkDeleting}
+                className="inline-flex items-center gap-2 px-4 py-2
+                  bg-red-600 hover:bg-red-700 active:bg-red-800
+                  text-white rounded-xl text-sm font-semibold
+                  shadow-md shadow-red-500/20
+                  transition-all duration-150 active:scale-95
+                  disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {bulkDeleting ? (
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                )}
+                حذف {selectedIds.length} طلب
               </button>
             )}
 

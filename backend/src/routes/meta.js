@@ -799,14 +799,15 @@ async function syncSingleAccount(acct, startDate, endDate) {
          otherwise a new row is inserted.  No rows are deleted.                  */
       await pool.query(
         `INSERT INTO expenses
-           (expense_date, campaign_name, amount, meta_purchases, meta_sync, sku, meta_account_id, business_id)
-         VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7)
+           (expense_date, campaign_name, amount, meta_purchases, meta_sync, sku, meta_account_id, business_id, category)
+         VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, 'إعلانات ميتا وتيك توك')
          ON CONFLICT (expense_date, campaign_name, business_id)
          DO UPDATE SET
            amount          = EXCLUDED.amount,
            meta_purchases  = EXCLUDED.meta_purchases,
            sku             = EXCLUDED.sku,
-           meta_account_id = EXCLUDED.meta_account_id`,
+           meta_account_id = EXCLUDED.meta_account_id,
+           category        = EXCLUDED.category`,
         [rowDate, campaignName, spend, metaPurchases, sku, metaAccountId, businessId]
       );
 

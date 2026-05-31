@@ -4,6 +4,7 @@ const cors                    = require('cors');
 const startOrderSyncCron      = require('./services/googleSheetSync');
 const { startMetaSyncCron }   = require('./cron/metaSync');
 const { startTaagerSyncCron } = require('./cron/taagerSync');
+const { startStaffAlertsCron } = require('./cron/staffAlerts');
 const pool                    = require('./config/db');
 const { initTenancy }         = require('./config/initTenancy');
 
@@ -96,4 +97,5 @@ app.listen(PORT, async () => {
   startOrderSyncCron();
   startMetaSyncCron();
   startTaagerSyncCron();
+  startStaffAlertsCron();
 });

@@ -16,22 +16,26 @@ function formatPhone(raw) {
 }
 
 /**
- * Maps consigneeRanking metrics → Arabic DeliveryRate label.
- *   deliveredDeliveriesCount === 0  → 'جديد'
- *   deliverySuccessRate >= 85       → 'ممتاز'
- *   deliverySuccessRate >= 50       → 'متوسط'
- *   deliverySuccessRate <  50       → 'ضعيف'
- * Returns null when the ranking object is missing / unreadable.
+ * Maps a Bosta consignee-ranking object → Arabic DeliveryRate label.
+ *
+ *   ranking === null/undefined  → 'جديد'   (no shipping history — new customer)
+ *   deliverySuccessRate >= 80   → 'ممتاز'
+ *   deliverySuccessRate >= 50   → 'متوسط'
+ *   deliverySuccessRate <  50   → 'ضعيف'
+ *
+ * Returns null ONLY when a ranking object is present but its metrics are
+ * unreadable (so the caller can skip rather than mislabel).
  */
 function mapRanking(ranking) {
-  if (!ranking) return null;
-  const delivered   = Number(ranking.deliveredDeliveriesCount ?? -1);
-  const successRate = Number(ranking.deliverySuccessRate      ?? -1);
-  if (delivered === 0)   return 'جديد';
-  if (successRate >= 85) return 'ممتاز';
+  // Bosta returns `consigneRanking: null` for customers with no history.
+  if (!ranking) return 'جديد';
+
+  const successRate = Number(ranking.deliverySuccessRate);
+  if (!Number.isFinite(successRate)) return null;   // metrics unreadable
+
+  if (successRate >= 80) return 'ممتاز';
   if (successRate >= 50) return 'متوسط';
-  if (successRate >= 0)  return 'ضعيف';
-  return null;
+  return 'ضعيف';
 }
 
 /**
@@ -104,14 +108,31 @@ async function enrichDeliveryRate(orderId, phone) {
       }
     );
 
-    const ranking =
-      res.data?.data?.consigneeRanking ??
-      res.data?.consigneeRanking       ??
-      res.data?.data                   ?? null;
+    /* Bosta nests the ranking under data.data and — note — MISSPELLS the key as
+       "consigneRanking" (no second "e"). We read the misspelt key first, tolerate
+       the correct spelling, and crucially distinguish:
+         • key present & null  → new customer (no history)  → 'جديد'
+         • key present & object → map by deliverySuccessRate
+         • key entirely absent  → genuinely unknown shape    → skip            */
+    const payload =
+      (res.data && typeof res.data.data === 'object' && res.data.data !== null)
+        ? res.data.data
+        : (res.data || {});
 
-    const mapped = mapRanking(ranking);
-    if (!mapped) {
+    const hasRankingKey =
+      Object.prototype.hasOwnProperty.call(payload, 'consigneRanking') ||
+      Object.prototype.hasOwnProperty.call(payload, 'consigneeRanking');
+
+    if (!hasRankingKey) {
       console.warn(`⚠️  Bosta: unrecognised response shape for ${formattedPhone}`, res.data);
+      return;
+    }
+
+    const ranking = payload.consigneRanking ?? payload.consigneeRanking ?? null;
+
+    const mapped = mapRanking(ranking);   // null ranking → 'جديد'
+    if (!mapped) {
+      console.warn(`⚠️  Bosta: ranking present but metrics unreadable for ${formattedPhone}`, res.data);
       return;
     }
 

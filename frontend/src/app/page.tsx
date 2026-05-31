@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { login } from '@/lib/api';
+import { login, verifyOtp, User } from '@/lib/api';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -13,29 +13,57 @@ export default function LoginPage() {
   const [loading,  setLoading]  = useState(false);
   const [showPass, setShowPass] = useState(false);
 
+  /* ── OTP verification step ─────────────────────────────────────── */
+  const [showOtp,  setShowOtp]  = useState(false);
+  const [otpEmail, setOtpEmail] = useState('');
+  const [otpCode,  setOtpCode]  = useState('');
+
+  /* Shared post-auth handler: persist session + permission-aware redirect. */
+  const proceed = (token: string, user: User) => {
+    localStorage.setItem('token', token);
+    localStorage.setItem('user',  JSON.stringify(user));
+    const perms: string[] = user.permissions ?? ['orders'];
+    if (user.role === 'admin' || perms.includes('analytics')) {
+      router.push('/dashboard/analytics');
+    } else {
+      router.push('/dashboard');
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
     try {
-      const res  = await login(email, password);
-      const user = res.data.user;
-      localStorage.setItem('token', res.data.token);
-      localStorage.setItem('user',  JSON.stringify(user));
-
-      /* Permissions-aware redirect ──────────────────────────────────
-         Admins and agents with the analytics permission land on the
-         full analytics dashboard.  Everyone else goes to orders.     */
-      const perms: string[] = user.permissions ?? ['orders'];
-      if (user.role === 'admin' || perms.includes('analytics')) {
-        router.push('/dashboard/analytics');
+      const res = await login(email, password);
+      proceed(res.data.token, res.data.user);
+    } catch (err: unknown) {
+      const resp = (err as { response?: { status?: number; data?: { error?: string; requires_otp?: boolean; email?: string } } })?.response;
+      /* Unverified staff → switch to the OTP screen instead of erroring. */
+      if (resp?.status === 403 && resp.data?.requires_otp) {
+        setOtpEmail(resp.data.email || email);
+        setOtpCode('');
+        setShowOtp(true);
+        setError('');
       } else {
-        router.push('/dashboard');
+        setError(resp?.data?.error || 'حدث خطأ أثناء تسجيل الدخول');
       }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const res = await verifyOtp(otpEmail, otpCode.trim());
+      proceed(res.data.token, res.data.user);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'حدث خطأ أثناء تسجيل الدخول';
+        'رمز التحقق غير صحيح';
       setError(msg);
     } finally {
       setLoading(false);
@@ -77,7 +105,7 @@ export default function LoginPage() {
               نظام إدارة الطلبات
             </h1>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              سجّل دخولك للمتابعة
+              {showOtp ? 'تأكيد البريد الإلكتروني' : 'سجّل دخولك للمتابعة'}
             </p>
           </div>
 
@@ -96,6 +124,7 @@ export default function LoginPage() {
             </div>
           )}
 
+          {!showOtp && (
           <form onSubmit={handleSubmit} className="space-y-5" dir="rtl">
 
             {/* Email field */}
@@ -203,8 +232,77 @@ export default function LoginPage() {
               )}
             </button>
           </form>
+          )}
+
+          {/* ── OTP verification screen ─────────────────────────────── */}
+          {showOtp && (
+          <form onSubmit={handleVerifyOtp} className="space-y-5" dir="rtl">
+            <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed text-center">
+              أرسلنا رمز تأكيد مكوّن من 6 أرقام إلى
+              <span className="block font-semibold text-slate-700 dark:text-slate-200 mt-1" dir="ltr">
+                {otpEmail}
+              </span>
+            </p>
+
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                رمز التأكيد
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={otpCode}
+                onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="------"
+                required
+                dir="ltr"
+                className="w-full px-4 py-3 rounded-xl text-center text-2xl font-bold tracking-[0.5em]
+                  bg-slate-50 dark:bg-slate-800/80
+                  border border-slate-300 dark:border-slate-600/80
+                  text-slate-900 dark:text-white
+                  placeholder:text-slate-300 dark:placeholder:text-slate-600
+                  focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-400
+                  dark:focus:border-indigo-500 dark:focus:ring-indigo-500/30
+                  transition duration-150"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || otpCode.length !== 6}
+              className="w-full inline-flex items-center justify-center gap-2.5
+                py-3 px-4 rounded-xl text-sm font-semibold
+                bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                dark:bg-indigo-600 dark:hover:bg-indigo-500 text-white
+                shadow-md shadow-indigo-500/25 hover:shadow-lg hover:shadow-indigo-500/30
+                dark:shadow-indigo-900/40
+                disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none
+                transition-all duration-150"
+            >
+              {loading ? (
+                <>
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                  جارٍ التحقق…
+                </>
+              ) : 'تأكيد الرمز'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { setShowOtp(false); setError(''); setOtpCode(''); }}
+              className="w-full text-center text-sm text-slate-500 dark:text-slate-400 hover:underline"
+            >
+              ← العودة لتسجيل الدخول
+            </button>
+          </form>
+          )}
 
           {/* Create-account link */}
+          {!showOtp && (
           <p className="mt-6 text-center text-sm text-slate-500 dark:text-slate-400">
             ليس لديك حساب؟{' '}
             <Link href="/register"
@@ -212,6 +310,7 @@ export default function LoginPage() {
               أنشئ حساب جديد
             </Link>
           </p>
+          )}
         </div>
 
         {/* Subtle footer */}

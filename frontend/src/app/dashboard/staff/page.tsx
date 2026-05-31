@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  getStaff, createStaff, updateStaff, toggleAttendance,
+  getStaff, createStaff, updateStaff, toggleAttendance, deleteStaff,
   getAgentAnalytics,
   StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics,
 } from '@/lib/api';
@@ -137,10 +137,12 @@ export default function StaffPage() {
   const router = useRouter();
 
   /* ── Auth guard ─────────────────────────────────────────────── */
+  const [currentUserId, setCurrentUserId] = useState<string | number | null>(null);
   useEffect(() => {
     try {
       const u = JSON.parse(localStorage.getItem('user') || 'null');
-      if (!u || u.role !== 'admin') router.replace('/dashboard');
+      if (!u || u.role !== 'admin') { router.replace('/dashboard'); return; }
+      setCurrentUserId(u.id ?? null);
     } catch { router.replace('/dashboard'); }
   }, [router]);
 
@@ -160,6 +162,17 @@ export default function StaffPage() {
   const [staff,   setStaff]   = useState<StaffMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+
+  /* The tenant's founding admin (earliest-created admin) — protected from deletion,
+     mirrors the server-side guard so the button is disabled for that row too. */
+  const ownerAdminId = useMemo(() => {
+    const admins = staff.filter((s) => s.role === 'admin');
+    if (admins.length === 0) return null;
+    return [...admins].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    )[0].id;
+  }, [staff]);
 
   const loadStaff = useCallback(async () => {
     try { setLoading(true); setError(null); const r = await getStaff(); setStaff(r.data); }
@@ -200,6 +213,20 @@ export default function StaffPage() {
     } catch (err: unknown) {
       showToast((err as {response?:{data?:{error?:string}}})?.response?.data?.error || 'حدث خطأ', 'error');
     } finally { setTogglingId(null); }
+  };
+
+  /* ── Delete staff member ───────────────────────────────────── */
+  const handleDelete = async (member: StaffMember) => {
+    if (deletingId) return;
+    if (!window.confirm('هل أنت متأكد من حذف هذا الموظف نهائياً؟')) return;
+    setDeletingId(member.id);
+    try {
+      await deleteStaff(member.id);
+      showToast(`تم حذف ${displayName(member)} بنجاح`);
+      await loadStaff();   // re-fetch so the table updates immediately
+    } catch (err: unknown) {
+      showToast((err as {response?:{data?:{error?:string}}})?.response?.data?.error || 'تعذّر حذف الموظف', 'error');
+    } finally { setDeletingId(null); }
   };
 
   /* ── Add / Edit modal ──────────────────────────────────────── */
@@ -527,6 +554,26 @@ export default function StaffPage() {
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
                               </svg>
                             </button>
+
+                            {/* Delete — hidden for the current user and the founding admin (the system owner) */}
+                            {String(m.id) !== String(currentUserId) && String(m.id) !== String(ownerAdminId) && (
+                              <button
+                                onClick={() => handleDelete(m)}
+                                disabled={deletingId === m.id}
+                                title="حذف الموظف"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 dark:hover:text-red-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                                {deletingId === m.id ? (
+                                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                                  </svg>
+                                ) : (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                  </svg>
+                                )}
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
