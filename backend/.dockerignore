@@ -1,0 +1,29 @@
+# Dependencies (reinstalled inside the image)
+node_modules/
+npm-debug.log*
+
+# Secrets & local env — NEVER bake into the image
+.env
+.env.*
+!.env*.example
+
+# Git / VCS
+.git/
+.gitignore
+
+# Logs & OS noise
+*.log
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Docker meta
+Dockerfile
+.dockerignore
+
+# Misc local-only scripts/tests not needed in the container
+test-bosta.js
+verify_tenants.js
