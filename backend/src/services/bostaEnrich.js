@@ -38,18 +38,77 @@ function mapRanking(ranking) {
   return 'ضعيف';
 }
 
+/* ── Throttled enrichment queue ──────────────────────────────────────────────
+   Bosta rate-limits the consignee-ranking endpoint (HTTP 429). When a bulk sync
+   (Google-Sheet cron / many webhooks) fires, calling enrichDeliveryRate per order
+   would burst dozens of concurrent requests → 429s. So every caller now ENQUEUES
+   and a single worker drains the queue ONE request at a time, with a fixed gap
+   between calls and exponential back-off + retry on 429.                        */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* Tunables (overridable via env). */
+const ENRICH_DELAY_MS   = Number(process.env.BOSTA_ENRICH_DELAY_MS) || 1500; // gap between calls
+const RATE_LIMIT_BASE   = Number(process.env.BOSTA_ENRICH_BACKOFF_MS) || 30_000; // 429 cooldown
+const MAX_RETRIES       = 4;     // per-order retries on 429 before giving up
+
+const _queue = [];
+let _draining = false;
+
 /**
- * Fire-and-forget: GETs Bosta's consignee ranking for `phone` and updates
- * the `DeliveryRate` column of `orderId`.
+ * PUBLIC, fire-and-forget. Enqueues an enrichment job and starts the worker.
+ * Same signature as before — callers must NOT await it.
+ */
+function enrichDeliveryRate(orderId, phone) {
+  if (!orderId || !phone) return;
+  _queue.push({ orderId, phone, attempts: 0 });
+  if (_queue.length === 1 && !_draining) console.log(`[bostaEnrich] queued order ${orderId} (queue: ${_queue.length})`);
+  drainQueue();   // no await — fire and forget
+}
+
+/** Single-flight worker: processes the queue serially with throttling. */
+async function drainQueue() {
+  if (_draining) return;
+  _draining = true;
+  try {
+    while (_queue.length > 0) {
+      const job = _queue.shift();
+      const status = await processEnrichment(job.orderId, job.phone);
+
+      if (status === 'ratelimited') {
+        if (job.attempts < MAX_RETRIES) {
+          job.attempts += 1;
+          /* Exponential back-off: 30s, 60s, 120s, 240s … then re-queue. */
+          const wait = RATE_LIMIT_BASE * 2 ** (job.attempts - 1);
+          console.warn(`[bostaEnrich] 429 — backing off ${Math.round(wait / 1000)}s then retrying order ${job.orderId} (attempt ${job.attempts}/${MAX_RETRIES})`);
+          _queue.push(job);            // retry later, at the back of the line
+          await sleep(wait);
+        } else {
+          console.error(`[bostaEnrich] order ${job.orderId} gave up after ${MAX_RETRIES} rate-limited attempts`);
+          await sleep(ENRICH_DELAY_MS);
+        }
+      } else {
+        /* Normal spacing between successful/!429 calls. */
+        await sleep(ENRICH_DELAY_MS);
+      }
+    }
+  } finally {
+    _draining = false;
+  }
+}
+
+/**
+ * Does the actual Bosta lookup + DB update for ONE order.
+ * Returns a status the worker uses to decide pacing:
+ *   'ok' | 'ratelimited' | 'skipped' | 'error'
  *
  * - On success  : updates to the mapped Arabic label.
  * - On 404      : updates to 'جديد' (customer has no shipping history).
- * - On any other error : leaves as 'بدون' and logs the full Bosta response
- *   so we can diagnose the exact rejection reason.
+ * - On 429      : returns 'ratelimited' so the worker backs off + retries.
+ * - On any other error : logs and returns 'error'.
  *
- * Never throws — the caller must NOT await this function.
+ * Never throws.
  */
-async function enrichDeliveryRate(orderId, phone) {
+async function processEnrichment(orderId, phone) {
   /* ── TENANT: resolve the owning business of this order first ────────
      Every downstream read (Bosta creds) and write (DeliveryRate) is then
      scoped to this tenant so one business can never enrich/overwrite
@@ -83,11 +142,11 @@ async function enrichDeliveryRate(orderId, phone) {
 
   if (!bearerToken) {
     console.warn('⚠️  enrichDeliveryRate: bearer_token not found in shipping_settings DB or .env');
-    return;
+    return 'skipped';
   }
 
   const formattedPhone = formatPhone(phone);
-  if (!formattedPhone) return;
+  if (!formattedPhone) return 'skipped';
 
   try {
     const res = await axios.get(
@@ -125,7 +184,7 @@ async function enrichDeliveryRate(orderId, phone) {
 
     if (!hasRankingKey) {
       console.warn(`⚠️  Bosta: unrecognised response shape for ${formattedPhone}`, res.data);
-      return;
+      return 'skipped';
     }
 
     const ranking = payload.consigneRanking ?? payload.consigneeRanking ?? null;
@@ -133,7 +192,7 @@ async function enrichDeliveryRate(orderId, phone) {
     const mapped = mapRanking(ranking);   // null ranking → 'جديد'
     if (!mapped) {
       console.warn(`⚠️  Bosta: ranking present but metrics unreadable for ${formattedPhone}`, res.data);
-      return;
+      return 'skipped';
     }
 
     await pool.query(
@@ -141,20 +200,31 @@ async function enrichDeliveryRate(orderId, phone) {
       [mapped, orderId, businessId]
     );
     console.log(`✅  Bosta enrichment: order ${orderId} [${formattedPhone}] → ${mapped}`);
+    return 'ok';
 
   } catch (err) {
-    if (err.response?.status === 404) {
+    const status = err.response?.status;
+
+    if (status === 404) {
       await pool.query(
         `UPDATE orders SET "DeliveryRate" = 'جديد' WHERE id = $1 AND business_id = $2`,
         [orderId, businessId]
       ).catch(() => {});
       console.log(`📦  Bosta: order ${orderId} [${formattedPhone}] → جديد (no history)`);
-    } else {
-      console.error('❌ Bosta Live Sync Failed for phone:', formattedPhone);
-      console.error('Status Code:', err.response?.status);
-      console.error('Error Response Data:',
-        JSON.stringify(err.response?.data || err.message, null, 2));
+      return 'ok';
     }
+
+    if (status === 429) {
+      /* Rate-limited — signal the worker to back off and retry. */
+      console.warn(`⏳  Bosta 429 (rate limit) for order ${orderId} [${formattedPhone}]`);
+      return 'ratelimited';
+    }
+
+    console.error('❌ Bosta Live Sync Failed for phone:', formattedPhone);
+    console.error('Status Code:', status);
+    console.error('Error Response Data:',
+      JSON.stringify(err.response?.data || err.message, null, 2));
+    return 'error';
   }
 }
 
