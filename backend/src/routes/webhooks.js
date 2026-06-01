@@ -145,11 +145,15 @@ async function ingestEasyOrder(body, businessId) {
     return { ok: false, status: 400, payload: { error: 'FullName and Phone are required' } };
   }
 
-  /* Idempotency key: prefer EasyOrder's real id, else a deterministic composite
-     hash so id-less rows still dedup. Always non-null → index + ON CONFLICT engage. */
+  /* Idempotency key: prefer EasyOrder's stable root order id — `id` (UUID) is the
+     canonical identifier, `short_id` (integer) is the next best. Then other
+     common id fields. Finally fall back to a deterministic composite hash so
+     id-less rows still dedup. Always non-null → index + ON CONFLICT engage, so a
+     webhook fired twice for the same order can never create a duplicate.        */
   const realId = String(
+    body.id ?? body.short_id ?? body.shortId ??
     body.external_order_id ?? body.order_id ?? body.orderId ??
-    body.id ?? body.reference ?? body.ref ?? ''
+    body.reference ?? body.ref ?? ''
   ).trim();
   const externalId = realId || buildFallbackKey(body);
 
