@@ -2,6 +2,7 @@ const express       = require('express');
 const pool          = require('../config/db');
 const authenticate  = require('../middleware/auth');
 const { requireAdmin, filterAgentFields } = require('../middleware/roleGuard');
+const { enrichDeliveryRate } = require('../services/bostaEnrich');
 
 const router = express.Router();
 
@@ -75,6 +76,55 @@ router.get('/', authenticate, async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error(err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── POST /api/orders — admin only: manual order creation ───────────────────
+   Creates an external order (WhatsApp / Facebook / phone) that behaves exactly
+   like a store-imported one:
+     • status initialised to 'جديد'
+     • scoped to the admin's business_id
+     • optional BostaTrackingCode stored so the existing Bosta webhooks/cron
+       track it normally
+     • fires the (throttled) Bosta consignee-ranking enrichment, like imports
+   Treasury/commission logic needs no special handling — it keys off status
+   changes via PATCH, so manual orders integrate automatically.                */
+router.post('/', authenticate, requireAdmin, async (req, res) => {
+  const { FullName, Phone, City, Address, ProductPrice, BostaTrackingCode, ProductName, Quantity } = req.body;
+
+  if (!FullName || !String(FullName).trim() || !Phone || !String(Phone).trim()) {
+    return res.status(400).json({ error: 'الاسم ورقم الهاتف مطلوبان' });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO orders
+         ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "Quantity",
+          "DeliveryRate", "Status", "BostaTrackingCode", order_source, business_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'بدون', 'جديد', $8, 'manual', $9)
+       RETURNING *`,
+      [
+        String(FullName).trim(),
+        String(Phone).trim(),
+        City ? String(City).trim() : null,
+        Address ? String(Address).trim() : null,
+        ProductName ? String(ProductName).trim() : null,
+        ProductPrice != null && String(ProductPrice).trim() !== '' ? String(ProductPrice).trim() : null,
+        Number.isInteger(Number(Quantity)) && Number(Quantity) > 0 ? Number(Quantity) : null,
+        BostaTrackingCode ? String(BostaTrackingCode).trim() : null,
+        req.user.business_id,
+      ]
+    );
+
+    const order = result.rows[0];
+    console.log(`[Manual Order] ✅ #${order.id} created for tenant ${req.user.business_id}`);
+
+    // Respond first, then enrich the delivery rating in the background (throttled queue).
+    res.status(201).json(order);
+    enrichDeliveryRate(order.id, order.Phone);
+  } catch (err) {
+    console.error('[POST /orders] create error:', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });

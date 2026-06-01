@@ -91,6 +91,22 @@ export const register = (payload: RegisterPayload) =>
 export const getOrders = () =>
   api.get<Order[]>('/api/orders');
 
+/* ── Manual order creation (WhatsApp / Facebook / phone) ────────────────────── */
+export interface CreateOrderPayload {
+  FullName:           string;
+  Phone:              string;
+  Address?:           string;
+  City?:              string;
+  ProductName?:       string;
+  ProductPrice?:      string | number;   // Total / COD amount
+  Quantity?:          number;
+  BostaTrackingCode?: string;            // optional — lets Bosta sync track it
+}
+
+/** Create a manual order (status 'جديد', tenant-scoped). Admin only. */
+export const createOrder = (data: CreateOrderPayload) =>
+  api.post<Order>('/api/orders', data);
+
 export const updateOrder = (id: number, data: AgentUpdate | AdminUpdate) =>
   api.patch<Order>(`/api/orders/${id}`, data);
 
