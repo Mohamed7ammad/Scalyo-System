@@ -94,8 +94,12 @@ app.listen(PORT, async () => {
   /* Tenant isolation migration MUST finish before the cron jobs (which
      insert tenant-scoped rows) begin firing. */
   await initTenancy();
-  startOrderSyncCron();
-  startMetaSyncCron();
-  startTaagerSyncCron();
-  startStaffAlertsCron();
+  if (process.env.NODE_ENV !== 'development') {
+    startOrderSyncCron();
+    startMetaSyncCron();
+    startTaagerSyncCron();
+    startStaffAlertsCron();
+  } else {
+    console.log('⚠️ Development environment detected: Cron jobs disabled to prevent data duplication.');
+  }
 });
