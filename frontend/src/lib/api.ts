@@ -239,8 +239,14 @@ export const deleteProduct = (id: string) =>
 export const getShippingPending = () =>
   api.get<{ count: number }>('/api/shipping/pending');
 
-export const forwardToShipping = (allowOpen: boolean) =>
-  api.post<ShippingResult>('/api/shipping/forward', { allowOpen });
+/**
+ * Forward confirmed orders to Bosta.
+ * @param allowOpen  Allow package opening on delivery (Bosta flag).
+ * @param limit      Optional batch quota — ship only the oldest N confirmed
+ *                   orders (FIFO). Omit / undefined ships the whole queue.
+ */
+export const forwardToShipping = (allowOpen: boolean, limit?: number) =>
+  api.post<ShippingResult>('/api/shipping/forward', { allowOpen, limit });
 
 /* ── Returns Log ─────────────────────────────────────────────────── */
 export interface DailyReturn {

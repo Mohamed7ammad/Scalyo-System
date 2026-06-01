@@ -256,9 +256,11 @@ async function backfillTreasury() {
      total_commissions   — all source starting with 'comm_'
      deposits_live       — live SUM(depositAmount) from orders table
      count_with_deposit  — orders with depositAmount > 0
-     pending_bosta_cash  — net COD for orders shipped/snoozed/no-answer/delivered
-                           (cash still held in Bosta's wallet, NOT yet realized
-                            → excluded from net_balance intentionally)
+     pending_bosta_cash  — raw expected COD (price − deposit, > 0 only) for
+                           in-transit orders (shipped / delayed / no-answer);
+                           finalized orders (delivered / returned / cancelled)
+                           are excluded.  Cash still pending collection at the
+                           courier, NOT yet realized → excluded from net_balance.
 
    Admin only.
    ══════════════════════════════════════════════════════════════════════════ */
@@ -294,17 +296,25 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
         WHERE business_id = $1
       `, [businessId]),
 
-      /* ── 3. Cash-in-transit: orders whose COD is still held in Bosta's
-         wallet (shipped, snoozed, no-answer, OR delivered-but-not-yet-
-         settled).  Net = ProductPrice − depositAmount (already collected).
+      /* ── 3. Cash-in-transit: expected COD still pending collection at the
+         courier.  STRICT rules:
+           • In-transit statuses ONLY — 'تم الشحن' (shipped / out-for-delivery),
+             'مؤجل' (delayed), 'لا يرد' (no-answer).  Finalized statuses are
+             excluded: 'تم التوصيل' (delivered — already collected/settled),
+             'تم الإرجاع' / 'جاري الإعادة' (returned), 'ملغي' (cancelled).
+           • Expected COD = ProductPrice − depositAmount; the per-row filter
+             keeps ONLY rows where that is > 0 (no money to collect otherwise,
+             and it can't drag the total negative).
+           • Raw expected COD — shipping fees are NOT subtracted.
          Deliberately NOT included in net_balance (unrealised).             */
       pool.query(`
         SELECT COALESCE(SUM(
           ${PRICE_EXPR} - COALESCE("depositAmount"::numeric, 0)
         ), 0)::float AS pending_bosta_cash
         FROM orders
-        WHERE "Status" IN ('تم الشحن', 'مؤجل', 'لا يرد', 'تم التوصيل')
+        WHERE "Status" IN ('تم الشحن', 'مؤجل', 'لا يرد')
           AND business_id = $1
+          AND (${PRICE_EXPR} - COALESCE("depositAmount"::numeric, 0)) > 0
       `, [businessId]),
     ]);
 

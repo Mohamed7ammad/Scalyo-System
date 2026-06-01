@@ -278,7 +278,15 @@ router.get('/pending', authenticate, requireAdmin, async (req, res) => {
    Each order is processed independently — one failure won't abort
    the rest of the batch.                                            */
 router.post('/forward', authenticate, requireAdmin, async (req, res) => {
-  const { allowOpen = false } = req.body;
+  const { allowOpen = false, limit } = req.body;
+
+  /* ── Optional batch quota ─────────────────────────────────────────
+     The client may cap how many confirmed orders are shipped in this
+     run (shipping-package limits).  Accept only a positive integer;
+     anything else (undefined, 0, negative, non-numeric) means "no cap"
+     → ship the whole pending queue, preserving the previous behaviour. */
+  const parsedLimit = Number.parseInt(limit, 10);
+  const batchLimit  = Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
 
   /* ── Read api_key from DB (Phase 1: SaaS credential store) ────────
      Falls back to process.env.BOSTA_API_KEY so existing deployments
@@ -303,7 +311,16 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
   }
 
   try {
-    /* Fetch only THIS tenant's unshipped confirmed orders, oldest first */
+    /* Fetch only THIS tenant's unshipped confirmed orders, oldest first.
+       When a batch quota is supplied we LIMIT the queue so only the oldest
+       N orders are dispatched this run (FIFO fulfilment).                 */
+    const params = [businessId];
+    let limitClause = '';
+    if (batchLimit !== null) {
+      params.push(batchLimit);
+      limitClause = `LIMIT $${params.length}`;
+    }
+
     const { rows: orders } = await pool.query(`
       SELECT *
       FROM   orders
@@ -311,7 +328,8 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
         AND  "BostaTrackingCode" IS NULL
         AND  business_id = $1
       ORDER  BY "createdAt" ASC
-    `, [businessId]);
+      ${limitClause}
+    `, params);
 
     if (orders.length === 0) {
       return res.json({

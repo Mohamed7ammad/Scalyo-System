@@ -1121,8 +1121,7 @@ export default function TreasuryPage() {
                   {fmt(summary.pending_bosta_cash)} ج
                 </p>
                 <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
-                  تقدير داخلي: صافي COD (السعر − العربون) للطلبات (مشحون · مؤجل · لا يرد · تم التوصيل) —
-                  للمطابقة مع رصيد المحفظة المباشر بالأعلى
+                  تقدير داخلي: إجمالي مبالغ التحصيل للطلبات قيد التوصيل (أكبر من صفر)
                 </p>
               </div>
             </div>

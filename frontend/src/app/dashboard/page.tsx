@@ -80,6 +80,9 @@ export default function DashboardPage() {
   const [shippingLoading, setShippingLoading] = useState(false);
   const [shippingResult,  setShippingResult]  = useState<ShippingResult | null>(null);
   const [allowOpenAll,    setAllowOpenAll]    = useState(false);
+  /* Batch quota: how many confirmed orders to ship this run (string for the
+     controlled <input>). Defaults to the full pending count when the modal opens. */
+  const [shipLimit,       setShipLimit]       = useState('');
 
   /* ── Bulk AWB state ─────────────────────────────────────────── */
   const [awbLoading, setAwbLoading] = useState(false);
@@ -743,6 +746,15 @@ export default function DashboardPage() {
     (o) => o.Status === 'تم التأكيد' && !o.BostaTrackingCode
   ).length;
 
+  // Effective batch size to ship: the requested quota clamped to [1, pending].
+  // A blank/invalid input falls back to shipping the entire pending queue.
+  const effectiveShipCount = (() => {
+    const parsed = parseInt(shipLimit, 10);
+    return Number.isFinite(parsed) && parsed > 0
+      ? Math.min(parsed, pendingShipCount)
+      : pendingShipCount;
+  })();
+
   /* ── Copy phones (جديد orders only) ─────────────────────────── */
   const handleCopyPhones = async () => {
     const phones = displayOrders
@@ -806,7 +818,8 @@ export default function DashboardPage() {
       //   UPDATE business_wallet SET balance += SUM(depositAmount)
       //   for all orders in this batch where hasDeposit = true.
       //   This records already-collected cash into the wallet ledger before shipment.
-      const res = await forwardToShipping(allowOpenAll);
+      // Ship the requested batch quota (clamped to the pending queue).
+      const res = await forwardToShipping(allowOpenAll, effectiveShipCount);
       setShippingResult(res.data);
       // Refresh orders silently so statuses update without scroll disruption
       const fresh = await import('@/lib/api').then((m) => m.getOrders());
@@ -1557,16 +1570,41 @@ export default function DashboardPage() {
                       لا توجد طلبات مؤكدة جديدة بانتظار الشحن
                     </div>
                   ) : (
-                    <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-4 mb-5">
-                      <p className="text-sm text-teal-800">
-                        سيتم إرسال{' '}
-                        <span className="font-bold text-teal-900 text-base">{pendingShipCount}</span>
-                        {' '}طلب مؤكد إلى بوسطة لإنشاء بوالص الشحن.
-                      </p>
-                      <p className="text-xs text-teal-600 mt-1">
-                        الطلبات التي تم إرسالها مسبقاً لن تُكرَّر.
-                      </p>
-                    </div>
+                    <>
+                      <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-4 mb-4">
+                        <p className="text-sm text-teal-800">
+                          يوجد{' '}
+                          <span className="font-bold text-teal-900 text-base">{pendingShipCount}</span>
+                          {' '}طلب مؤكد بانتظار الشحن.
+                        </p>
+                        <p className="text-xs text-teal-600 mt-1">
+                          الطلبات التي تم إرسالها مسبقاً لن تُكرَّر. ستُرسَل الطلبات الأقدم أولاً.
+                        </p>
+                      </div>
+
+                      {/* Batch quota — how many orders to send this run */}
+                      <label className="block mb-5">
+                        <span className="block text-sm font-semibold text-gray-700 mb-1.5">
+                          كم عدد الطلبات التي تريد إرسالها لشركة الشحن؟
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={pendingShipCount}
+                          step={1}
+                          value={shipLimit}
+                          onChange={(e) => setShipLimit(e.target.value)}
+                          disabled={shippingLoading}
+                          className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm
+                            text-gray-800 tabular-nums focus:outline-none focus:ring-2
+                            focus:ring-teal-500/40 focus:border-teal-400 transition disabled:opacity-50"
+                          placeholder={String(pendingShipCount)}
+                        />
+                        <span className="block text-xs text-gray-400 mt-1">
+                          بحد أقصى {pendingShipCount} طلب — لإرسال دفعة حسب باقة الشحن.
+                        </span>
+                      </label>
+                    </>
                   )}
 
                   {/* Allow-open checkbox */}
@@ -1597,7 +1635,7 @@ export default function DashboardPage() {
                           جارٍ الإرسال...
                         </>
                       ) : (
-                        'إرسال للشحن'
+                        `إرسال ${effectiveShipCount} طلب للشحن`
                       )}
                     </button>
                     <button
@@ -2200,7 +2238,7 @@ export default function DashboardPage() {
             {/* ── Bosta shipping button — primary CTA, admin only ──── */}
             {isAdmin && (
               <button
-                onClick={() => { setShippingResult(null); setAllowOpenAll(false); setShippingModal(true); }}
+                onClick={() => { setShippingResult(null); setAllowOpenAll(false); setShipLimit(String(pendingShipCount)); setShippingModal(true); }}
                 className="relative flex items-center gap-2 px-4 py-2
                   bg-indigo-600 hover:bg-indigo-700 text-white
                   rounded-xl text-sm font-medium transition shadow-sm"
