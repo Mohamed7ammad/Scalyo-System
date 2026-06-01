@@ -216,7 +216,33 @@ pool.query(`
         WHERE source = 'bosta_cod'
     `)
   )
-  .then(() => console.log('✅  Webhook: product_returns + treasury_transactions tables ready'))
+  /* ── Orphan cleanup (must precede the FK — orphans would violate it) ──────
+     Removes financial rows whose order was already deleted. Manual entries
+     (order_id IS NULL) are preserved.                                        */
+  .then(() =>
+    pool.query(`
+      DELETE FROM treasury_transactions t
+       WHERE t.order_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = t.order_id)
+    `)
+  )
+  /* ── Permanent fix: FK with ON DELETE CASCADE ────────────────────────────
+     Deleting an order now automatically wipes its commissions/revenue.
+     Idempotent — only added if the constraint doesn't already exist.         */
+  .then(() =>
+    pool.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'treasury_transactions_order_id_fkey'
+        ) THEN
+          ALTER TABLE treasury_transactions
+            ADD CONSTRAINT treasury_transactions_order_id_fkey
+            FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE;
+        END IF;
+      END $$;
+    `)
+  )
+  .then(() => console.log('✅  Webhook: product_returns + treasury_transactions tables ready (FK ON DELETE CASCADE)'))
   .catch((err) => console.warn('⚠️   Webhook schema migration error:', err.message));
 
 /* ── POST /api/webhooks/bosta ──────────────────────────────────────────── */
