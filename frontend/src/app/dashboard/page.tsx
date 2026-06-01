@@ -755,16 +755,15 @@ export default function DashboardPage() {
       : pendingShipCount;
   })();
 
-  /* ── Copy phones (جديد orders only) ─────────────────────────── */
+  /* ── Copy phones (all currently displayed/filtered orders) ──── */
   const handleCopyPhones = async () => {
     const phones = displayOrders
-      .filter((o) => o.Status === 'جديد')
       .map((o) => o.Phone)
       .filter(Boolean)
       .join('\n');
 
     if (!phones) {
-      showToast('لا توجد أرقام جديدة لنسخها', 'error');
+      showToast('لا توجد أرقام لنسخها', 'error');
       return;
     }
 
