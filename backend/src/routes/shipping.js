@@ -293,15 +293,22 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
      that haven't migrated yet continue to work during the transition. */
   const businessId = req.user.business_id;
   let apiKey;
+  let keySource = 'none';   // 'db' | 'env' | 'none' — surfaced in logs for diagnosis
   try {
     const { rows: credRows } = await pool.query(
       `SELECT api_key FROM shipping_settings WHERE provider_name = 'bosta' AND is_active = true AND business_id = $1`,
       [businessId]
     );
-    apiKey = credRows[0]?.api_key || process.env.BOSTA_API_KEY || null;
+    const dbKey  = credRows[0]?.api_key && String(credRows[0].api_key).trim();
+    const envKey = process.env.BOSTA_API_KEY && String(process.env.BOSTA_API_KEY).trim();
+    if (dbKey)       { apiKey = dbKey;  keySource = 'db';  }
+    else if (envKey) { apiKey = envKey; keySource = 'env'; }
+    else             { apiKey = null; }
   } catch (credErr) {
     console.warn('[shipping/forward] Could not read shipping_settings, falling back to .env:', credErr.message);
-    apiKey = process.env.BOSTA_API_KEY || null;
+    const envKey = process.env.BOSTA_API_KEY && String(process.env.BOSTA_API_KEY).trim();
+    apiKey    = envKey || null;
+    keySource = envKey ? 'env' : 'none';
   }
 
   if (!apiKey) {
@@ -309,6 +316,11 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
       error: 'Shipping credentials not configured. Please update settings in the dashboard.',
     });
   }
+
+  /* Diagnostic breadcrumb — logs WHICH source supplied the key and its length,
+     never the secret itself. Lets us tell from prod logs whether a stale DB
+     row is shadowing a correct BOSTA_API_KEY env var (DB takes precedence).   */
+  console.log(`[shipping/forward] Using Bosta api_key from "${keySource}" (length ${apiKey.length}) for business ${businessId}`);
 
   try {
     /* Fetch only THIS tenant's unshipped confirmed orders, oldest first.
@@ -396,8 +408,12 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
           error:   String(bostaError),
         });
 
-        console.error(`❌  Bosta: order ${order.id} failed:`, bostaError);
+        const httpStatus = err.response?.status ?? 'no-response';
+        console.error(`❌  Bosta: order ${order.id} failed [HTTP ${httpStatus}, key src="${keySource}"]:`, bostaError);
         console.error('❌ Bosta Error Details:', err.response?.data || err.message);
+        /* A 401/403/404 here with a present key almost always means the key
+           VALUE is invalid for api.bosta.co (wrong key, or the app.bosta.co
+           bearer token pasted by mistake) — not a code/header problem. */
       }
     }
 
