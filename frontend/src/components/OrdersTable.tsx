@@ -5,6 +5,13 @@ import { Order, logNoAnswerAttempt } from '@/lib/api';
 
 const NO_ANSWER_REQUIRED = 5;
 
+/* Normalise a status string for comparison. Statuses set via the UI dropdown are
+   clean literals, but statuses arriving from imports / Taager sync / webhooks can
+   differ in Unicode form (NFC vs NFD) or carry stray whitespace. Comparing the
+   normalised form makes status checks (e.g. the inline no-answer button) reliable
+   for ALL orders regardless of source — and therefore for admins too. */
+const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
+
 // All possible statuses — used in the admin full-edit modal only
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل'];
 
@@ -469,7 +476,7 @@ export default function OrdersTable({
                       {/* Admins get a FULL override: every status is editable, even
                           system-set ones (تم الشحن / تم التوصيل). Agents keep the
                           restricted manual list, and system statuses stay locked. */}
-                      {(role === 'admin' || MANUAL_STATUS_OPTIONS.includes(order.Status)) ? (
+                      {(role === 'admin' || MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status))) ? (
                         <select
                           value={order.Status}
                           onChange={(e) => handleStatusChange(order.id, e.target.value)}
@@ -513,8 +520,10 @@ export default function OrdersTable({
                       )}
 
                       {/* Quick no-answer attempt logger — shown inline when status
-                          is 'لا يرد' so agents log a call without opening a modal. */}
-                      {order.Status === 'لا يرد' && (() => {
+                          is 'لا يرد' so BOTH roles log a call without opening a modal.
+                          Uses normalised comparison so it works for imported/synced
+                          orders too (not just UI-set ones). */}
+                      {normStatus(order.Status) === 'لا يرد' && (() => {
                         const logs = attemptOverrides[order.id]
                           ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
                         const count = logs.length;
