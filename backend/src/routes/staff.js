@@ -3,13 +3,7 @@ const bcrypt       = require('bcryptjs');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
-const { sendWelcomeOTP } = require('../utils/mailer');
 const { checkAndSendStaffAlerts } = require('../services/alerts');
-
-/** Cryptographically-simple 6-digit OTP as a zero-padded string. */
-function generateOTP() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
 
 const router = express.Router();
 
@@ -111,16 +105,19 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     ? permissions : ['orders'];
 
   const cleanEmail = email.trim().toLowerCase();
-  const otp = generateOTP();   // 6-digit verification code
 
   try {
     const password_hash = await bcrypt.hash(password, 10);
+    /* Admin-created staff are vouched-for by an authenticated admin, so they are
+       PRE-VERIFIED (email_verified=true, no otp_code) and can log in immediately —
+       the login OTP gate never fires for them. Only self-service signups via
+       /api/auth/register go through email-OTP verification. */
     const result = await pool.query(
       `INSERT INTO users
          (name, email, password_hash, role, is_active, is_absent,
           permissions, commission_rate, comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
           email_verified, otp_code, business_id)
-       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,false,$11,$12)
+       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,true,NULL,$11)
        ${RETURNING}`,
       [
         name.trim() || null,
@@ -133,16 +130,11 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
         parseFloat(comm_delivered)  || 0,
         parseFloat(comm_rejected)   || 0,
         parseFloat(comm_no_answer)  || 0,
-        otp,                       // $11 — stored OTP
-        req.user.business_id,
+        req.user.business_id,        // $11
       ]
     );
 
-    /* Fire the welcome OTP email — best-effort, never blocks/breaks creation.
-       (Awaited so we can surface delivery status, but mailer never throws.) */
-    const mail = await sendWelcomeOTP(cleanEmail, otp);
-
-    res.status(201).json({ ...result.rows[0], email_sent: mail.sent });
+    res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('[POST /staff]', err);
     if (err.code === '23505')
