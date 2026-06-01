@@ -190,7 +190,9 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (user?.role === 'admin') fetchProducts();
+    // All roles fetch products — agents need them for the manual-order modal
+    // (backend strips COGS for non-admins).
+    if (user) fetchProducts();
   }, [user, fetchProducts]);
 
   // Background products poll — keeps stock badges in filter pills fresh.
