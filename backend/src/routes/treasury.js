@@ -509,7 +509,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO treasury_transactions
          (order_id, amount, type, source, description, transaction_date, business_id)
-       VALUES (NULL, $1, $2, $3, $4, $5, $6)
+       VALUES (NULL, $1, $2, $3, $4, COALESCE($5::date, CURRENT_DATE), $6)
        RETURNING
          id,
          order_id,
