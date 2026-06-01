@@ -95,7 +95,7 @@ export default function DashboardPage() {
   const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
   const [distPercents,  setDistPercents]  = useState<Record<number, string>>({});
   /* Manual add-order modal */
-  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', ProductName: '', ProductPrice: '', BostaTrackingCode: '' };
+  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '' };
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm,      setAddForm]      = useState({ ...EMPTY_ADD_FORM });
   const [addSaving,    setAddSaving]    = useState(false);
@@ -595,13 +595,13 @@ export default function DashboardPage() {
     setAddSaving(true);
     try {
       const res = await createOrder({
-        FullName:          addForm.FullName.trim(),
-        Phone:             addForm.Phone.trim(),
-        City:              addForm.City.trim(),
-        Address:           addForm.Address.trim(),
-        ProductName:       addForm.ProductName.trim() || undefined,
-        ProductPrice:      addForm.ProductPrice.trim() || undefined,
-        BostaTrackingCode: addForm.BostaTrackingCode.trim() || undefined,
+        FullName:     addForm.FullName.trim(),
+        Phone:        addForm.Phone.trim(),
+        City:         addForm.City.trim(),
+        Address:      addForm.Address.trim(),
+        ProductName:  addForm.ProductName.trim() || undefined,
+        sku:          addForm.sku.trim() || undefined,
+        ProductPrice: addForm.ProductPrice.trim() || undefined,
       });
       setOrders((prev) => [res.data, ...prev]);   // show instantly at the top
       showToast('تم إضافة الطلب بنجاح', 'success');
@@ -958,19 +958,17 @@ export default function DashboardPage() {
 
               {/* Body */}
               <div className="px-6 py-4 space-y-3.5 overflow-y-auto">
+                {/* Plain text fields */}
                 {([
-                  { key: 'FullName',          label: 'اسم العميل *',            dir: 'rtl', type: 'text',   ph: 'الاسم الكامل' },
-                  { key: 'Phone',             label: 'رقم الهاتف *',            dir: 'ltr', type: 'text',   ph: '01XXXXXXXXX' },
-                  { key: 'City',              label: 'المحافظة / المدينة',      dir: 'rtl', type: 'text',   ph: 'القاهرة' },
-                  { key: 'Address',           label: 'العنوان التفصيلي',        dir: 'rtl', type: 'text',   ph: 'الشارع، المبنى، علامة مميزة' },
-                  { key: 'ProductName',       label: 'المنتج (اختياري)',        dir: 'rtl', type: 'text',   ph: 'اسم المنتج' },
-                  { key: 'ProductPrice',      label: 'الإجمالي / المبلغ (COD)', dir: 'ltr', type: 'number', ph: '0' },
-                  { key: 'BostaTrackingCode', label: 'رقم تتبع بوسطة (اختياري)', dir: 'ltr', type: 'text',   ph: 'رقم البوليصة إن وُجد' },
-                ] as { key: keyof typeof addForm; label: string; dir: string; type: string; ph: string }[]).map((f) => (
+                  { key: 'FullName', label: 'اسم العميل *',       dir: 'rtl', ph: 'الاسم الكامل' },
+                  { key: 'Phone',    label: 'رقم الهاتف *',       dir: 'ltr', ph: '01XXXXXXXXX' },
+                  { key: 'City',     label: 'المحافظة / المدينة', dir: 'rtl', ph: 'القاهرة' },
+                  { key: 'Address',  label: 'العنوان التفصيلي',   dir: 'rtl', ph: 'الشارع، المبنى، علامة مميزة' },
+                ] as { key: keyof typeof addForm; label: string; dir: string; ph: string }[]).map((f) => (
                   <div key={f.key}>
                     <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">{f.label}</label>
                     <input
-                      type={f.type}
+                      type="text"
                       value={addForm[f.key]}
                       onChange={(e) => setAddForm((p) => ({ ...p, [f.key]: e.target.value }))}
                       placeholder={f.ph}
@@ -982,6 +980,59 @@ export default function DashboardPage() {
                     />
                   </div>
                 ))}
+
+                {/* Product dropdown — selecting one fills ProductName + sku and
+                    auto-fills the price (still editable below). */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">المنتج (اختياري)</label>
+                  <select
+                    value={addForm.productId}
+                    onChange={(e) => {
+                      const prod = products.find((p) => p.id === e.target.value);
+                      setAddForm((p) => ({
+                        ...p,
+                        productId:    e.target.value,
+                        ProductName:  prod ? prod.name : '',
+                        sku:          prod ? (prod.sku ?? '') : '',
+                        // auto-fill the price from the product (editable afterwards)
+                        ProductPrice: prod ? String(prod.selling_price ?? '') : p.ProductPrice,
+                      }));
+                    }}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none cursor-pointer
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  >
+                    <option value="">— اختر منتجاً —</option>
+                    {products.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}{p.sku ? ` (${p.sku})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {products.length === 0 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                      لا توجد منتجات مُسجّلة بعد — أضِف منتجات من صفحة المخزون.
+                    </p>
+                  )}
+                </div>
+
+                {/* Total / COD — auto-filled from the product, still editable */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">الإجمالي / المبلغ (COD)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={addForm.ProductPrice}
+                    onChange={(e) => setAddForm((p) => ({ ...p, ProductPrice: e.target.value }))}
+                    placeholder="0"
+                    dir="ltr"
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  />
+                </div>
               </div>
 
               {/* Footer */}

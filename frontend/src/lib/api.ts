@@ -93,14 +93,14 @@ export const getOrders = () =>
 
 /* ── Manual order creation (WhatsApp / Facebook / phone) ────────────────────── */
 export interface CreateOrderPayload {
-  FullName:           string;
-  Phone:              string;
-  Address?:           string;
-  City?:              string;
-  ProductName?:       string;
-  ProductPrice?:      string | number;   // Total / COD amount
-  Quantity?:          number;
-  BostaTrackingCode?: string;            // optional — lets Bosta sync track it
+  FullName:      string;
+  Phone:         string;
+  Address?:      string;
+  City?:         string;
+  ProductName?:  string;
+  sku?:          string;                 // SKU of the selected product
+  ProductPrice?: string | number;        // Total / COD amount
+  Quantity?:     number;
 }
 
 /** Create a manual order (status 'جديد', tenant-scoped). Admin only. */
