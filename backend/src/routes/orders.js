@@ -91,18 +91,19 @@ router.get('/', authenticate, async (req, res) => {
    Treasury/commission logic needs no special handling — it keys off status
    changes via PATCH, so manual orders integrate automatically.                */
 router.post('/', authenticate, requireAdmin, async (req, res) => {
-  const { FullName, Phone, City, Address, ProductPrice, ProductName, sku, Quantity } = req.body;
+  const { FullName, Phone, City, Address, ProductPrice, ProductName, sku } = req.body;
 
   if (!FullName || !String(FullName).trim() || !Phone || !String(Phone).trim()) {
     return res.status(400).json({ error: 'الاسم ورقم الهاتف مطلوبان' });
   }
 
   try {
+    /* NOTE: the orders table has NO "Quantity" column — do not reference it. */
     const result = await pool.query(
       `INSERT INTO orders
-         ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "Quantity", "sku",
+         ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "sku",
           "DeliveryRate", "Status", order_source, business_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'بدون', 'جديد', 'manual', $8)
        RETURNING *`,
       [
         String(FullName).trim(),
@@ -111,7 +112,6 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
         Address ? String(Address).trim() : null,
         ProductName ? String(ProductName).trim() : null,
         ProductPrice != null && String(ProductPrice).trim() !== '' ? String(ProductPrice).trim() : null,
-        Number.isInteger(Number(Quantity)) && Number(Quantity) > 0 ? Number(Quantity) : null,
         sku ? String(sku).trim() : null,
         req.user.business_id,
       ]

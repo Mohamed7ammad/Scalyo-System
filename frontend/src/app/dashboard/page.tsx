@@ -15,6 +15,14 @@ import OrdersTable from '@/components/OrdersTable';
 
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
 
+/* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
+const EGYPT_GOVERNORATES = [
+  'القاهرة', 'الجيزة', 'الإسكندرية', 'القليوبية', 'الشرقية', 'الدقهلية', 'البحيرة',
+  'الغربية', 'المنوفية', 'كفر الشيخ', 'دمياط', 'بورسعيد', 'الإسماعيلية', 'السويس',
+  'الفيوم', 'بني سويف', 'المنيا', 'أسيوط', 'سوهاج', 'قنا', 'الأقصر', 'أسوان',
+  'البحر الأحمر', 'الوادي الجديد', 'مطروح', 'شمال سيناء', 'جنوب سيناء',
+];
+
 const getShortName = (name?: string) => {
   if (!name) return '';
   return name.trim().split(/\s+/).slice(0, 3).join(' ');
@@ -958,12 +966,10 @@ export default function DashboardPage() {
 
               {/* Body */}
               <div className="px-6 py-4 space-y-3.5 overflow-y-auto">
-                {/* Plain text fields */}
+                {/* Plain text fields (name + phone) */}
                 {([
-                  { key: 'FullName', label: 'اسم العميل *',       dir: 'rtl', ph: 'الاسم الكامل' },
-                  { key: 'Phone',    label: 'رقم الهاتف *',       dir: 'ltr', ph: '01XXXXXXXXX' },
-                  { key: 'City',     label: 'المحافظة / المدينة', dir: 'rtl', ph: 'القاهرة' },
-                  { key: 'Address',  label: 'العنوان التفصيلي',   dir: 'rtl', ph: 'الشارع، المبنى، علامة مميزة' },
+                  { key: 'FullName', label: 'اسم العميل *', dir: 'rtl', ph: 'الاسم الكامل' },
+                  { key: 'Phone',    label: 'رقم الهاتف *', dir: 'ltr', ph: '01XXXXXXXXX' },
                 ] as { key: keyof typeof addForm; label: string; dir: string; ph: string }[]).map((f) => (
                   <div key={f.key}>
                     <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">{f.label}</label>
@@ -980,6 +986,40 @@ export default function DashboardPage() {
                     />
                   </div>
                 ))}
+
+                {/* Governorate dropdown */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">المحافظة</label>
+                  <select
+                    value={addForm.City}
+                    onChange={(e) => setAddForm((p) => ({ ...p, City: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none cursor-pointer
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  >
+                    <option value="">— اختر المحافظة —</option>
+                    {EGYPT_GOVERNORATES.map((g) => (
+                      <option key={g} value={g}>{g}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Detailed address */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">العنوان التفصيلي</label>
+                  <input
+                    type="text"
+                    value={addForm.Address}
+                    onChange={(e) => setAddForm((p) => ({ ...p, Address: e.target.value }))}
+                    placeholder="الشارع، المبنى، علامة مميزة"
+                    dir="rtl"
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  />
+                </div>
 
                 {/* Product dropdown — selecting one fills ProductName + sku and
                     auto-fills the price (still editable below). */}
