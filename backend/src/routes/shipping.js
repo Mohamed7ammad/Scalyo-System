@@ -278,12 +278,28 @@ router.get('/pending', authenticate, requireAdmin, async (req, res) => {
    Each order is processed independently — one failure won't abort
    the rest of the batch.                                            */
 router.post('/forward', authenticate, requireAdmin, async (req, res) => {
-  const { allowOpen = false, limit } = req.body;
+  const { allowOpen = false, limit, orderIds } = req.body;
 
-  /* ── Optional batch quota ─────────────────────────────────────────
-     The client may cap how many confirmed orders are shipped in this
-     run (shipping-package limits).  Accept only a positive integer;
-     anything else (undefined, 0, negative, non-numeric) means "no cap"
+  /* ── "Send What You See" — explicit order selection ────────────────
+     The client may send the exact ids of the confirmed orders it wants
+     dispatched (the rows currently visible/filtered in the UI). When the
+     `orderIds` key is present we honour it verbatim, sanitised to a list
+     of positive integers. An explicitly-empty list ships nothing (we do
+     NOT silently fall back to the global queue — that would surprise the
+     user who filtered down to zero matches).                            */
+  const useExplicitIds = Array.isArray(orderIds);
+  const idList = useExplicitIds
+    ? [...new Set(
+        orderIds
+          .map((v) => Number.parseInt(v, 10))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      )]
+    : [];
+
+  /* ── Optional batch quota (legacy / no explicit ids) ──────────────
+     When no `orderIds` are given, the client may instead cap how many
+     confirmed orders are shipped in this run (shipping-package limits).
+     Accept only a positive integer; anything else means "no cap"
      → ship the whole pending queue, preserving the previous behaviour. */
   const parsedLimit = Number.parseInt(limit, 10);
   const batchLimit  = Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
@@ -323,25 +339,54 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
   console.log(`[shipping/forward] Using Bosta api_key from "${keySource}" (length ${apiKey.length}) for business ${businessId}`);
 
   try {
-    /* Fetch only THIS tenant's unshipped confirmed orders, oldest first.
-       When a batch quota is supplied we LIMIT the queue so only the oldest
-       N orders are dispatched this run (FIFO fulfilment).                 */
-    const params = [businessId];
-    let limitClause = '';
-    if (batchLimit !== null) {
-      params.push(batchLimit);
-      limitClause = `LIMIT $${params.length}`;
-    }
+    let orders;
 
-    const { rows: orders } = await pool.query(`
-      SELECT *
-      FROM   orders
-      WHERE  "Status"           = 'تم التأكيد'
-        AND  "BostaTrackingCode" IS NULL
-        AND  business_id = $1
-      ORDER  BY "createdAt" ASC
-      ${limitClause}
-    `, params);
+    if (useExplicitIds) {
+      /* ── "Send What You See": ship exactly the selected ids ──────────
+         Only the status guard ('تم التأكيد') and tenant scope are applied.
+         We deliberately do NOT filter on "BostaTrackingCode" IS NULL, so a
+         manually-reverted order that still carries a stale tracking code can
+         be re-sent to Bosta to generate a fresh waybill (its code is then
+         overwritten on success below).                                    */
+      if (idList.length === 0) {
+        return res.json({
+          message: 'لم يتم تحديد أي طلبات صالحة للشحن',
+          success: [],
+          failed:  [],
+        });
+      }
+
+      const { rows } = await pool.query(`
+        SELECT *
+        FROM   orders
+        WHERE  id = ANY($1::int[])
+          AND  "Status"      = 'تم التأكيد'
+          AND  business_id   = $2
+        ORDER  BY "createdAt" ASC
+      `, [idList, businessId]);
+      orders = rows;
+
+    } else {
+      /* ── Legacy global queue: oldest unshipped confirmed orders first.
+         When a batch quota is supplied we LIMIT how many ship this run.   */
+      const params = [businessId];
+      let limitClause = '';
+      if (batchLimit !== null) {
+        params.push(batchLimit);
+        limitClause = `LIMIT $${params.length}`;
+      }
+
+      const { rows } = await pool.query(`
+        SELECT *
+        FROM   orders
+        WHERE  "Status"           = 'تم التأكيد'
+          AND  "BostaTrackingCode" IS NULL
+          AND  business_id = $1
+        ORDER  BY "createdAt" ASC
+        ${limitClause}
+      `, params);
+      orders = rows;
+    }
 
     if (orders.length === 0) {
       return res.json({

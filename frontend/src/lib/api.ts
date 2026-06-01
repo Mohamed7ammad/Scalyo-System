@@ -240,13 +240,15 @@ export const getShippingPending = () =>
   api.get<{ count: number }>('/api/shipping/pending');
 
 /**
- * Forward confirmed orders to Bosta.
+ * Forward specific confirmed orders to Bosta ("Send What You See").
  * @param allowOpen  Allow package opening on delivery (Bosta flag).
- * @param limit      Optional batch quota — ship only the oldest N confirmed
- *                   orders (FIFO). Omit / undefined ships the whole queue.
+ * @param orderIds   The exact ids of the confirmed orders to dispatch — the
+ *                   rows the user has filtered/sliced in the UI. The backend
+ *                   ships these verbatim (ignoring any stale tracking code so
+ *                   reverted orders can be re-sent), guarded by status.
  */
-export const forwardToShipping = (allowOpen: boolean, limit?: number) =>
-  api.post<ShippingResult>('/api/shipping/forward', { allowOpen, limit });
+export const forwardToShipping = (allowOpen: boolean, orderIds: number[]) =>
+  api.post<ShippingResult>('/api/shipping/forward', { allowOpen, orderIds });
 
 /* ── Returns Log ─────────────────────────────────────────────────── */
 export interface DailyReturn {

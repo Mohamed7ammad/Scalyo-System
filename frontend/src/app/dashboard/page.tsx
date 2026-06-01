@@ -741,13 +741,19 @@ export default function DashboardPage() {
   const pct = (n: number) =>
     stats.total ? Math.round((n / stats.total) * 100) : 0;
 
-  // Count of confirmed orders not yet forwarded to Bosta (derived from live data)
-  const pendingShipCount = roleScoped.filter(
-    (o) => o.Status === 'تم التأكيد' && !o.BostaTrackingCode
-  ).length;
+  // "Send What You See": the confirmed orders within the CURRENTLY filtered/
+  // searched table view (same order as displayed). The shipping badge and the
+  // batch we dispatch are both derived from this — so they always match
+  // exactly what the user is looking at (incl. product filter). We intentionally
+  // do NOT exclude orders that carry a BostaTrackingCode, so a manually-reverted
+  // order can be re-selected and re-sent to generate a fresh waybill.
+  const confirmedDisplayOrders = displayOrders.filter(
+    (o) => normStatus(o.Status) === 'تم التأكيد'
+  );
+  const pendingShipCount = confirmedDisplayOrders.length;
 
   // Effective batch size to ship: the requested quota clamped to [1, pending].
-  // A blank/invalid input falls back to shipping the entire pending queue.
+  // A blank/invalid input falls back to shipping the entire visible queue.
   const effectiveShipCount = (() => {
     const parsed = parseInt(shipLimit, 10);
     return Number.isFinite(parsed) && parsed > 0
@@ -817,8 +823,12 @@ export default function DashboardPage() {
       //   UPDATE business_wallet SET balance += SUM(depositAmount)
       //   for all orders in this batch where hasDeposit = true.
       //   This records already-collected cash into the wallet ledger before shipment.
-      // Ship the requested batch quota (clamped to the pending queue).
-      const res = await forwardToShipping(allowOpenAll, effectiveShipCount);
+      // Slice the first N confirmed orders from the CURRENT filtered view and
+      // ship exactly those ids ("Send What You See"). N is the clamped quota.
+      const idsToShip = confirmedDisplayOrders
+        .slice(0, effectiveShipCount)
+        .map((o) => o.id);
+      const res = await forwardToShipping(allowOpenAll, idsToShip);
       setShippingResult(res.data);
       // Refresh orders silently so statuses update without scroll disruption
       const fresh = await import('@/lib/api').then((m) => m.getOrders());
