@@ -117,10 +117,50 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       ]
     );
 
-    const order = result.rows[0];
+    let order = result.rows[0];
+
+    /* ── Auto-assign to the least-loaded present agent ──────────────────────
+       Balances workload by giving the new order to the present, active agent
+       who currently has the FEWEST pending ('جديد') orders. This mirrors the
+       auto-distribute philosophy for a single order WITHOUT reshuffling anyone
+       else's existing assignments. Done BEFORE the response so the returned
+       order already carries AssignedTo (frontend reflects it instantly).      */
+    try {
+      const { rows: agentRows } = await pool.query(
+        `SELECT u.email,
+                COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
+           FROM users u
+           LEFT JOIN orders o
+             ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+          WHERE u.role = 'agent'
+            AND COALESCE(u.is_active,  true)  = true
+            AND COALESCE(u.is_absent, false)  = false
+            AND u.business_id = $1
+          GROUP BY u.email
+          ORDER BY load ASC, u.email ASC
+          LIMIT 1`,
+        [req.user.business_id]
+      );
+
+      if (agentRows.length) {
+        const upd = await pool.query(
+          `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+            WHERE id = $2 AND business_id = $3 RETURNING *`,
+          [agentRows[0].email, order.id, req.user.business_id]
+        );
+        if (upd.rows.length) order = upd.rows[0];
+        console.log(`[Manual Order] 🤝 #${order.id} auto-assigned to ${order.AssignedTo}`);
+      } else {
+        console.log(`[Manual Order] ℹ️  #${order.id} left unassigned — no present agents`);
+      }
+    } catch (assignErr) {
+      console.warn('[Manual Order] auto-assign skipped:', assignErr.message);
+    }
+
     console.log(`[Manual Order] ✅ #${order.id} created for tenant ${req.user.business_id}`);
 
-    // Respond first, then enrich the delivery rating in the background (throttled queue).
+    // Respond with the (now-assigned) order, then enrich the delivery rating in
+    // the background (throttled queue).
     res.status(201).json(order);
     enrichDeliveryRate(order.id, order.Phone);
   } catch (err) {
