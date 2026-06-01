@@ -789,6 +789,11 @@ export interface TreasurySummary {
   total_revenue:      number;
   total_expenses:     number;
   net_balance:        number;
+  /** النقد الفعلي للشركة — Current Total Balance (net cash in the vault):
+   *  Σ opening balances + all incomes − all expenses/payouts. */
+  current_total_balance: number;
+  /** Σ of all OPENING_BALANCE (seed-capital) entries. */
+  opening_balance:    number;
   count:              number;
   /* ── Revenue sub-breakdown ────────────────────────────────── */
   bosta_cod_revenue:  number;   // COD collected via Bosta webhook
@@ -824,9 +829,27 @@ export const getCommissionsBreakdown = () =>
   api.get<CommissionBreakdownDay[]>('/api/treasury/commissions-breakdown');
 
 /* ── Manual treasury entry ───────────────────────────────────────────── */
+
+/** Known manual-entry categories (mirrors MANUAL_CATEGORIES in
+ *  backend/src/routes/treasury.js). The category code is stored in `source`
+ *  and dictates whether the entry is income (revenue) or expense — the server
+ *  derives the sign, so the client need only send the code. */
+export const MANUAL_CATEGORIES: Record<
+  string,
+  { type: 'revenue' | 'expense'; label: string }
+> = {
+  OPENING_BALANCE:               { type: 'revenue', label: 'رصيد افتتاحي'     },
+  AD_SPEND:                      { type: 'expense', label: 'مصاريف إعلانات'   },
+  PACKAGING_COST:                { type: 'expense', label: 'تغليف'            },
+  SHIPPING_PACKAGE_SUBSCRIPTION: { type: 'expense', label: 'باقة شحن'         },
+  OPERATIONAL_EXPENSE:           { type: 'expense', label: 'مصروفات تشغيلية'  },
+};
+export type ManualCategory = keyof typeof MANUAL_CATEGORIES;
+
 export interface AddTreasuryEntryPayload {
   amount:             number;
-  type:               'revenue' | 'expense';
+  /** Optional for known categories (server derives it); required for custom. */
+  type?:              'revenue' | 'expense';
   source:             string;
   description?:       string;
   transaction_date?:  string;   // YYYY-MM-DD; defaults to today on server

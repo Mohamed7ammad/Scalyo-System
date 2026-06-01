@@ -12,6 +12,7 @@ import {
   CommissionBreakdownDay,
   AddTreasuryEntryPayload,
   BostaWallet,
+  MANUAL_CATEGORIES,
 } from '@/lib/api';
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +165,26 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
   comm_no_answer: {
     label: 'عمولة لا يرد',
     cls: 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700',
+  },
+  OPENING_BALANCE: {
+    label: 'رصيد افتتاحي',
+    cls: 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-700/40',
+  },
+  AD_SPEND: {
+    label: 'مصاريف إعلانات',
+    cls: 'bg-pink-100 text-pink-700 border-pink-200 dark:bg-pink-900/30 dark:text-pink-300 dark:border-pink-700/40',
+  },
+  PACKAGING_COST: {
+    label: 'تغليف',
+    cls: 'bg-rose-100 text-rose-700 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-700/40',
+  },
+  SHIPPING_PACKAGE_SUBSCRIPTION: {
+    label: 'باقة شحن',
+    cls: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-700/40',
+  },
+  OPERATIONAL_EXPENSE: {
+    label: 'مصروفات تشغيلية',
+    cls: 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700/40',
   },
 };
 
@@ -354,9 +375,19 @@ function CommissionsModal({
 /* ─────────────────────────────────────────────────────────────────────────────
    AddEntryModal
 ───────────────────────────────────────────────────────────────────────────── */
+/* Category options for the dropdown, in display order. The leading value ''
+   is the "choose a category" placeholder. Each known code carries its own
+   revenue/expense sign via MANUAL_CATEGORIES — the user never picks the sign. */
+const CATEGORY_OPTIONS: { code: string; label: string }[] = [
+  { code: 'OPENING_BALANCE',               label: 'رصيد افتتاحي' },
+  { code: 'AD_SPEND',                      label: 'مصاريف إعلانات' },
+  { code: 'PACKAGING_COST',                label: 'تغليف' },
+  { code: 'SHIPPING_PACKAGE_SUBSCRIPTION', label: 'باقة شحن' },
+  { code: 'OPERATIONAL_EXPENSE',           label: 'مصروفات تشغيلية' },
+];
+
 interface AddEntryForm {
-  type:        'revenue' | 'expense';
-  source:      string;
+  category:    string;   // category code from MANUAL_CATEGORIES, or '' = unset
   amount:      string;
   description: string;
 }
@@ -368,7 +399,7 @@ function AddEntryModal({
   onClose: () => void;
   onSaved: (entry: TreasuryTransaction) => void;
 }) {
-  const [form,   setForm]   = useState<AddEntryForm>({ type: 'expense', source: '', amount: '', description: '' });
+  const [form,   setForm]   = useState<AddEntryForm>({ category: '', amount: '', description: '' });
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState('');
 
@@ -376,22 +407,25 @@ function AddEntryModal({
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
       setForm((f) => ({ ...f, [k]: e.target.value }));
 
+  /* Derived sign of the currently selected category (drives the +/− preview). */
+  const selected = form.category ? MANUAL_CATEGORIES[form.category] : null;
+  const isIncome = selected?.type === 'revenue';
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr('');
+    if (!form.category) {
+      return setErr('يرجى اختيار نوع المعاملة');
+    }
     const amount = parseFloat(form.amount);
     if (!form.amount || isNaN(amount) || amount <= 0) {
       return setErr('المبلغ مطلوب ويجب أن يكون رقماً موجباً');
-    }
-    if (!form.source.trim()) {
-      return setErr('المصدر / التصنيف مطلوب');
     }
     setSaving(true);
     try {
       const payload: AddTreasuryEntryPayload = {
         amount,
-        type:        form.type,
-        source:      form.source.trim(),
+        source:      form.category,   // server derives revenue/expense from this
         description: form.description.trim() || undefined,
       };
       const res = await addTreasuryEntry(payload);
@@ -445,30 +479,33 @@ function AddEntryModal({
         <form onSubmit={submit} className="p-6 space-y-4">
           {err && <Alert msg={err} type="error" />}
 
-          {/* Type */}
+          {/* Transaction category — drives the income/expense sign */}
           <div>
             <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
-              النوع <span className="text-red-500">*</span>
+              نوع المعاملة <span className="text-red-500">*</span>
             </label>
-            <select value={form.type} onChange={handle('type')} className={inputCls}>
-              <option value="expense">مصروف — Expense</option>
-              <option value="revenue">إيراد — Revenue</option>
+            <select value={form.category} onChange={handle('category')} className={inputCls}>
+              <option value="" disabled>— اختر نوع المعاملة —</option>
+              {CATEGORY_OPTIONS.map((c) => (
+                <option key={c.code} value={c.code}>{c.label}</option>
+              ))}
             </select>
-          </div>
 
-          {/* Source */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
-              المصدر / التصنيف <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              placeholder="مثال: تغليف وبابلز، شحن إيزي أوردر، فلايرز…"
-              value={form.source}
-              onChange={handle('source')}
-              className={inputCls}
-              maxLength={80}
-            />
+            {/* Income / expense indicator — auto-flagged from the selection */}
+            {selected && (
+              <div className="mt-2">
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${
+                    isIncome
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-700/40'
+                      : 'bg-red-50 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700/40'
+                  }`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${isIncome ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                  {isIncome ? 'إيراد (+) — يُضاف إلى رصيد الشركة' : 'مصروف (−) — يُخصم من رصيد الشركة'}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Amount */}
@@ -908,6 +945,56 @@ export default function TreasuryPage() {
       {!loading && summary && (
         <>
           {/* ════════════════════════════════════════════════════════
+              HERO — Current Company Balance (رصيد الشركة الفعلي)
+              The real cash in the corporate vault:
+              Σ opening balances + all incomes − all expenses/payouts.
+          ════════════════════════════════════════════════════════ */}
+          <div className="mb-6">
+            <div
+              className={`relative overflow-hidden flex flex-wrap items-center gap-5 px-6 py-6 rounded-2xl border shadow-sm
+                ${summary.current_total_balance >= 0
+                  ? 'border-emerald-200/80 dark:border-emerald-700/30 bg-gradient-to-l from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/10'
+                  : 'border-red-200/80 dark:border-red-700/30 bg-gradient-to-l from-red-50 to-rose-50 dark:from-red-900/20 dark:to-rose-900/10'}`}
+            >
+              <div
+                className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0
+                  ${summary.current_total_balance >= 0
+                    ? 'bg-emerald-100 dark:bg-emerald-800/40 text-emerald-600 dark:text-emerald-300'
+                    : 'bg-red-100 dark:bg-red-800/40 text-red-600 dark:text-red-300'}`}
+              >
+                <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                  رصيد الشركة الفعلي
+                </p>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-1">
+                  النقد الحقيقي المتاح في الخزينة — الرصيد الافتتاحي + كل الإيرادات − كل المصروفات
+                </p>
+                <p
+                  className={`text-3xl sm:text-4xl font-extrabold tabular-nums
+                    ${summary.current_total_balance >= 0
+                      ? 'text-emerald-700 dark:text-emerald-300'
+                      : 'text-red-700 dark:text-red-300'}`}
+                >
+                  {summary.current_total_balance >= 0 ? '+' : ''}{fmt(summary.current_total_balance)} ج
+                </p>
+              </div>
+              {summary.opening_balance > 0 && (
+                <div className="shrink-0 text-left">
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500">منها رصيد افتتاحي</p>
+                  <p className="text-base font-bold tabular-nums text-slate-600 dark:text-slate-300">
+                    {fmt(summary.opening_balance)} ج
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ════════════════════════════════════════════════════════
               ROW 1 — Revenue breakdown
           ════════════════════════════════════════════════════════ */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
@@ -1224,6 +1311,11 @@ export default function TreasuryPage() {
                   {key === 'comm_delivered' && 'عمولة توصيل الطلب'}
                   {key === 'comm_rejected'  && 'عمولة رفض الطلب'}
                   {key === 'comm_no_answer' && 'عمولة لا يرد / مؤجل'}
+                  {key === 'OPENING_BALANCE'               && 'رأس المال الافتتاحي للشركة'}
+                  {key === 'AD_SPEND'                      && 'مصاريف الإعلانات الممولة'}
+                  {key === 'PACKAGING_COST'                && 'تكاليف التغليف والتعبئة'}
+                  {key === 'SHIPPING_PACKAGE_SUBSCRIPTION' && 'اشتراك باقة الشحن'}
+                  {key === 'OPERATIONAL_EXPENSE'           && 'مصروفات تشغيلية عامة'}
                 </span>
               </div>
             ))}

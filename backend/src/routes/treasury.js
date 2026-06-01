@@ -20,6 +20,25 @@ const PRICE_EXPR = `
   )
 `;
 
+/* ── Manual transaction categories (the "corporate vault" ledger) ───────────
+   Each manual entry the admin adds is tagged with one of these category codes
+   in treasury_transactions.source.  The category is the single source of truth
+   for whether the entry is money IN (revenue / credit) or money OUT
+   (expense / debit) — the client never decides the sign on its own, the server
+   derives `type` from the category below.  Codes are stored, Arabic labels are
+   for display only.  source is VARCHAR(50) so every code fits comfortably.
+
+   Mirrored on the frontend in:
+     • frontend/src/lib/api.ts          (MANUAL_CATEGORIES type)
+     • dashboard/treasury/page.tsx      (AddEntryModal dropdown + SOURCE_META)  */
+const MANUAL_CATEGORIES = {
+  OPENING_BALANCE:               { type: 'revenue', label: 'رصيد افتتاحي'      },
+  PACKAGING_COST:                { type: 'expense', label: 'تغليف'             },
+  AD_SPEND:                      { type: 'expense', label: 'مصاريف إعلانات'    },
+  SHIPPING_PACKAGE_SUBSCRIPTION: { type: 'expense', label: 'باقة شحن'          },
+  OPERATIONAL_EXPENSE:           { type: 'expense', label: 'مصروفات تشغيلية'   },
+};
+
 /* ── Idempotent schema bootstrap ──────────────────────────────────────────
    treasury.js owns the full migration chain for treasury_transactions.
    All statements use IF NOT EXISTS — safe to run on every restart.
@@ -299,31 +318,42 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
     let bostaCodRevenue  = 0;
     let depositsRevenue  = 0;
     let totalCommissions = 0;
+    let openingBalance   = 0;   // seed capital injected via OPENING_BALANCE entries
 
     for (const row of rows) {
       const amt = parseFloat(row.amount) || 0;
       if (row.type === 'revenue') {
         totalRevenue += amt;
-        if (row.source === 'bosta_cod') bostaCodRevenue += amt;
-        if (row.source === 'deposit')   depositsRevenue += amt;
+        if (row.source === 'bosta_cod')       bostaCodRevenue += amt;
+        if (row.source === 'deposit')         depositsRevenue += amt;
+        if (row.source === 'OPENING_BALANCE') openingBalance  += amt;
       } else {
         totalExpenses += amt;
         if (row.source.startsWith('comm_')) totalCommissions += amt;
       }
     }
 
+    /* Current Total Balance (النقد الفعلي / net cash in the corporate vault):
+         Σ opening balances + all incomes − all expenses & payouts.
+       Opening balances are already counted inside totalRevenue, so the real
+       cash on hand is simply total revenue − total expenses. We surface it as
+       a dedicated, unambiguous metric so the dashboard can headline it.        */
+    const currentTotalBalance = totalRevenue - totalExpenses;
+
     res.json({
       summary: {
-        total_revenue:      parseFloat(totalRevenue.toFixed(2)),
-        total_expenses:     parseFloat(totalExpenses.toFixed(2)),
-        net_balance:        parseFloat((totalRevenue - totalExpenses).toFixed(2)),
-        count:              rows.length,
-        bosta_cod_revenue:  parseFloat(bostaCodRevenue.toFixed(2)),
-        deposits_revenue:   parseFloat(depositsRevenue.toFixed(2)),
-        total_commissions:  parseFloat(totalCommissions.toFixed(2)),
-        deposits_live:      parseFloat(parseFloat(total_deposits_live).toFixed(2)),
-        count_with_deposit: parseInt(count_with_deposit, 10) || 0,
-        pending_bosta_cash: parseFloat(parseFloat(pending_bosta_cash || 0).toFixed(2)),
+        total_revenue:         parseFloat(totalRevenue.toFixed(2)),
+        total_expenses:        parseFloat(totalExpenses.toFixed(2)),
+        net_balance:           parseFloat((totalRevenue - totalExpenses).toFixed(2)),
+        current_total_balance: parseFloat(currentTotalBalance.toFixed(2)),
+        opening_balance:       parseFloat(openingBalance.toFixed(2)),
+        count:                 rows.length,
+        bosta_cod_revenue:     parseFloat(bostaCodRevenue.toFixed(2)),
+        deposits_revenue:      parseFloat(depositsRevenue.toFixed(2)),
+        total_commissions:     parseFloat(totalCommissions.toFixed(2)),
+        deposits_live:         parseFloat(parseFloat(total_deposits_live).toFixed(2)),
+        count_with_deposit:    parseInt(count_with_deposit, 10) || 0,
+        pending_bosta_cash:    parseFloat(parseFloat(pending_bosta_cash || 0).toFixed(2)),
       },
       transactions: rows,
     });
@@ -436,9 +466,17 @@ router.get('/commissions-breakdown', authenticate, requireAdmin, async (req, res
    ══════════════════════════════════════════════════════════════════════════
 
    Manually adds a revenue or expense entry (order_id = NULL).
-   Intended for operational expenses like packaging, flyers, manual shipping.
+   Intended for the corporate-vault ledger: opening balance, packaging, ad
+   spend, shipping subscriptions, and other operational expenses.
 
-   Body: { amount, type, source, description?, transaction_date? }
+   Body: { amount, source, type?, description?, transaction_date? }
+
+   `source` is the single source of truth for the sign of the entry:
+     • If it matches a known category in MANUAL_CATEGORIES, the server forces
+       `type` from that category (client-supplied `type` is ignored) — so an
+       OPENING_BALANCE can never be miscategorised as an expense, etc.
+     • Otherwise (free-text custom category) the client MUST pass a valid
+       `type` of 'revenue' or 'expense', preserving backward compatibility.
 
    Admin only.
    ══════════════════════════════════════════════════════════════════════════ */
@@ -449,11 +487,22 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
   if (!amount || isNaN(parsed) || parsed <= 0) {
     return res.status(400).json({ error: 'المبلغ مطلوب ويجب أن يكون رقماً موجباً' });
   }
-  if (!['revenue', 'expense'].includes(String(type))) {
-    return res.status(400).json({ error: 'النوع يجب أن يكون revenue أو expense' });
-  }
   if (!source || !String(source).trim()) {
     return res.status(400).json({ error: 'المصدر / التصنيف مطلوب' });
+  }
+
+  const sourceCode = String(source).trim();
+  const category   = MANUAL_CATEGORIES[sourceCode];
+
+  /* Derive the authoritative type: a known category dictates revenue/expense;
+     a free-text source falls back to the validated client-supplied type.      */
+  let resolvedType;
+  if (category) {
+    resolvedType = category.type;
+  } else if (['revenue', 'expense'].includes(String(type))) {
+    resolvedType = String(type);
+  } else {
+    return res.status(400).json({ error: 'النوع يجب أن يكون revenue أو expense' });
   }
 
   try {
@@ -472,15 +521,15 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
          created_at`,
       [
         parsed.toFixed(2),
-        String(type).trim(),
-        String(source).trim(),
+        resolvedType,
+        sourceCode,
         description ? String(description).trim() || null : null,
         transaction_date || null,
         req.user.business_id,
       ]
     );
 
-    console.log(`✅  Treasury manual entry: ${type} ${parsed.toFixed(2)} EGP — "${source}"`);
+    console.log(`✅  Treasury manual entry: ${resolvedType} ${parsed.toFixed(2)} EGP — "${sourceCode}"`);
     res.status(201).json(rows[0]);
 
   } catch (err) {
