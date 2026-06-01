@@ -182,6 +182,21 @@ async function ingestEasyOrder(body, businessId) {
   return { ok: true, status: 201, payload: { success: true, order: newOrder } };
 }
 
+/* ── GET /api/webhooks/easyorder/:businessId — health/diagnostic ─────────────
+   EasyOrder uses POST, but a GET here lets you confirm in a browser that THIS
+   build (with the tenant-aware route) is actually deployed — a 200 JSON means
+   the new code is live; a 404 means the running backend is stale and needs a
+   redeploy/restart. Does NOT touch the database.                               */
+router.get('/easyorder/:businessId', (req, res) => {
+  res.status(200).json({
+    ok: true,
+    endpoint: 'easyorder-webhook',
+    business_id: req.params.businessId,
+    method_expected: 'POST',
+    message: 'EasyOrder webhook endpoint is live. Send order payloads via POST.',
+  });
+});
+
 /* ── POST /api/webhooks/easyorder/:businessId — tenant-aware (PREFERRED) ──────
    EasyOrder posts here with the tenant's unique URL. Optional per-tenant secret
    (header x-easyorder-secret / x-webhook-secret, or ?secret=) is validated when
