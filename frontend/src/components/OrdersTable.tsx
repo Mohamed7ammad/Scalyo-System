@@ -77,6 +77,7 @@ interface Props {
   agents?:          string[];
   showProduct?:     boolean;   // true when viewing "كل المنتجات" — renders product badge per row
   emptyMessage?:    string;    // override for the no-results state (e.g. when a search is active)
+  onToast?:         (message: string, type?: 'success' | 'error') => void; // optional parent toast
 }
 
 export default function OrdersTable({
@@ -84,6 +85,7 @@ export default function OrdersTable({
   selectedIds = [], onToggleSelect, onSelectAll,
   agents = [], showProduct = false,
   emptyMessage = 'لا توجد طلبات لعرضها',
+  onToast,
 }: Props) {
   const [savingId,        setSavingId]        = useState<number | null>(null);
   const [editModal,       setEditModal]       = useState<Order | null>(null);
@@ -102,6 +104,10 @@ export default function OrdersTable({
   const [noAnswerLogs,  setNoAnswerLogs]  = useState<string[]>([]);
   const [loggingAttempt, setLoggingAttempt] = useState(false);
   const [attemptMsg,    setAttemptMsg]    = useState<string>('');
+  /* Inline (in-table) no-answer button: per-order optimistic override of the
+     attempt log + which row is mid-request, so the row updates without a modal. */
+  const [attemptOverrides, setAttemptOverrides] = useState<Record<number, string[]>>({});
+  const [inlineLoggingId,  setInlineLoggingId]  = useState<number | null>(null);
 
   const openQuickEdit = (order: Order) => {
     setQuickForm({
@@ -136,6 +142,28 @@ export default function OrdersTable({
       setAttemptMsg('تعذّر تسجيل المحاولة، حاول مرة أخرى');
     } finally {
       setLoggingAttempt(false);
+    }
+  };
+
+  /* Inline one-click attempt logger used directly from a table row (no modal).
+     Updates the row counter optimistically and toasts the result. */
+  const handleInlineAttempt = async (orderId: number) => {
+    if (!orderId || inlineLoggingId === orderId) return;
+    setInlineLoggingId(orderId);
+    try {
+      const { data } = await logNoAnswerAttempt(orderId);
+      setAttemptOverrides((prev) => ({ ...prev, [orderId]: data.no_answer_logs }));
+      if (data.commissionAwarded) {
+        onToast?.(`🎉 ${data.count}/${data.required} محاولات — تم منح عمولة "لا يرد"`, 'success');
+      } else if (data.count < data.required) {
+        onToast?.(`تم تسجيل المحاولة (${data.count}/${data.required}) — تبقّى ${data.required - data.count}`, 'success');
+      } else {
+        onToast?.(`تم تسجيل المحاولة (${data.count}) — العمولة مُحتسبة بالفعل`, 'success');
+      }
+    } catch {
+      onToast?.('تعذّر تسجيل المحاولة، حاول مرة أخرى', 'error');
+    } finally {
+      setInlineLoggingId(null);
     }
   };
 
@@ -373,12 +401,12 @@ export default function OrdersTable({
                         </span>
                       )}
 
-                      {/* Quantity badge — shown whenever Quantity field is present */}
-                      {order.Quantity != null && order.Quantity > 0 && (
+                      {/* Quantity badge — shown whenever quantity > 1 */}
+                      {order.quantity != null && order.quantity > 1 && (
                         <span className="mt-1 inline-flex items-center gap-1
                           px-2 py-0.5 rounded-md text-xs
                           bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400 mr-1">
-                          الكمية:&nbsp;<strong className="text-gray-700 dark:text-slate-300">{order.Quantity}</strong>&nbsp;قطعة
+                          الكمية:&nbsp;<strong className="text-gray-700 dark:text-slate-300">{order.quantity}</strong>&nbsp;قطعة
                         </span>
                       )}
 
@@ -483,6 +511,34 @@ export default function OrdersTable({
                           {order.rejectionReason}
                         </div>
                       )}
+
+                      {/* Quick no-answer attempt logger — shown inline when status
+                          is 'لا يرد' so agents log a call without opening a modal. */}
+                      {order.Status === 'لا يرد' && (() => {
+                        const logs = attemptOverrides[order.id]
+                          ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+                        const count = logs.length;
+                        const done  = count >= NO_ANSWER_REQUIRED;
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => handleInlineAttempt(order.id)}
+                            disabled={inlineLoggingId === order.id}
+                            title="تسجيل محاولة اتصال"
+                            className={`mt-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+                              transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
+                              ${done
+                                ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300'
+                                : 'bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300'}`}
+                          >
+                            <span>📞</span>
+                            <span>
+                              {inlineLoggingId === order.id ? 'جارٍ…' : 'تسجيل محاولة'}
+                              {' '}({count}/{NO_ANSWER_REQUIRED})
+                            </span>
+                          </button>
+                        );
+                      })()}
                     </td>
 
                     {/* Financials / Payment column */}
@@ -864,6 +920,23 @@ export default function OrdersTable({
                 </div>
               </div>
             )}
+
+            <div>
+              <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">الكمية</label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={editForm.quantity ?? 1}
+                onChange={(e) => setEditForm((p) => ({ ...p, quantity: Math.max(1, parseInt(e.target.value, 10) || 1) }))}
+                dir="ltr"
+                className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                  border border-gray-300 dark:border-slate-700
+                  bg-white dark:bg-slate-800
+                  text-gray-900 dark:text-slate-200
+                  focus:ring-2 focus:ring-indigo-400"
+              />
+            </div>
 
             <div>
               <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">حالة الاستلام</label>
