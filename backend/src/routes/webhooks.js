@@ -51,49 +51,86 @@ function buildFallbackKey(body) {
   }
 })();
 
-/* ── Quantity parser ──────────────────────────────────────────────────────────
-   EasyOrder orders can contain multiple units. Resolve the total quantity from
-   either a flat field or a line-items array (summing per-line quantities).
-   Defaults to 1. (Field names are provisional — refined once a real sample
-   payload is supplied.)                                                          */
-function parseQuantity(body) {
-  const direct = body.quantity ?? body.qty ?? body.Quantity ?? body.count ?? body.items_count;
-  if (direct != null && !isNaN(parseInt(direct, 10))) {
-    return Math.max(1, parseInt(direct, 10));
-  }
+/* ── Cart items accessor ──────────────────────────────────────────────────────
+   EasyOrder's real payload uses `cart_items`. Aliases kept as defensive
+   fallbacks for other/legacy shapes.                                            */
+function getCartItems(body) {
   const items =
-    body.items ?? body.cart_items ?? body.cartItems ?? body.products ??
+    body.cart_items ?? body.cartItems ?? body.items ?? body.products ??
     body.line_items ?? body.lineItems ?? body.order_items ?? null;
-  if (Array.isArray(items) && items.length) {
+  return Array.isArray(items) ? items : [];
+}
+
+/** Per-line product name: cart_items[i].product.name (with fallbacks). */
+function lineItemName(it) {
+  return (
+    it?.product?.name ?? it?.product_name ?? it?.name ?? it?.title ?? null
+  );
+}
+
+/** Per-line SKU: cart_items[i].product.slug (with fallbacks). */
+function lineItemSku(it) {
+  return (
+    it?.product?.slug ?? it?.sku ?? it?.slug ?? it?.product?.sku ?? null
+  );
+}
+
+/* ── Quantity parser ──────────────────────────────────────────────────────────
+   Rule 8: SUM the `quantity` of every entry in cart_items. Falls back to a flat
+   quantity field, then to 1.                                                     */
+function parseQuantity(body) {
+  const items = getCartItems(body);
+  if (items.length) {
     const sum = items.reduce((acc, it) => {
       const q = parseInt(it?.quantity ?? it?.qty ?? it?.count ?? 1, 10);
       return acc + Math.max(1, isNaN(q) ? 1 : q);
     }, 0);
     if (sum > 0) return sum;
   }
+  const direct = body.quantity ?? body.qty ?? body.Quantity ?? body.count;
+  if (direct != null && !isNaN(parseInt(direct, 10))) {
+    return Math.max(1, parseInt(direct, 10));
+  }
   return 1;
 }
 
 /* ── Field extractor ──────────────────────────────────────────────────────────
-   Pulls the order fields from a variety of possible EasyOrder shapes, falling
-   back to the first line item for product details when not present top-level.   */
+   Maps the EasyOrder webhook payload to our orders columns:
+     full_name              → FullName
+     phone                  → Phone
+     government             → City
+     address                → Address
+     total_cost             → ProductPrice (the COD amount to collect)
+     cart_items[*].product.name → ProductName (all items joined with ' + ')
+     cart_items[0].product.slug → sku
+     Σ cart_items[*].quantity   → quantity
+   Top-level aliases retained so other payload variants still parse.             */
 function extractOrderFields(body) {
-  const items =
-    body.items ?? body.cart_items ?? body.cartItems ?? body.products ??
-    body.line_items ?? body.lineItems ?? body.order_items ?? null;
-  const firstItem = Array.isArray(items) && items.length ? items[0] : {};
+  const items = getCartItems(body);
+
+  // Product name: join every line item's name (Rule 6); fall back to top-level.
+  const names = items.map(lineItemName).filter(Boolean);
+  const productName =
+    names.length ? names.join(' + ')
+                 : (body.ProductName ?? body.product ?? body.Product ?? null);
+
+  // SKU: first line item's slug (Rule 7); fall back to top-level.
+  const sku = (items.length ? lineItemSku(items[0]) : null) ?? body.sku ?? body.slug ?? null;
+
+  // COD: prefer the order's total_cost (Rule 5), then common aliases.
+  const productPrice =
+    body.total_cost ?? body.totalCost ?? body.ProductPrice ?? body.total ??
+    body.total_price ?? body.amount ?? body.price ?? null;
 
   return {
-    FullName:     body.FullName ?? body.full_name ?? body.name ?? body.customer_name ?? null,
-    Phone:        body.Phone ?? body.phone ?? body.phone_number ?? body.mobile ?? null,
-    City:         body.City ?? body.city ?? body.governorate ?? null,
-    Address:      body.Address ?? body.address ?? body.shipping_address ?? null,
+    FullName:     body.full_name ?? body.FullName ?? body.name ?? body.customer_name ?? null,
+    Phone:        body.phone ?? body.Phone ?? body.phone_number ?? body.mobile ?? null,
+    City:         body.government ?? body.governorate ?? body.City ?? body.city ?? null,
+    Address:      body.address ?? body.Address ?? body.shipping_address ?? null,
     Note:         body.Note ?? body.note ?? body.notes ?? body.comment ?? null,
-    ProductName:  body.ProductName ?? body.product ?? body.Product ??
-                  firstItem.name ?? firstItem.product_name ?? firstItem.title ?? null,
-    ProductPrice: body.ProductPrice ?? body.price ?? body.Price ??
-                  body.total ?? body.total_price ?? body.amount ??
-                  firstItem.price ?? null,
+    ProductName:  productName,
+    ProductPrice: productPrice,
+    sku,
     quantity:     parseQuantity(body),
   };
 }
@@ -119,14 +156,14 @@ async function ingestEasyOrder(body, businessId) {
   const result = await pool.query(
     `INSERT INTO orders
        ("FullName", "Phone", "DeliveryRate", "City", "Address", "Note", "Status",
-        "ProductName", "ProductPrice", "quantity", external_order_id, order_source, business_id)
+        "ProductName", "ProductPrice", "sku", "quantity", external_order_id, order_source, business_id)
      VALUES ($1, $2, 'بدون', $3, $4, $5, 'جديد',
-             $6, $7, $8, $9, 'easyorder', $10)
+             $6, $7, $8, $9, $10, 'easyorder', $11)
      ON CONFLICT (external_order_id, business_id) WHERE external_order_id IS NOT NULL
      DO NOTHING
      RETURNING *`,
     [f.FullName, f.Phone, f.City || null, f.Address || null, f.Note || null,
-     f.ProductName, f.ProductPrice, Math.max(1, parseInt(f.quantity, 10) || 1),
+     f.ProductName, f.ProductPrice, f.sku || null, Math.max(1, parseInt(f.quantity, 10) || 1),
      externalId, businessId]
   );
 
