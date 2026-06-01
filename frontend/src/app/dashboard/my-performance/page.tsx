@@ -142,6 +142,7 @@ export default function MyPerformancePage() {
   const returned  = toN(data?.status_returned);
   const cancelled = toN(data?.status_cancelled);
   const noAnswer  = toN(data?.status_no_answer);
+  const postponed = toN(data?.status_postponed);
   const earned    = toN(data?.earned_commission);
 
   /* Commission rates (per-agent matrix). Default to the business standard
@@ -289,7 +290,8 @@ export default function MyPerformancePage() {
                   <StatBar label="تم التأكيد"    value={confirmed} total={total} color="bg-emerald-500" />
                   <StatBar label="تم التوصيل"    value={delivered} total={total} color="bg-teal-500" />
                   <StatBar label="تم الرفض"      value={cancelled} total={total} color="bg-red-500" />
-                  <StatBar label="لا يرد / مؤجل" value={noAnswer}  total={total} color="bg-amber-500" />
+                  <StatBar label="لا يرد"        value={noAnswer}  total={total} color="bg-amber-500" />
+                  <StatBar label="مؤجل"          value={postponed} total={total} color="bg-purple-500" />
                   <StatBar label="إرجاع"          value={returned}  total={total} color="bg-orange-500" />
                 </div>
               )}
