@@ -2360,6 +2360,7 @@ export default function DashboardPage() {
             onSelectAll={isAdmin ? toggleSelectAll : undefined}
             agents={uniqueAgents}
             showProduct={activeProduct === 'كل المنتجات'}
+            onToast={(m, t) => showToast(m, t ?? 'success')}
             emptyMessage={
               searchTerm.trim()
                 ? `لا توجد نتائج مطابقة لـ "${searchTerm.trim()}"`

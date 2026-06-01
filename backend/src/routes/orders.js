@@ -528,7 +528,7 @@ const PATCH_WHITELIST = new Set([
   // ── Address ───────────────────────────────────────────────────────
   'City', 'Governorate', 'Address', 'Zone', 'District',
   // ── Order details ─────────────────────────────────────────────────
-  'ProductName', 'ProductPrice', 'Quantity', 'DeliveryRate', 'sku',
+  'ProductName', 'ProductPrice', 'quantity', 'DeliveryRate', 'sku',
   // ── Workflow ──────────────────────────────────────────────────────
   'Status', 'Note', 'PostponedDate', 'rejectionReason', 'AssignedTo',
   // ── Shipping ──────────────────────────────────────────────────────

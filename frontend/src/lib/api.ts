@@ -24,7 +24,7 @@ export interface Order {
   createdAt: string;
   ProductName?: string;
   ProductPrice?: string;
-  Quantity?: number;            // number of items requested (optional — depends on DB column)
+  quantity?: number;            // number of units in the order (DB column, default 1)
   AssignedTo?: string;
   PostponedDate?: string;
   BostaTrackingCode?: string;   // set after successful Bosta shipment
