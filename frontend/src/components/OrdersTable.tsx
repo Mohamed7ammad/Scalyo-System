@@ -385,7 +385,10 @@ export default function OrdersTable({
                         show a read-only badge so no one can accidentally overwrite it inline.
                         Otherwise render the restricted manual-options dropdown.              */}
                     <td className="px-4 py-3">
-                      {MANUAL_STATUS_OPTIONS.includes(order.Status) ? (
+                      {/* Admins get a FULL override: every status is editable, even
+                          system-set ones (تم الشحن / تم التوصيل). Agents keep the
+                          restricted manual list, and system statuses stay locked. */}
+                      {(role === 'admin' || MANUAL_STATUS_OPTIONS.includes(order.Status)) ? (
                         <select
                           value={order.Status}
                           onChange={(e) => handleStatusChange(order.id, e.target.value)}
@@ -395,7 +398,7 @@ export default function OrdersTable({
                             dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
                             ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
                         >
-                          {MANUAL_STATUS_OPTIONS.map((s) => (
+                          {(role === 'admin' ? STATUS_OPTIONS : MANUAL_STATUS_OPTIONS).map((s) => (
                             <option key={s} value={s}>{s}</option>
                           ))}
                         </select>
