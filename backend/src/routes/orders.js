@@ -18,6 +18,14 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "unit_cost_price" NUMERI
   .then(() => console.log('✅  Orders: "unit_cost_price" column ready'))
   .catch((err) => console.warn('⚠️   Orders unit_cost_price column check:', err.message));
 
+/* ── No-answer call-attempt log ─────────────────────────────────────────────
+   JSONB array of ISO timestamps — one per logged call attempt. The
+   comm_no_answer commission is only earned once this reaches 5 attempts while
+   the order is in 'لا يرد' (enforced in the attempt endpoint below).          */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "no_answer_logs" JSONB NOT NULL DEFAULT '[]'::jsonb`)
+  .then(() => console.log('✅  Orders: "no_answer_logs" column ready'))
+  .catch((err) => console.warn('⚠️   Orders no_answer_logs column check:', err.message));
+
 /* ── "updatedAt" column — critical for analytics date filtering ─────────────
    This column MUST exist so the analytics LEFT JOIN ON clause can compare
    dates.  If it is missing, every analytics query throws "column does not
@@ -638,8 +646,10 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
       'تم التأكيد':  { field: 'comm_confirmed', source: 'comm_confirmed', label: 'تأكيد'   },
       'تم التوصيل': { field: 'comm_delivered',  source: 'comm_delivered',  label: 'توصيل'   },
       'تم الرفض':   { field: 'comm_rejected',   source: 'comm_rejected',   label: 'رفض'     },
-      'لا يرد':     { field: 'comm_no_answer',  source: 'comm_no_answer',  label: 'لا يرد'  },
       'مؤجل':       { field: 'comm_no_answer',  source: 'comm_no_answer',  label: 'مؤجل'    },
+      /* NOTE: 'لا يرد' is intentionally NOT here. Its comm_no_answer commission is
+         earned only after 5 logged call attempts — handled by the dedicated
+         POST /:id/no-answer-attempt endpoint, NOT on the status change itself. */
     };
 
     const commInfo   = COMM_MAP[updates.Status];
@@ -722,6 +732,74 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
 
   /* ── Send 200 OK after all inventory + treasury work is dispatched ── */
   res.json(updatedOrder);
+});
+
+/* ── POST /api/orders/:id/no-answer-attempt ─────────────────────────────────
+   Logs ONE call-attempt timestamp into orders.no_answer_logs (JSONB array).
+   The comm_no_answer commission is awarded ONLY when the attempt count reaches
+   NO_ANSWER_REQUIRED_ATTEMPTS (5) AND the order is currently in 'لا يرد'.
+   Agents are allowed (this is their action). Strictly tenant-scoped.          */
+const NO_ANSWER_REQUIRED_ATTEMPTS = 5;
+
+router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
+  const { id }     = req.params;
+  const businessId = req.user.business_id;
+
+  try {
+    /* Append the current timestamp to the JSONB array atomically. */
+    const upd = await pool.query(
+      `UPDATE orders
+          SET "no_answer_logs" = COALESCE("no_answer_logs", '[]'::jsonb) || to_jsonb(NOW())
+        WHERE id = $1 AND business_id = $2
+        RETURNING "no_answer_logs", "Status", "AssignedTo", "ProductName"`,
+      [id, businessId]
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+
+    const order = upd.rows[0];
+    const logs  = Array.isArray(order.no_answer_logs) ? order.no_answer_logs : [];
+    const count = logs.length;
+    let commissionAwarded = false;
+
+    /* Award the no-answer commission once the threshold is reached, but only
+       while the order is actually in 'لا يرد'. Idempotent via the partial
+       unique index (treasury_comm_na_uidx). */
+    if (count >= NO_ANSWER_REQUIRED_ATTEMPTS && order.Status === 'لا يرد' && order.AssignedTo) {
+      const uRes = await pool.query(
+        `SELECT comm_no_answer AS rate FROM users WHERE email = $1 AND business_id = $2`,
+        [order.AssignedTo, businessId]
+      );
+      const rate = parseFloat(uRes.rows[0]?.rate) || 0;
+      if (rate > 0) {
+        const desc =
+          `عمولة لا يرد (${count} محاولات) — ${order.AssignedTo.split('@')[0]} — طلب #${id}` +
+          (order.ProductName ? ` | ${order.ProductName}` : '');
+        const ins = await pool.query(
+          `INSERT INTO treasury_transactions
+             (order_id, amount, type, source, description, transaction_date, business_id)
+           VALUES ($1, $2, 'expense', 'comm_no_answer', $3, CURRENT_DATE, $4)
+           ON CONFLICT (order_id) WHERE source = 'comm_no_answer'
+           DO NOTHING
+           RETURNING id`,
+          [id, rate.toFixed(2), desc, businessId]
+        );
+        commissionAwarded = ins.rows.length > 0;
+        if (commissionAwarded) {
+          console.log(`[NoAnswer] 💰 order ${id} reached ${count} attempts → comm_no_answer ${rate} EGP awarded to ${order.AssignedTo}`);
+        }
+      }
+    }
+
+    res.json({
+      no_answer_logs:    logs,
+      count,
+      required:          NO_ANSWER_REQUIRED_ATTEMPTS,
+      commissionAwarded,
+    });
+  } catch (err) {
+    console.error('[no-answer-attempt]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
 });
 
 // DELETE /api/orders/:id — admin only
