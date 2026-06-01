@@ -19,6 +19,14 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "unit_cost_price" NUMERI
   .then(() => console.log('✅  Orders: "unit_cost_price" column ready'))
   .catch((err) => console.warn('⚠️   Orders unit_cost_price column check:', err.message));
 
+/* ── Order quantity ─────────────────────────────────────────────────────────
+   Number of units in the order. Defaults to 1 for all legacy/imported rows.
+   Used by the Bosta return webhook to restock the EXACT number of units, and
+   available for accurate inventory/COGS math elsewhere.                       */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "quantity" INTEGER NOT NULL DEFAULT 1`)
+  .then(() => console.log('✅  Orders: "quantity" column ready'))
+  .catch((err) => console.warn('⚠️   Orders quantity column check:', err.message));
+
 /* ── No-answer call-attempt log ─────────────────────────────────────────────
    JSONB array of ISO timestamps — one per logged call attempt. The
    comm_no_answer commission is only earned once this reaches 5 attempts while
@@ -96,19 +104,21 @@ router.get('/', authenticate, async (req, res) => {
    Treasury/commission logic needs no special handling — it keys off status
    changes via PATCH, so manual orders integrate automatically.                */
 router.post('/', authenticate, async (req, res) => {
-  const { FullName, Phone, City, Address, ProductPrice, ProductName, sku } = req.body;
+  const { FullName, Phone, City, Address, ProductPrice, ProductName, sku, quantity } = req.body;
 
   if (!FullName || !String(FullName).trim() || !Phone || !String(Phone).trim()) {
     return res.status(400).json({ error: 'الاسم ورقم الهاتف مطلوبان' });
   }
 
+  // Quantity: integer ≥ 1, defaults to 1 when omitted/invalid.
+  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+
   try {
-    /* NOTE: the orders table has NO "Quantity" column — do not reference it. */
     const result = await pool.query(
       `INSERT INTO orders
          ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "sku",
-          "DeliveryRate", "Status", order_source, business_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'بدون', 'جديد', 'manual', $8)
+          "quantity", "DeliveryRate", "Status", order_source, business_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9)
        RETURNING *`,
       [
         String(FullName).trim(),
@@ -118,6 +128,7 @@ router.post('/', authenticate, async (req, res) => {
         ProductName ? String(ProductName).trim() : null,
         ProductPrice != null && String(ProductPrice).trim() !== '' ? String(ProductPrice).trim() : null,
         sku ? String(sku).trim() : null,
+        qty,
         req.user.business_id,
       ]
     );

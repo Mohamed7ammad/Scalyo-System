@@ -103,7 +103,7 @@ export default function DashboardPage() {
   const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
   const [distPercents,  setDistPercents]  = useState<Record<number, string>>({});
   /* Manual add-order modal */
-  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '' };
+  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '', quantity: '1' };
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm,      setAddForm]      = useState({ ...EMPTY_ADD_FORM });
   const [addSaving,    setAddSaving]    = useState(false);
@@ -612,6 +612,7 @@ export default function DashboardPage() {
         ProductName:  addForm.ProductName.trim() || undefined,
         sku:          addForm.sku.trim() || undefined,
         ProductPrice: addForm.ProductPrice.trim() || undefined,
+        quantity:     Math.max(1, parseInt(addForm.quantity, 10) || 1),
       });
       setOrders((prev) => [res.data, ...prev]);   // show instantly at the top
       showToast('تم إضافة الطلب بنجاح', 'success');
@@ -1057,21 +1058,39 @@ export default function DashboardPage() {
                   )}
                 </div>
 
-                {/* Total / COD — auto-filled from the product, still editable */}
-                <div>
-                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">الإجمالي / المبلغ (COD)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={addForm.ProductPrice}
-                    onChange={(e) => setAddForm((p) => ({ ...p, ProductPrice: e.target.value }))}
-                    placeholder="0"
-                    dir="ltr"
-                    className="w-full px-3 py-2 rounded-xl text-sm outline-none
-                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
-                      text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
-                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
-                  />
+                {/* Quantity + Total / COD */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">الكمية</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={addForm.quantity}
+                      onChange={(e) => setAddForm((p) => ({ ...p, quantity: e.target.value }))}
+                      placeholder="1"
+                      dir="ltr"
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                        bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                        text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                        focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">الإجمالي / المبلغ (COD)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={addForm.ProductPrice}
+                      onChange={(e) => setAddForm((p) => ({ ...p, ProductPrice: e.target.value }))}
+                      placeholder="0"
+                      dir="ltr"
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                        bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                        text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                        focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                    />
+                  </div>
                 </div>
               </div>
 

@@ -355,11 +355,11 @@ router.post('/bosta', async (req, res) => {
 
     /* ── Step 1: Resolve the order by BostaTrackingCode ──────────────────
        SELECT includes ProductPrice + depositAmount for the treasury COD
-       calculation and sku for the SKU-first inventory logic.
-       NOTE: the orders table has NO "Quantity" column — each order is a single
-       unit, so a physical return restocks exactly 1.                         */
+       calculation, sku for the SKU-first inventory logic, and quantity so a
+       physical return restocks the EXACT number of units that were shipped.  */
     const { rows } = await pool.query(
-      `SELECT id, "ProductName", "Status", "sku", "ProductPrice", "depositAmount", business_id
+      `SELECT id, "ProductName", "Status", "sku", "ProductPrice", "depositAmount",
+              COALESCE("quantity", 1) AS quantity, business_id
        FROM   orders
        WHERE  "BostaTrackingCode" = $1`,
       [trackingNumber]
@@ -377,7 +377,7 @@ router.post('/bosta', async (req, res) => {
     const order       = rows[0];
     const productName = (order.ProductName || '').trim();
     const orderSku    = order.sku?.trim() || null;
-    const orderQty    = 1;   // orders table has no Quantity column → 1 unit per order
+    const orderQty    = Math.max(1, parseInt(order.quantity, 10) || 1);   // restock exact units shipped
     /* TENANT: every downstream write is scoped to the matched order's owner,
        so a Bosta event can never mutate another tenant's stock/treasury.   */
     const businessId  = order.business_id ?? null;
