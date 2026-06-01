@@ -772,6 +772,28 @@ export const saveBostaSettings = (data: BostaSettingsPayload) =>
     data,
   );
 
+/* ── EasyOrder integration (per-tenant) ──────────────────────────── */
+export interface EasyorderSettings {
+  business_id:    number;
+  connected:      boolean;
+  api_token:      string | null;   // masked (first 6 chars + stars), null when unset
+  webhook_secret: string;          // shown in full so it can be pasted into EasyOrder
+  webhook_url:    string;          // the unique URL the tenant pastes into EasyOrder
+}
+
+export interface EasyorderSettingsPayload {
+  api_token?:         string;      // pass a new token to save; '' keeps existing
+  regenerate_secret?: boolean;     // true → rotate the webhook secret
+}
+
+/** Get the tenant's EasyOrder settings (generates a webhook secret on first call). Admin only. */
+export const getEasyorderSettings = () =>
+  api.get<EasyorderSettings>('/api/integrations/easyorder');
+
+/** Save the tenant's EasyOrder API token (and optionally rotate the secret). Admin only. */
+export const saveEasyorderSettings = (data: EasyorderSettingsPayload) =>
+  api.post<EasyorderSettings & { message: string }>('/api/integrations/easyorder', data);
+
 /* ── Treasury ────────────────────────────────────────────────────── */
 export interface TreasuryTransaction {
   id:               number;

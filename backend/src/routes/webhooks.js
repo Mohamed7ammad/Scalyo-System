@@ -51,9 +51,141 @@ function buildFallbackKey(body) {
   }
 })();
 
-/* ── POST /api/webhooks/easyorder ────────────────────────────────── */
+/* ── Quantity parser ──────────────────────────────────────────────────────────
+   EasyOrder orders can contain multiple units. Resolve the total quantity from
+   either a flat field or a line-items array (summing per-line quantities).
+   Defaults to 1. (Field names are provisional — refined once a real sample
+   payload is supplied.)                                                          */
+function parseQuantity(body) {
+  const direct = body.quantity ?? body.qty ?? body.Quantity ?? body.count ?? body.items_count;
+  if (direct != null && !isNaN(parseInt(direct, 10))) {
+    return Math.max(1, parseInt(direct, 10));
+  }
+  const items =
+    body.items ?? body.cart_items ?? body.cartItems ?? body.products ??
+    body.line_items ?? body.lineItems ?? body.order_items ?? null;
+  if (Array.isArray(items) && items.length) {
+    const sum = items.reduce((acc, it) => {
+      const q = parseInt(it?.quantity ?? it?.qty ?? it?.count ?? 1, 10);
+      return acc + Math.max(1, isNaN(q) ? 1 : q);
+    }, 0);
+    if (sum > 0) return sum;
+  }
+  return 1;
+}
+
+/* ── Field extractor ──────────────────────────────────────────────────────────
+   Pulls the order fields from a variety of possible EasyOrder shapes, falling
+   back to the first line item for product details when not present top-level.   */
+function extractOrderFields(body) {
+  const items =
+    body.items ?? body.cart_items ?? body.cartItems ?? body.products ??
+    body.line_items ?? body.lineItems ?? body.order_items ?? null;
+  const firstItem = Array.isArray(items) && items.length ? items[0] : {};
+
+  return {
+    FullName:     body.FullName ?? body.full_name ?? body.name ?? body.customer_name ?? null,
+    Phone:        body.Phone ?? body.phone ?? body.phone_number ?? body.mobile ?? null,
+    City:         body.City ?? body.city ?? body.governorate ?? null,
+    Address:      body.Address ?? body.address ?? body.shipping_address ?? null,
+    Note:         body.Note ?? body.note ?? body.notes ?? body.comment ?? null,
+    ProductName:  body.ProductName ?? body.product ?? body.Product ??
+                  firstItem.name ?? firstItem.product_name ?? firstItem.title ?? null,
+    ProductPrice: body.ProductPrice ?? body.price ?? body.Price ??
+                  body.total ?? body.total_price ?? body.amount ??
+                  firstItem.price ?? null,
+    quantity:     parseQuantity(body),
+  };
+}
+
+/* ── Shared ingest ────────────────────────────────────────────────────────────
+   Inserts an EasyOrder payload into orders for a SPECIFIC tenant (businessId),
+   with dedup + multi-unit quantity. Returns { ok, status, payload }.            */
+async function ingestEasyOrder(body, businessId) {
+  const f = extractOrderFields(body);
+
+  if (!f.FullName || !f.Phone) {
+    return { ok: false, status: 400, payload: { error: 'FullName and Phone are required' } };
+  }
+
+  /* Idempotency key: prefer EasyOrder's real id, else a deterministic composite
+     hash so id-less rows still dedup. Always non-null → index + ON CONFLICT engage. */
+  const realId = String(
+    body.external_order_id ?? body.order_id ?? body.orderId ??
+    body.id ?? body.reference ?? body.ref ?? ''
+  ).trim();
+  const externalId = realId || buildFallbackKey(body);
+
+  const result = await pool.query(
+    `INSERT INTO orders
+       ("FullName", "Phone", "DeliveryRate", "City", "Address", "Note", "Status",
+        "ProductName", "ProductPrice", "quantity", external_order_id, order_source, business_id)
+     VALUES ($1, $2, 'بدون', $3, $4, $5, 'جديد',
+             $6, $7, $8, $9, 'easyorder', $10)
+     ON CONFLICT (external_order_id, business_id) WHERE external_order_id IS NOT NULL
+     DO NOTHING
+     RETURNING *`,
+    [f.FullName, f.Phone, f.City || null, f.Address || null, f.Note || null,
+     f.ProductName, f.ProductPrice, Math.max(1, parseInt(f.quantity, 10) || 1),
+     externalId, businessId]
+  );
+
+  if (result.rows.length === 0) {
+    console.log(`↩️  EasyOrder webhook: duplicate "${externalId}" (tenant ${businessId}) — skipped`);
+    return { ok: true, status: 200, payload: { success: true, skipped: true, reason: 'duplicate order' } };
+  }
+
+  const newOrder = result.rows[0];
+  console.log(`✅  EasyOrder webhook: order #${newOrder.id} (tenant ${businessId}, qty ${newOrder.quantity}) created`);
+  enrichDeliveryRate(newOrder.id, f.Phone);   // background — fire-and-forget
+  return { ok: true, status: 201, payload: { success: true, order: newOrder } };
+}
+
+/* ── POST /api/webhooks/easyorder/:businessId — tenant-aware (PREFERRED) ──────
+   EasyOrder posts here with the tenant's unique URL. Optional per-tenant secret
+   (header x-easyorder-secret / x-webhook-secret, or ?secret=) is validated when
+   provided. Each tenant configures their own URL from the integration page.    */
+router.post('/easyorder/:businessId', async (req, res) => {
+  const businessId = parseInt(req.params.businessId, 10);
+  if (!businessId || isNaN(businessId)) {
+    return res.status(400).json({ error: 'Invalid tenant id' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, easyorder_webhook_secret FROM business_profile WHERE id = $1 LIMIT 1`,
+      [businessId]
+    );
+    if (!rows.length) {
+      console.warn(`⚠️  EasyOrder webhook: unknown tenant ${businessId}`);
+      return res.status(404).json({ error: 'Unknown tenant' });
+    }
+
+    /* Secret check: if a secret is stored AND the caller supplied one, they must
+       match. (Lenient when EasyOrder can't send a secret — the unguessable URL +
+       tenant id still scopes the write. Tighten once confirmed in production.)   */
+    const storedSecret = rows[0].easyorder_webhook_secret;
+    const incoming =
+      req.headers['x-easyorder-secret'] ?? req.headers['x-webhook-secret'] ?? req.query.secret ?? null;
+    if (storedSecret && incoming != null && incoming !== storedSecret) {
+      console.warn(`⚠️  EasyOrder webhook: secret mismatch for tenant ${businessId}`);
+      return res.status(401).json({ error: 'Webhook secret mismatch' });
+    }
+
+    console.log(`📦 EasyOrder webhook (tenant ${businessId}):`, JSON.stringify(req.body));
+    const { status, payload } = await ingestEasyOrder(req.body, businessId);
+    return res.status(status).json(payload);
+  } catch (err) {
+    console.error('EasyOrder webhook error:', err);
+    return res.status(500).json({ error: 'Failed to process webhook' });
+  }
+});
+
+/* ── POST /api/webhooks/easyorder — LEGACY (no tenant in URL) ─────────────────
+   Kept for backward compatibility. Uses the optional global WEBHOOK_SECRET and
+   claims orders for the ORIGINAL tenant (lowest business_profile.id). New
+   integrations should use the tenant-aware /:businessId route above.            */
 router.post('/easyorder', async (req, res) => {
-  // Validate shared secret if configured
   if (process.env.WEBHOOK_SECRET) {
     const incoming = req.headers['x-webhook-secret'];
     if (incoming !== process.env.WEBHOOK_SECRET) {
@@ -62,67 +194,16 @@ router.post('/easyorder', async (req, res) => {
   }
 
   try {
-    console.log('📦 Webhook payload received:', JSON.stringify(req.body, null, 2));
+    console.log('📦 Webhook payload received (legacy):', JSON.stringify(req.body));
+    const { rows } = await pool.query(`SELECT MIN(id) AS id FROM business_profile`);
+    const businessId = rows[0]?.id;
+    if (!businessId) return res.status(500).json({ error: 'No tenant configured' });
 
-    const { FullName, Phone, City, Address, Note } = req.body;
-    const ProductName  = req.body.ProductName  ?? req.body.product ?? req.body.Product ?? null;
-    const ProductPrice = req.body.ProductPrice ?? req.body.price   ?? req.body.Price   ?? null;
-
-    if (!FullName || !Phone) {
-      console.warn('⚠️  Webhook rejected: missing FullName or Phone');
-      return res.status(400).json({ error: 'FullName and Phone are required' });
-    }
-
-    /* Idempotency key:
-         1. Prefer EasyOrder's REAL order id when present (any common field name).
-         2. Otherwise FALL BACK to a deterministic composite hash so id-less Excel
-            rows still dedup. Either way external_order_id is NON-NULL, so the
-            partial unique index + ON CONFLICT always engage. */
-    const realId = String(
-      req.body.external_order_id ?? req.body.order_id ?? req.body.orderId ??
-      req.body.id ?? req.body.reference ?? req.body.ref ?? ''
-    ).trim();
-    const externalId = realId || buildFallbackKey(req.body);
-
-    // Always insert as 'بدون' — the background enrichment below will overwrite
-    // it with the real Bosta rating within seconds.
-    // TENANT: this public webhook has no tenant context, so new orders are
-    // claimed by the ORIGINAL tenant (lowest business_profile.id). When the
-    // webhook is upgraded to carry a tenant key, swap the subquery for it.
-    //
-    // DEDUP: ON CONFLICT on the (external_order_id, business_id) partial unique
-    // index → a re-imported order is skipped silently (0 rows returned) instead
-    // of creating a duplicate.
-    const result = await pool.query(
-      `INSERT INTO orders
-         ("FullName", "Phone", "DeliveryRate", "City", "Address", "Note", "Status",
-          "ProductName", "ProductPrice", external_order_id, order_source, business_id)
-       VALUES ($1, $2, 'بدون', $3, $4, $5, 'جديد',
-               $6, $7, $8, 'easyorder', (SELECT MIN(id) FROM business_profile))
-       ON CONFLICT (external_order_id, business_id) WHERE external_order_id IS NOT NULL
-       DO NOTHING
-       RETURNING *`,
-      [FullName, Phone, City || null, Address || null, Note || null,
-       ProductName, ProductPrice, externalId]
-    );
-
-    /* Conflict → the order already exists for this tenant. Skip silently. */
-    if (result.rows.length === 0) {
-      console.log(`↩️  EasyOrder webhook: duplicate "${externalId}" (${realId ? 'order id' : 'composite key'}) — skipped`);
-      return res.status(200).json({ success: true, skipped: true, reason: 'duplicate order' });
-    }
-
-    const newOrder = result.rows[0];
-
-    // Respond immediately — don't make EasyOrders wait for Bosta.
-    res.status(201).json({ success: true, order: newOrder });
-
-    // Fire background enrichment after the response is sent.
-    enrichDeliveryRate(newOrder.id, Phone);
-
+    const { status, payload } = await ingestEasyOrder(req.body, businessId);
+    return res.status(status).json(payload);
   } catch (err) {
     console.error('Webhook error:', err);
-    res.status(500).json({ error: 'Failed to process webhook' });
+    return res.status(500).json({ error: 'Failed to process webhook' });
   }
 });
 

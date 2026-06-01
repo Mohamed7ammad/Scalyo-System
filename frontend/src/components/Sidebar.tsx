@@ -159,7 +159,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     href: '/dashboard/easyorder', label: 'الربط مع إيزي أوردر',
-    subLabel: 'EasyOrder', soon: true,
+    subLabel: 'EasyOrder', adminOnly: true,
     icon: (
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
