@@ -12,6 +12,10 @@ const AGENT_ALLOWED_FIELDS = new Set([
   'Phone',
   'City',
   'Address',
+  // Deposit (العربون) — agents can record/adjust a customer deposit; the PATCH
+  // treasury hook logs it to treasury_transactions exactly as it does for admins.
+  'hasDeposit',
+  'depositAmount',
 ]);
 
 function requireAdmin(req, res, next) {

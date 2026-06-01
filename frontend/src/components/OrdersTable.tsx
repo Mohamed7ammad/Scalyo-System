@@ -91,9 +91,10 @@ export default function OrdersTable({
 
   /* ─── Quick-edit (customer/shipping details) modal ─────────── */
   const [quickEdit, setQuickEdit] = useState<Order | null>(null);
-  const [quickForm, setQuickForm] = useState<{ FullName: string; Phone: string; City: string; Address: string }>(
-    { FullName: '', Phone: '', City: '', Address: '' }
-  );
+  const [quickForm, setQuickForm] = useState<{
+    FullName: string; Phone: string; City: string; Address: string;
+    hasDeposit: boolean; depositAmount: string;
+  }>({ FullName: '', Phone: '', City: '', Address: '', hasDeposit: false, depositAmount: '' });
   const [quickSaving, setQuickSaving] = useState(false);
 
   const openQuickEdit = (order: Order) => {
@@ -102,6 +103,9 @@ export default function OrdersTable({
       Phone:    order.Phone    ?? '',
       City:     order.City     ?? '',
       Address:  order.Address  ?? '',
+      hasDeposit:    order.hasDeposit ?? false,
+      depositAmount: order.depositAmount != null && order.depositAmount !== 0
+        ? String(order.depositAmount) : '',
     });
     setQuickEdit(order);
   };
@@ -111,11 +115,17 @@ export default function OrdersTable({
     if (!quickForm.FullName.trim() || !quickForm.Phone.trim()) return; // name + phone required
     setQuickSaving(true);
     try {
+      /* Deposit: when the toggle is on, send the entered amount; when off, send 0
+         so the backend treasury hook clears any existing deposit entry. */
+      const depositOn  = quickForm.hasDeposit;
+      const depositAmt = depositOn ? (parseFloat(quickForm.depositAmount) || 0) : 0;
       await onUpdate(quickEdit.id, {
         FullName: quickForm.FullName.trim(),
         Phone:    quickForm.Phone.trim(),
         City:     quickForm.City.trim(),
         Address:  quickForm.Address.trim(),
+        hasDeposit:    depositOn,
+        depositAmount: depositAmt,
       });
       setQuickEdit(null);
     } finally {
@@ -614,6 +624,53 @@ export default function OrdersTable({
                   bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none resize-none
                   focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
               />
+            </div>
+
+            {/* Deposit (العربون) — toggle + amount */}
+            <div className="pt-1 border-t border-gray-100 dark:border-slate-700/60">
+              <div className="flex items-center justify-between mt-3">
+                <span className="text-sm font-medium text-gray-700 dark:text-slate-300">تم دفع عربون / ديبوزت</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={quickForm.hasDeposit}
+                  onClick={() => setQuickForm((p) => ({
+                    ...p,
+                    hasDeposit: !p.hasDeposit,
+                    depositAmount: !p.hasDeposit ? p.depositAmount : '',  // clear amount when turning off
+                  }))}
+                  className={`relative w-11 h-6 rounded-full transition-colors duration-150 shrink-0
+                    ${quickForm.hasDeposit ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-slate-600'}`}
+                >
+                  <span className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all duration-150
+                    ${quickForm.hasDeposit ? 'translate-x-6' : 'translate-x-1'}`} />
+                </button>
+              </div>
+
+              {quickForm.hasDeposit && (
+                <div className="mt-3">
+                  <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">مبلغ العربون (ج.م)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={quickForm.depositAmount}
+                    onChange={(e) => setQuickForm((p) => ({ ...p, depositAmount: e.target.value }))}
+                    placeholder="0"
+                    dir="ltr"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm text-left
+                      bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  />
+                  {asNum(quickEdit?.ProductPrice) > 0 && (
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-1.5">
+                      المتبقي للتحصيل (COD):{' '}
+                      <span className="font-semibold text-gray-600 dark:text-slate-300" dir="ltr">
+                        {fmtNum(Math.max(0, asNum(quickEdit?.ProductPrice) - (parseFloat(quickForm.depositAmount) || 0)))} ج.م
+                      </span>
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
