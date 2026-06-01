@@ -87,6 +87,10 @@ router.post('/login', async (req, res) => {
     return res.status(400).json({ error: 'البريد الإلكتروني وكلمة المرور مطلوبان' });
   }
 
+  /* Emails are stored lowercased at creation — normalise the lookup so a
+     mixed-case login (e.g. "Staff@x.com") still matches and doesn't 401. */
+  const cleanEmail = email.trim().toLowerCase();
+
   try {
     // ── 1. Look up the user in our local users table ─────────────────
     //    Left-join the tenant row so we can surface plan_type to the client.
@@ -95,7 +99,7 @@ router.post('/login', async (req, res) => {
          FROM users u
          LEFT JOIN business_profile bp ON bp.id = u.business_id
         WHERE u.email = $1`,
-      [email]
+      [cleanEmail]
     );
     const user   = result.rows[0];
 

@@ -2,6 +2,7 @@ const express       = require('express');
 const pool          = require('../config/db');
 const authenticate  = require('../middleware/auth');
 const { requireAdmin, filterAgentFields } = require('../middleware/roleGuard');
+const { enrichDeliveryRate } = require('../services/bostaEnrich');
 
 const router = express.Router();
 
@@ -17,6 +18,14 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "sku" VARCHAR(100)`)
 pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "unit_cost_price" NUMERIC(10,2)`)
   .then(() => console.log('✅  Orders: "unit_cost_price" column ready'))
   .catch((err) => console.warn('⚠️   Orders unit_cost_price column check:', err.message));
+
+/* ── No-answer call-attempt log ─────────────────────────────────────────────
+   JSONB array of ISO timestamps — one per logged call attempt. The
+   comm_no_answer commission is only earned once this reaches 5 attempts while
+   the order is in 'لا يرد' (enforced in the attempt endpoint below).          */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "no_answer_logs" JSONB NOT NULL DEFAULT '[]'::jsonb`)
+  .then(() => console.log('✅  Orders: "no_answer_logs" column ready'))
+  .catch((err) => console.warn('⚠️   Orders no_answer_logs column check:', err.message));
 
 /* ── "updatedAt" column — critical for analytics date filtering ─────────────
    This column MUST exist so the analytics LEFT JOIN ON clause can compare
@@ -67,6 +76,110 @@ router.get('/', authenticate, async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error(err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── POST /api/orders — manual order creation (admins + agents) ──────────────
+   Creates an external order (WhatsApp / Facebook / phone) that behaves exactly
+   like a store-imported one:
+     • status initialised to 'جديد'
+     • scoped to the creator's business_id
+     • optional BostaTrackingCode stored so the existing Bosta webhooks/cron
+       track it normally
+     • fires the (throttled) Bosta consignee-ranking enrichment, like imports
+   Assignment:
+     • an AGENT who creates an order is assigned it directly (they brought the
+       sale in)
+     • an ADMIN's manual order is fairly auto-assigned to the least-loaded
+       present agent
+   Treasury/commission logic needs no special handling — it keys off status
+   changes via PATCH, so manual orders integrate automatically.                */
+router.post('/', authenticate, async (req, res) => {
+  const { FullName, Phone, City, Address, ProductPrice, ProductName, sku } = req.body;
+
+  if (!FullName || !String(FullName).trim() || !Phone || !String(Phone).trim()) {
+    return res.status(400).json({ error: 'الاسم ورقم الهاتف مطلوبان' });
+  }
+
+  try {
+    /* NOTE: the orders table has NO "Quantity" column — do not reference it. */
+    const result = await pool.query(
+      `INSERT INTO orders
+         ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "sku",
+          "DeliveryRate", "Status", order_source, business_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'بدون', 'جديد', 'manual', $8)
+       RETURNING *`,
+      [
+        String(FullName).trim(),
+        String(Phone).trim(),
+        City ? String(City).trim() : null,
+        Address ? String(Address).trim() : null,
+        ProductName ? String(ProductName).trim() : null,
+        ProductPrice != null && String(ProductPrice).trim() !== '' ? String(ProductPrice).trim() : null,
+        sku ? String(sku).trim() : null,
+        req.user.business_id,
+      ]
+    );
+
+    let order = result.rows[0];
+
+    /* ── Assignment ─────────────────────────────────────────────────────────
+       • AGENT creator → assign directly to them (they brought in the sale).
+       • ADMIN creator → fairly auto-assign to the least-loaded present agent:
+         the active, present agent with the FEWEST pending ('جديد') orders.
+         This mirrors the auto-distribute philosophy for a single order WITHOUT
+         reshuffling anyone else's existing assignments.
+       Done BEFORE the response so the returned order already carries AssignedTo
+       (frontend reflects it instantly).                                        */
+    try {
+      let assignee = null;
+
+      if (req.user.role === 'agent') {
+        assignee = req.user.email;
+      } else {
+        const { rows: agentRows } = await pool.query(
+          `SELECT u.email,
+                  COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
+             FROM users u
+             LEFT JOIN orders o
+               ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+            WHERE u.role = 'agent'
+              AND COALESCE(u.is_active,  true)  = true
+              AND COALESCE(u.is_absent, false)  = false
+              AND u.business_id = $1
+            GROUP BY u.email
+            ORDER BY load ASC, u.email ASC
+            LIMIT 1`,
+          [req.user.business_id]
+        );
+        if (agentRows.length) assignee = agentRows[0].email;
+      }
+
+      if (assignee) {
+        const upd = await pool.query(
+          `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+            WHERE id = $2 AND business_id = $3 RETURNING *`,
+          [assignee, order.id, req.user.business_id]
+        );
+        if (upd.rows.length) order = upd.rows[0];
+        const how = req.user.role === 'agent' ? 'self (creator)' : 'least-loaded';
+        console.log(`[Manual Order] 🤝 #${order.id} assigned to ${order.AssignedTo} (${how})`);
+      } else {
+        console.log(`[Manual Order] ℹ️  #${order.id} left unassigned — no present agents`);
+      }
+    } catch (assignErr) {
+      console.warn('[Manual Order] assignment skipped:', assignErr.message);
+    }
+
+    console.log(`[Manual Order] ✅ #${order.id} created for tenant ${req.user.business_id}`);
+
+    // Respond with the (now-assigned) order, then enrich the delivery rating in
+    // the background (throttled queue).
+    res.status(201).json(order);
+    enrichDeliveryRate(order.id, order.Phone);
+  } catch (err) {
+    console.error('[POST /orders] create error:', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
@@ -631,15 +744,16 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
        'تم التأكيد'  → source 'comm_confirmed'  (comm_confirmed column)
        'تم التوصيل' → source 'comm_delivered'   (comm_delivered column)
        'تم الرفض'   → source 'comm_rejected'    (comm_rejected column)
-       'لا يرد'     → source 'comm_no_answer'   (comm_no_answer column)
-       'مؤجل'       → source 'comm_no_answer'   (same bucket as لا يرد)   */
+       'لا يرد'     → source 'comm_no_answer'   (comm_no_answer column)   */
   if (updates.Status && updates.Status !== currentStatus) {
     const COMM_MAP = {
       'تم التأكيد':  { field: 'comm_confirmed', source: 'comm_confirmed', label: 'تأكيد'   },
       'تم التوصيل': { field: 'comm_delivered',  source: 'comm_delivered',  label: 'توصيل'   },
       'تم الرفض':   { field: 'comm_rejected',   source: 'comm_rejected',   label: 'رفض'     },
-      'لا يرد':     { field: 'comm_no_answer',  source: 'comm_no_answer',  label: 'لا يرد'  },
-      'مؤجل':       { field: 'comm_no_answer',  source: 'comm_no_answer',  label: 'مؤجل'    },
+      /* NOTE: neither 'لا يرد' nor 'مؤجل' is here.
+         • 'لا يرد' earns comm_no_answer ONLY after 5 logged call attempts —
+           handled by POST /:id/no-answer-attempt, not on the status change.
+         • 'مؤجل' grants NO automatic commission at all. */
     };
 
     const commInfo   = COMM_MAP[updates.Status];
@@ -672,8 +786,126 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
     }
   }
 
+  /* ── Step 3.5c: Treasury — VOID stale commission/revenue on status change ───
+     The hooks above only ADD commission/revenue on forward transitions; they
+     never remove anything. So reverting an order (e.g. تم الشحن → جديد, or
+     تم التوصيل → تم التأكيد, or → ملغي) used to leave phantom commissions and
+     expected revenue in the treasury. Here we delete every status-driven txn
+     that is NO LONGER valid for the order's new status.
+
+     Funnel-aware validity (a milestone's commission survives only while the
+     order is at/past that milestone):
+       تم التأكيد / تم الشحن → comm_confirmed
+       تم التوصيل            → comm_confirmed + comm_delivered + bosta_cod (COD revenue)
+       تم الرفض              → comm_rejected
+       لا يرد                → comm_no_answer (only if 5+ attempts already logged)
+       مؤجل                  → NONE  (no automatic commission)
+       جديد / ملغي / غيره    → NONE  (all status-driven txns voided)
+
+     NOTE: source 'deposit' is intentionally NOT touched — it represents real
+     collected cash and is managed solely by the depositAmount hook above.       */
+  if (updates.Status && updates.Status !== currentStatus) {
+    const STATUS_DRIVEN_SOURCES = [
+      'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer', 'bosta_cod',
+    ];
+    const VALID_BY_STATUS = {
+      'تم التأكيد':  ['comm_confirmed'],
+      'تم الشحن':   ['comm_confirmed'],
+      'تم التوصيل': ['comm_confirmed', 'comm_delivered', 'bosta_cod'],
+      'تم الرفض':   ['comm_rejected'],
+      'لا يرد':     ['comm_no_answer'],
+      'مؤجل':       [],   // postponed → NO automatic commission; void all (deposit kept)
+      'معلق حتي الدفع': [],   // pending-until-payment → NO commission; void all (deposit kept)
+    };
+    const validSources = new Set(VALID_BY_STATUS[updates.Status] || []); // جديد/ملغي/… → none
+    const toVoid = STATUS_DRIVEN_SOURCES.filter((s) => !validSources.has(s));
+
+    if (toVoid.length > 0) {
+      /* Excludes the source(s) the commission hook may be inserting concurrently,
+         so the just-earned commission is never deleted — safe regardless of order. */
+      pool.query(
+        `DELETE FROM treasury_transactions
+          WHERE order_id = $1 AND business_id = $2 AND source = ANY($3::text[])`,
+        [id, businessId, toVoid]
+      ).then((r) => {
+        if (r.rowCount > 0) {
+          console.log(`[Treasury] 🧹 Voided ${r.rowCount} stale txn(s) for order ${id} → "${updates.Status}" (removed sources: ${toVoid.join(', ')})`);
+        }
+      }).catch((e) => console.error('[Treasury] Void-on-revert failed:', e.message));
+    }
+  }
+
   /* ── Send 200 OK after all inventory + treasury work is dispatched ── */
   res.json(updatedOrder);
+});
+
+/* ── POST /api/orders/:id/no-answer-attempt ─────────────────────────────────
+   Logs ONE call-attempt timestamp into orders.no_answer_logs (JSONB array).
+   The comm_no_answer commission is awarded ONLY when the attempt count reaches
+   NO_ANSWER_REQUIRED_ATTEMPTS (5) AND the order is currently in 'لا يرد'.
+   Agents are allowed (this is their action). Strictly tenant-scoped.          */
+const NO_ANSWER_REQUIRED_ATTEMPTS = 5;
+
+router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
+  const { id }     = req.params;
+  const businessId = req.user.business_id;
+
+  try {
+    /* Append the current timestamp to the JSONB array atomically. */
+    const upd = await pool.query(
+      `UPDATE orders
+          SET "no_answer_logs" = COALESCE("no_answer_logs", '[]'::jsonb) || to_jsonb(NOW())
+        WHERE id = $1 AND business_id = $2
+        RETURNING "no_answer_logs", "Status", "AssignedTo", "ProductName"`,
+      [id, businessId]
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+
+    const order = upd.rows[0];
+    const logs  = Array.isArray(order.no_answer_logs) ? order.no_answer_logs : [];
+    const count = logs.length;
+    let commissionAwarded = false;
+
+    /* Award the no-answer commission once the threshold is reached, but only
+       while the order is actually in 'لا يرد'. Idempotent via the partial
+       unique index (treasury_comm_na_uidx). */
+    if (count >= NO_ANSWER_REQUIRED_ATTEMPTS && order.Status === 'لا يرد' && order.AssignedTo) {
+      const uRes = await pool.query(
+        `SELECT comm_no_answer AS rate FROM users
+          WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) AND business_id = $2`,
+        [order.AssignedTo, businessId]
+      );
+      const rate = parseFloat(uRes.rows[0]?.rate) || 0;
+      if (rate > 0) {
+        const desc =
+          `عمولة لا يرد (${count} محاولات) — ${order.AssignedTo.split('@')[0]} — طلب #${id}` +
+          (order.ProductName ? ` | ${order.ProductName}` : '');
+        const ins = await pool.query(
+          `INSERT INTO treasury_transactions
+             (order_id, amount, type, source, description, transaction_date, business_id)
+           VALUES ($1, $2, 'expense', 'comm_no_answer', $3, CURRENT_DATE, $4)
+           ON CONFLICT (order_id) WHERE source = 'comm_no_answer'
+           DO NOTHING
+           RETURNING id`,
+          [id, rate.toFixed(2), desc, businessId]
+        );
+        commissionAwarded = ins.rows.length > 0;
+        if (commissionAwarded) {
+          console.log(`[NoAnswer] 💰 order ${id} reached ${count} attempts → comm_no_answer ${rate} EGP awarded to ${order.AssignedTo}`);
+        }
+      }
+    }
+
+    res.json({
+      no_answer_logs:    logs,
+      count,
+      required:          NO_ANSWER_REQUIRED_ATTEMPTS,
+      commissionAwarded,
+    });
+  } catch (err) {
+    console.error('[no-answer-attempt]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
 });
 
 // DELETE /api/orders/:id — admin only

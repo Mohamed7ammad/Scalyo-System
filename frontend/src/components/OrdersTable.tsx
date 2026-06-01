@@ -1,14 +1,16 @@
 'use client';
 
 import { useState } from 'react';
-import { Order } from '@/lib/api';
+import { Order, logNoAnswerAttempt } from '@/lib/api';
+
+const NO_ANSWER_REQUIRED = 5;
 
 // All possible statuses — used in the admin full-edit modal only
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'تم الشحن', 'تم التوصيل'];
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل'];
 
 // Statuses agents (and inline table controls) are allowed to set manually.
 // 'تم الشحن' / 'تم التوصيل' are set automatically by the shipping API — never by hand.
-const MANUAL_STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد'];
+const MANUAL_STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع'];
 
 const STATUS_STYLES: Record<string, string> = {
   'جديد':       'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
@@ -16,6 +18,8 @@ const STATUS_STYLES: Record<string, string> = {
   'تم الرفض':   'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
   'مؤجل':       'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
   'لا يرد':     'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400',
+  // Pending until the customer pays a deposit (low delivery-success customers)
+  'معلق حتي الدفع': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300',
   'تم الشحن':    'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300',
   // Set automatically by Bosta webhook — never selectable in the inline dropdown
   'تم التوصيل':  'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
@@ -89,10 +93,15 @@ export default function OrdersTable({
 
   /* ─── Quick-edit (customer/shipping details) modal ─────────── */
   const [quickEdit, setQuickEdit] = useState<Order | null>(null);
-  const [quickForm, setQuickForm] = useState<{ FullName: string; Phone: string; City: string; Address: string }>(
-    { FullName: '', Phone: '', City: '', Address: '' }
-  );
+  const [quickForm, setQuickForm] = useState<{
+    FullName: string; Phone: string; City: string; Address: string;
+    hasDeposit: boolean; depositAmount: string;
+  }>({ FullName: '', Phone: '', City: '', Address: '', hasDeposit: false, depositAmount: '' });
   const [quickSaving, setQuickSaving] = useState(false);
+  /* No-answer call-attempt log (shown in quick-edit when status is 'لا يرد') */
+  const [noAnswerLogs,  setNoAnswerLogs]  = useState<string[]>([]);
+  const [loggingAttempt, setLoggingAttempt] = useState(false);
+  const [attemptMsg,    setAttemptMsg]    = useState<string>('');
 
   const openQuickEdit = (order: Order) => {
     setQuickForm({
@@ -100,8 +109,34 @@ export default function OrdersTable({
       Phone:    order.Phone    ?? '',
       City:     order.City     ?? '',
       Address:  order.Address  ?? '',
+      hasDeposit:    order.hasDeposit ?? false,
+      depositAmount: order.depositAmount != null && order.depositAmount !== 0
+        ? String(order.depositAmount) : '',
     });
+    setNoAnswerLogs(Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+    setAttemptMsg('');
     setQuickEdit(order);
+  };
+
+  const handleLogAttempt = async (orderId: number) => {
+    if (!orderId || loggingAttempt) return;
+    setLoggingAttempt(true);
+    setAttemptMsg('');
+    try {
+      const { data } = await logNoAnswerAttempt(orderId);
+      setNoAnswerLogs(data.no_answer_logs);
+      if (data.commissionAwarded) {
+        setAttemptMsg(`🎉 تم الوصول إلى ${data.required} محاولات — تم منح عمولة "لا يرد"`);
+      } else if (data.count < data.required) {
+        setAttemptMsg(`تبقّى ${data.required - data.count} محاولة لاستحقاق العمولة`);
+      } else {
+        setAttemptMsg(`تم تسجيل المحاولة (${data.count}) — العمولة مُحتسبة بالفعل`);
+      }
+    } catch {
+      setAttemptMsg('تعذّر تسجيل المحاولة، حاول مرة أخرى');
+    } finally {
+      setLoggingAttempt(false);
+    }
   };
 
   const saveQuickEdit = async () => {
@@ -109,11 +144,17 @@ export default function OrdersTable({
     if (!quickForm.FullName.trim() || !quickForm.Phone.trim()) return; // name + phone required
     setQuickSaving(true);
     try {
+      /* Deposit: when the toggle is on, send the entered amount; when off, send 0
+         so the backend treasury hook clears any existing deposit entry. */
+      const depositOn  = quickForm.hasDeposit;
+      const depositAmt = depositOn ? (parseFloat(quickForm.depositAmount) || 0) : 0;
       await onUpdate(quickEdit.id, {
         FullName: quickForm.FullName.trim(),
         Phone:    quickForm.Phone.trim(),
         City:     quickForm.City.trim(),
         Address:  quickForm.Address.trim(),
+        hasDeposit:    depositOn,
+        depositAmount: depositAmt,
       });
       setQuickEdit(null);
     } finally {
@@ -159,6 +200,8 @@ export default function OrdersTable({
   /* ─── Admin full-edit modal ────────────────────────────────── */
   const openEditModal = (order: Order) => {
     setEditForm({ ...order });
+    setNoAnswerLogs(Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+    setAttemptMsg('');
     setEditModal(order);
   };
 
@@ -178,6 +221,16 @@ export default function OrdersTable({
     await onDelete(deleteConfirm);
     setDeleteConfirm(null);
   };
+
+  /* Live, trimmed status of the order open in each modal — read from the current
+     `orders` prop (not the stale snapshot) so the no-answer section always
+     reflects the order's real status. */
+  const quickLiveStatus = quickEdit
+    ? String(orders.find((o) => o.id === quickEdit.id)?.Status ?? quickEdit.Status ?? '').trim()
+    : '';
+  const editLiveStatus = editModal
+    ? String(orders.find((o) => o.id === editModal.id)?.Status ?? editModal.Status ?? '').trim()
+    : '';
 
   /* ─── Empty state ──────────────────────────────────────────── */
   if (!orders.length) {
@@ -385,7 +438,10 @@ export default function OrdersTable({
                         show a read-only badge so no one can accidentally overwrite it inline.
                         Otherwise render the restricted manual-options dropdown.              */}
                     <td className="px-4 py-3">
-                      {MANUAL_STATUS_OPTIONS.includes(order.Status) ? (
+                      {/* Admins get a FULL override: every status is editable, even
+                          system-set ones (تم الشحن / تم التوصيل). Agents keep the
+                          restricted manual list, and system statuses stay locked. */}
+                      {(role === 'admin' || MANUAL_STATUS_OPTIONS.includes(order.Status)) ? (
                         <select
                           value={order.Status}
                           onChange={(e) => handleStatusChange(order.id, e.target.value)}
@@ -395,7 +451,7 @@ export default function OrdersTable({
                             dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
                             ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
                         >
-                          {MANUAL_STATUS_OPTIONS.map((s) => (
+                          {(role === 'admin' ? STATUS_OPTIONS : MANUAL_STATUS_OPTIONS).map((s) => (
                             <option key={s} value={s}>{s}</option>
                           ))}
                         </select>
@@ -610,7 +666,109 @@ export default function OrdersTable({
                   focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
               />
             </div>
+
+            {/* Deposit (العربون) — toggle + amount */}
+            <div className="pt-1 border-t border-gray-100 dark:border-slate-700/60">
+              <div className="flex items-center justify-between mt-3">
+                <span className="text-sm font-medium text-gray-700 dark:text-slate-300">تم دفع عربون / ديبوزت</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={quickForm.hasDeposit}
+                  onClick={() => setQuickForm((p) => ({
+                    ...p,
+                    hasDeposit: !p.hasDeposit,
+                    depositAmount: !p.hasDeposit ? p.depositAmount : '',  // clear amount when turning off
+                  }))}
+                  className={`relative w-11 h-6 rounded-full transition-colors duration-150 shrink-0
+                    ${quickForm.hasDeposit ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-slate-600'}`}
+                >
+                  <span className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all duration-150
+                    ${quickForm.hasDeposit ? 'translate-x-6' : 'translate-x-1'}`} />
+                </button>
+              </div>
+
+              {quickForm.hasDeposit && (
+                <div className="mt-3">
+                  <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">مبلغ العربون (ج.م)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={quickForm.depositAmount}
+                    onChange={(e) => setQuickForm((p) => ({ ...p, depositAmount: e.target.value }))}
+                    placeholder="0"
+                    dir="ltr"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm text-left
+                      bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  />
+                  {asNum(quickEdit?.ProductPrice) > 0 && (
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-1.5">
+                      المتبقي للتحصيل (COD):{' '}
+                      <span className="font-semibold text-gray-600 dark:text-slate-300" dir="ltr">
+                        {fmtNum(Math.max(0, asNum(quickEdit?.ProductPrice) - (parseFloat(quickForm.depositAmount) || 0)))} ج.م
+                      </span>
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
+
+          {/* ── No-answer call attempts (only for 'لا يرد') ─────────────── */}
+          {quickLiveStatus === 'لا يرد' && (
+            <div className="mt-4 pt-4 border-t border-gray-100 dark:border-slate-700/60">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-gray-700 dark:text-slate-300">محاولات الاتصال</span>
+                <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full
+                  ${noAnswerLogs.length >= NO_ANSWER_REQUIRED
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                  محاولة {noAnswerLogs.length} من {NO_ANSWER_REQUIRED}
+                </span>
+              </div>
+
+              {noAnswerLogs.length > 0 && (
+                <ul className="mb-3 max-h-28 overflow-y-auto space-y-1 text-xs text-gray-500 dark:text-slate-400 pr-1">
+                  {noAnswerLogs.map((ts, i) => (
+                    <li key={i} className="flex items-center gap-2">
+                      <span className="w-5 text-gray-400 dark:text-slate-600 shrink-0">{i + 1}.</span>
+                      <span dir="ltr">
+                        {(() => { const d = new Date(ts); return isNaN(d.getTime()) ? String(ts)
+                          : d.toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' }); })()}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <button
+                type="button"
+                onClick={() => handleLogAttempt(quickEdit.id)}
+                disabled={loggingAttempt}
+                className="w-full inline-flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold
+                  bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white
+                  disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-[0.98]"
+              >
+                {loggingAttempt ? (
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                  </svg>
+                )}
+                تسجيل محاولة اتصال
+              </button>
+
+              {attemptMsg && (
+                <p className="text-xs text-center mt-2 text-gray-600 dark:text-slate-400">{attemptMsg}</p>
+              )}
+            </div>
+          )}
 
           <div className="flex gap-3 mt-6">
             <button
@@ -736,6 +894,63 @@ export default function OrdersTable({
                 {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
+
+            {/* No-answer call attempts — shown only when status is لا يرد.
+                NOTE: works on the SAVED status (editModal.Status). Change the
+                status to لا يرد and save first, then reopen to log attempts. */}
+            {editLiveStatus === 'لا يرد' && (
+              <div className="rounded-xl border border-amber-200 dark:border-amber-700/50 p-4 bg-amber-50/50 dark:bg-amber-900/10">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-gray-700 dark:text-slate-300">محاولات الاتصال (لا يرد)</span>
+                  <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full
+                    ${noAnswerLogs.length >= NO_ANSWER_REQUIRED
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                    محاولة {noAnswerLogs.length} من {NO_ANSWER_REQUIRED}
+                  </span>
+                </div>
+
+                {noAnswerLogs.length > 0 && (
+                  <ul className="mb-3 max-h-28 overflow-y-auto space-y-1 text-xs text-gray-500 dark:text-slate-400 pr-1">
+                    {noAnswerLogs.map((ts, i) => (
+                      <li key={i} className="flex items-center gap-2">
+                        <span className="w-5 text-gray-400 dark:text-slate-600 shrink-0">{i + 1}.</span>
+                        <span dir="ltr">
+                          {(() => { const d = new Date(ts); return isNaN(d.getTime()) ? String(ts)
+                            : d.toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' }); })()}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => handleLogAttempt(editModal.id)}
+                  disabled={loggingAttempt}
+                  className="w-full inline-flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold
+                    bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white
+                    disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-[0.98]"
+                >
+                  {loggingAttempt ? (
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                    </svg>
+                  )}
+                  تسجيل محاولة اتصال
+                </button>
+
+                {attemptMsg && (
+                  <p className="text-xs text-center mt-2 text-gray-600 dark:text-slate-400">{attemptMsg}</p>
+                )}
+              </div>
+            )}
 
             {/* Rejection reason — shown only when status is تم الرفض */}
             {editForm.Status === 'تم الرفض' && (

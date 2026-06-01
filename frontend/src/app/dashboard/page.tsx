@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  getOrders, updateOrder, deleteOrder,
+  getOrders, updateOrder, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
   getStaff, distributeOrders, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
@@ -13,7 +13,15 @@ import {
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
 
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'تم الشحن'];
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
+
+/* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
+const EGYPT_GOVERNORATES = [
+  'القاهرة', 'الجيزة', 'الإسكندرية', 'القليوبية', 'الشرقية', 'الدقهلية', 'البحيرة',
+  'الغربية', 'المنوفية', 'كفر الشيخ', 'دمياط', 'بورسعيد', 'الإسماعيلية', 'السويس',
+  'الفيوم', 'بني سويف', 'المنيا', 'أسيوط', 'سوهاج', 'قنا', 'الأقصر', 'أسوان',
+  'البحر الأحمر', 'الوادي الجديد', 'مطروح', 'شمال سيناء', 'جنوب سيناء',
+];
 
 const getShortName = (name?: string) => {
   if (!name) return '';
@@ -94,6 +102,11 @@ export default function DashboardPage() {
   const [showDistModal, setShowDistModal] = useState(false);
   const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
   const [distPercents,  setDistPercents]  = useState<Record<number, string>>({});
+  /* Manual add-order modal */
+  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '' };
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addForm,      setAddForm]      = useState({ ...EMPTY_ADD_FORM });
+  const [addSaving,    setAddSaving]    = useState(false);
   const [selectedIds,   setSelectedIds]   = useState<number[]>([]);   // bulk checkbox selection
   const [showXferModal, setShowXferModal] = useState(false);
   const [xferTargetId,  setXferTargetId]  = useState<number | ''>('');
@@ -177,7 +190,9 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (user?.role === 'admin') fetchProducts();
+    // All roles fetch products — agents need them for the manual-order modal
+    // (backend strips COGS for non-admins).
+    if (user) fetchProducts();
   }, [user, fetchProducts]);
 
   // Background products poll — keeps stock badges in filter pills fresh.
@@ -576,6 +591,41 @@ export default function DashboardPage() {
     setShowDistModal(true);
   };
 
+  /* ── Manual order creation ───────────────────────────────────── */
+  const openAddModal = () => {
+    setAddForm({ ...EMPTY_ADD_FORM });
+    setShowAddModal(true);
+  };
+
+  const handleCreateOrder = async () => {
+    if (!addForm.FullName.trim() || !addForm.Phone.trim()) {
+      showToast('الاسم ورقم الهاتف مطلوبان', 'error');
+      return;
+    }
+    setAddSaving(true);
+    try {
+      const res = await createOrder({
+        FullName:     addForm.FullName.trim(),
+        Phone:        addForm.Phone.trim(),
+        City:         addForm.City.trim(),
+        Address:      addForm.Address.trim(),
+        ProductName:  addForm.ProductName.trim() || undefined,
+        sku:          addForm.sku.trim() || undefined,
+        ProductPrice: addForm.ProductPrice.trim() || undefined,
+      });
+      setOrders((prev) => [res.data, ...prev]);   // show instantly at the top
+      showToast('تم إضافة الطلب بنجاح', 'success');
+      setShowAddModal(false);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل في إضافة الطلب';
+      showToast(msg, 'error');
+    } finally {
+      setAddSaving(false);
+    }
+  };
+
   /* ── Role-based privacy fence ────────────────────────────────── */
   // This is the ONLY place that enforces visibility.
   // Agents see exclusively their own assigned orders; admins see everything.
@@ -822,23 +872,38 @@ export default function DashboardPage() {
                 : `طلباتك — ${user?.email ?? ''}`}
             </p>
           </div>
-          <button
-            onClick={fetchOrders}
-            title="تحديث الطلبات"
-            className="flex items-center gap-2 px-3 py-2 rounded-xl
-              text-slate-500 dark:text-slate-400
-              hover:text-indigo-600 dark:hover:text-indigo-400
-              hover:bg-white dark:hover:bg-slate-800
-              hover:shadow-sm border border-transparent
-              hover:border-slate-200 dark:hover:border-slate-700
-              transition-all text-sm font-medium"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            تحديث
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={openAddModal}
+              title="إضافة طلب يدوي"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
+                bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                text-white text-sm font-semibold shadow-sm shadow-indigo-500/20
+                transition-all duration-150 active:scale-95"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              إضافة طلب
+            </button>
+            <button
+              onClick={fetchOrders}
+              title="تحديث الطلبات"
+              className="flex items-center gap-2 px-3 py-2 rounded-xl
+                text-slate-500 dark:text-slate-400
+                hover:text-indigo-600 dark:hover:text-indigo-400
+                hover:bg-white dark:hover:bg-slate-800
+                hover:shadow-sm border border-transparent
+                hover:border-slate-200 dark:hover:border-slate-700
+                transition-all text-sm font-medium"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              تحديث
+            </button>
+          </div>
         </div>
 
         {/* ── Team filter — admin only ──────────────────────────────── */}
@@ -869,6 +934,175 @@ export default function DashboardPage() {
                 </button>
               ))}
 
+            </div>
+          </div>
+        )}
+
+        {/* ── Manual Add-Order Modal ────────────────────────────────── */}
+        {showAddModal && (
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={(e) => e.target === e.currentTarget && !addSaving && setShowAddModal(false)}
+          >
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
+              border border-slate-200 dark:border-slate-700/60 w-full max-w-md flex flex-col max-h-[90vh]" dir="rtl">
+
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-6 pb-4 border-b border-slate-100 dark:border-slate-800">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white leading-tight">إضافة طلب يدوي</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    طلب خارجي (واتساب / فيسبوك) — يبدأ بحالة «جديد»
+                  </p>
+                </div>
+                <button onClick={() => setShowAddModal(false)} disabled={addSaving}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200
+                    hover:bg-slate-100 dark:hover:bg-slate-800 transition disabled:opacity-40" aria-label="إغلاق">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="px-6 py-4 space-y-3.5 overflow-y-auto">
+                {/* Plain text fields (name + phone) */}
+                {([
+                  { key: 'FullName', label: 'اسم العميل *', dir: 'rtl', ph: 'الاسم الكامل' },
+                  { key: 'Phone',    label: 'رقم الهاتف *', dir: 'ltr', ph: '01XXXXXXXXX' },
+                ] as { key: keyof typeof addForm; label: string; dir: string; ph: string }[]).map((f) => (
+                  <div key={f.key}>
+                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">{f.label}</label>
+                    <input
+                      type="text"
+                      value={addForm[f.key]}
+                      onChange={(e) => setAddForm((p) => ({ ...p, [f.key]: e.target.value }))}
+                      placeholder={f.ph}
+                      dir={f.dir}
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                        bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                        text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                        focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                    />
+                  </div>
+                ))}
+
+                {/* Governorate dropdown */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">المحافظة</label>
+                  <select
+                    value={addForm.City}
+                    onChange={(e) => setAddForm((p) => ({ ...p, City: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none cursor-pointer
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  >
+                    <option value="">— اختر المحافظة —</option>
+                    {EGYPT_GOVERNORATES.map((g) => (
+                      <option key={g} value={g}>{g}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Detailed address */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">العنوان التفصيلي</label>
+                  <input
+                    type="text"
+                    value={addForm.Address}
+                    onChange={(e) => setAddForm((p) => ({ ...p, Address: e.target.value }))}
+                    placeholder="الشارع، المبنى، علامة مميزة"
+                    dir="rtl"
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  />
+                </div>
+
+                {/* Product dropdown — selecting one fills ProductName + sku and
+                    auto-fills the price (still editable below). */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">المنتج (اختياري)</label>
+                  <select
+                    value={addForm.productId}
+                    onChange={(e) => {
+                      const prod = products.find((p) => p.id === e.target.value);
+                      setAddForm((p) => ({
+                        ...p,
+                        productId:    e.target.value,
+                        ProductName:  prod ? prod.name : '',
+                        sku:          prod ? (prod.sku ?? '') : '',
+                        // auto-fill the price from the product (editable afterwards)
+                        ProductPrice: prod ? String(prod.selling_price ?? '') : p.ProductPrice,
+                      }));
+                    }}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none cursor-pointer
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  >
+                    <option value="">— اختر منتجاً —</option>
+                    {products.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}{p.sku ? ` (${p.sku})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {products.length === 0 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                      لا توجد منتجات مُسجّلة بعد — أضِف منتجات من صفحة المخزون.
+                    </p>
+                  )}
+                </div>
+
+                {/* Total / COD — auto-filled from the product, still editable */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">الإجمالي / المبلغ (COD)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={addForm.ProductPrice}
+                    onChange={(e) => setAddForm((p) => ({ ...p, ProductPrice: e.target.value }))}
+                    placeholder="0"
+                    dir="ltr"
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  />
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 pb-6 pt-4 border-t border-slate-100 dark:border-slate-800 flex gap-3">
+                <button
+                  onClick={handleCreateOrder}
+                  disabled={addSaving || !addForm.FullName.trim() || !addForm.Phone.trim()}
+                  className="flex-1 inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl
+                    text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white
+                    shadow-md shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed
+                    transition-all duration-150 active:scale-[0.98]"
+                >
+                  {addSaving ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                      جارٍ الإضافة…
+                    </>
+                  ) : 'إضافة الطلب'}
+                </button>
+                <button onClick={() => setShowAddModal(false)} disabled={addSaving}
+                  className="px-5 py-2.5 rounded-xl text-sm font-semibold
+                    bg-slate-100 hover:bg-slate-200 text-slate-700
+                    dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300
+                    disabled:opacity-50 transition">
+                  إلغاء
+                </button>
+              </div>
             </div>
           </div>
         )}

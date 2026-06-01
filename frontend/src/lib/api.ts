@@ -33,6 +33,7 @@ export interface Order {
   hasDeposit?: boolean;         // true when a deposit / down-payment was collected
   depositAmount?: number;       // amount already paid (العربون / الديبوزت) in EGP
   unit_cost_price?: number;     // WAC locked at confirmation — used for accurate historical COGS
+  no_answer_logs?: string[];    // ISO timestamps of logged call attempts (لا يرد)
 }
 
 export interface ShippingResultRow {
@@ -90,11 +91,39 @@ export const register = (payload: RegisterPayload) =>
 export const getOrders = () =>
   api.get<Order[]>('/api/orders');
 
+/* ── Manual order creation (WhatsApp / Facebook / phone) ────────────────────── */
+export interface CreateOrderPayload {
+  FullName:      string;
+  Phone:         string;
+  Address?:      string;
+  City?:         string;
+  ProductName?:  string;
+  sku?:          string;                 // SKU of the selected product
+  ProductPrice?: string | number;        // Total / COD amount
+  Quantity?:     number;
+}
+
+/** Create a manual order (status 'جديد', tenant-scoped). Admin only. */
+export const createOrder = (data: CreateOrderPayload) =>
+  api.post<Order>('/api/orders', data);
+
 export const updateOrder = (id: number, data: AgentUpdate | AdminUpdate) =>
   api.patch<Order>(`/api/orders/${id}`, data);
 
 export const deleteOrder = (id: number) =>
   api.delete(`/api/orders/${id}`);
+
+/* ── No-answer call-attempt logging (5-attempt commission rule) ─────────────── */
+export interface NoAnswerAttemptResult {
+  no_answer_logs:    string[];   // updated array of ISO timestamps
+  count:             number;     // attempts so far
+  required:          number;     // attempts needed for the commission (5)
+  commissionAwarded: boolean;    // true if THIS attempt unlocked the commission
+}
+
+/** Log one call attempt for a 'لا يرد' order. Awards comm_no_answer at 5 attempts. */
+export const logNoAnswerAttempt = (id: number) =>
+  api.post<NoAnswerAttemptResult>(`/api/orders/${id}/no-answer-attempt`);
 
 /** Bulk-delete orders by id. Admin only. Tenant-scoped server-side. */
 export const bulkDeleteOrders = (ids: number[]) =>

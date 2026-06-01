@@ -126,6 +126,15 @@ function parseBostaPayload(body) {
     ? rawStatus.toLowerCase().trim()
     : null;
 
+  // Numeric Bosta state code (e.g. 45/46 = returned to business). Far more
+  // reliable than the localised string when present.
+  const rawCode =
+    root?.state?.code ??
+    root?.state?.stateCode ??
+    root?.stateCode ??
+    (typeof root?.state === 'number' ? root.state : null);
+  const stateCode = rawCode != null && !isNaN(Number(rawCode)) ? Number(rawCode) : null;
+
   // Structural return flag — far more reliable than parsing the state string.
   const isReturn =
     root?.isReturn === true ||
@@ -143,8 +152,15 @@ function parseBostaPayload(body) {
     ? Math.max(0, parseFloat(rawCod))
     : null;
 
-  return { trackingNumber, statusStr, webhookCod, isReturn };
+  return { trackingNumber, statusStr, stateCode, webhookCod, isReturn };
 }
+
+/**
+ * Bosta numeric delivery-state codes that mean the parcel has been returned to
+ * the merchant/origin (physical return → triggers restock). 45 & 46 are the
+ * canonical "Returned to business" / "Delivered to sender" codes.
+ */
+const RETURN_STATE_CODES = new Set([45, 46, 47]);
 
 /**
  * Calculate the net COD amount from the order's own DB fields.
@@ -216,7 +232,33 @@ pool.query(`
         WHERE source = 'bosta_cod'
     `)
   )
-  .then(() => console.log('✅  Webhook: product_returns + treasury_transactions tables ready'))
+  /* ── Orphan cleanup (must precede the FK — orphans would violate it) ──────
+     Removes financial rows whose order was already deleted. Manual entries
+     (order_id IS NULL) are preserved.                                        */
+  .then(() =>
+    pool.query(`
+      DELETE FROM treasury_transactions t
+       WHERE t.order_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = t.order_id)
+    `)
+  )
+  /* ── Permanent fix: FK with ON DELETE CASCADE ────────────────────────────
+     Deleting an order now automatically wipes its commissions/revenue.
+     Idempotent — only added if the constraint doesn't already exist.         */
+  .then(() =>
+    pool.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'treasury_transactions_order_id_fkey'
+        ) THEN
+          ALTER TABLE treasury_transactions
+            ADD CONSTRAINT treasury_transactions_order_id_fkey
+            FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE;
+        END IF;
+      END $$;
+    `)
+  )
+  .then(() => console.log('✅  Webhook: product_returns + treasury_transactions tables ready (FK ON DELETE CASCADE)'))
   .catch((err) => console.warn('⚠️   Webhook schema migration error:', err.message));
 
 /* ── POST /api/webhooks/bosta ──────────────────────────────────────────── */
@@ -257,19 +299,29 @@ router.post('/bosta', async (req, res) => {
   try {
     console.log('[Bosta Webhook] Raw payload:', JSON.stringify(req.body, null, 2));
 
-    const { trackingNumber, statusStr, webhookCod, isReturn } = parseBostaPayload(req.body);
+    const { trackingNumber, statusStr, stateCode, webhookCod, isReturn } = parseBostaPayload(req.body);
 
     if (!trackingNumber) {
       console.warn('[Bosta Webhook] Missing trackingNumber — skipping');
       return;
     }
-    if (!statusStr) {
-      console.warn(`[Bosta Webhook] Missing status for tracking "${trackingNumber}" — skipping`);
+    if (!statusStr && stateCode == null) {
+      console.warn(`[Bosta Webhook] Missing status & state code for tracking "${trackingNumber}" — skipping`);
       return;
     }
 
     /* Normalise the raw Bosta string to a canonical key. */
     let canonical = canonicalizeStatus(statusStr);
+
+    /* Numeric state code takes precedence for returns: codes 45/46 ("Returned
+       to business" / "Delivered to sender") are unambiguous even when the
+       localised string is missing or worded differently. */
+    if (RETURN_STATE_CODES.has(stateCode)) {
+      if (canonical !== 'returned') {
+        console.log(`[Bosta Webhook] state code ${stateCode} → forcing canonical "returned"`);
+      }
+      canonical = 'returned';
+    }
 
     /* A return parcel that reports "delivered" actually means it was delivered
        BACK to the merchant → treat it as a physical return so stock is restored. */
@@ -280,15 +332,34 @@ router.post('/bosta', async (req, res) => {
 
     console.log(
       `[Bosta Webhook] tracking="${trackingNumber}"  rawStatus="${statusStr}"  ` +
-      `canonical="${canonical}"  isReturn=${isReturn}  webhookCod=${webhookCod ?? '(not in payload)'}`
+      `stateCode=${stateCode ?? '(none)'}  canonical="${canonical}"  isReturn=${isReturn}  ` +
+      `webhookCod=${webhookCod ?? '(not in payload)'}`
     );
+
+    /* ── Return-state detector (explicit monitoring hook) ────────────────────
+       Loud, unambiguous logging the moment ANY return-related state arrives —
+       whether in-transit ('returning_to_merchant') or physically received
+       ('returned' / 'delivered_to_merchant'). Lets us watch Bosta return
+       payloads live in pm2 logs without grepping the whole flow.            */
+    const RETURN_STATES = new Set([
+      'returning_to_merchant', 'returned', 'delivered_to_merchant',
+    ]);
+    if (isReturn || RETURN_STATES.has(canonical)) {
+      console.log(
+        `🔁 [Bosta Webhook] RETURN STATE DETECTED → tracking="${trackingNumber}" ` +
+        `canonical="${canonical}" isReturn=${isReturn} ` +
+        `willRestock=${FINAL_RETURN_STATUSES.has(canonical)}`
+      );
+      console.log('🔁 [Bosta Webhook] Return payload:', JSON.stringify(req.body));
+    }
 
     /* ── Step 1: Resolve the order by BostaTrackingCode ──────────────────
        SELECT includes ProductPrice + depositAmount for the treasury COD
-       calculation, sku for the SKU-first inventory logic, and Quantity so the
-       physical return restocks the EXACT number of units that were shipped.  */
+       calculation and sku for the SKU-first inventory logic.
+       NOTE: the orders table has NO "Quantity" column — each order is a single
+       unit, so a physical return restocks exactly 1.                         */
     const { rows } = await pool.query(
-      `SELECT id, "ProductName", "Status", "sku", "ProductPrice", "depositAmount", "Quantity", business_id
+      `SELECT id, "ProductName", "Status", "sku", "ProductPrice", "depositAmount", business_id
        FROM   orders
        WHERE  "BostaTrackingCode" = $1`,
       [trackingNumber]
@@ -306,7 +377,7 @@ router.post('/bosta', async (req, res) => {
     const order       = rows[0];
     const productName = (order.ProductName || '').trim();
     const orderSku    = order.sku?.trim() || null;
-    const orderQty    = Math.max(1, parseInt(order.Quantity, 10) || 1);
+    const orderQty    = 1;   // orders table has no Quantity column → 1 unit per order
     /* TENANT: every downstream write is scoped to the matched order's owner,
        so a Bosta event can never mutate another tenant's stock/treasury.   */
     const businessId  = order.business_id ?? null;

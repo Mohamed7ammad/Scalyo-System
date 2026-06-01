@@ -31,11 +31,17 @@ const MUTABLE_FIELDS = new Set([
   'name', 'sku', 'cost_price', 'selling_price', 'stock_quantity', 'image_url',
 ]);
 
-// GET /api/products — admin only
-router.get('/', authenticate, requireAdmin, async (req, res) => {
+// GET /api/products — all authenticated roles (agents need it for the manual
+// order modal). SECURITY: non-admins never receive cost_price (COGS); they get
+// only the safe fields needed to pick a product and show stock badges.
+router.get('/', authenticate, async (req, res) => {
   try {
+    const isAdmin = req.user.role === 'admin';
+    const cols = isAdmin
+      ? '*'
+      : 'id, name, sku, selling_price, stock_quantity, image_url, created_at, business_id';
     const result = await pool.query(
-      'SELECT * FROM products WHERE business_id = $1 ORDER BY name ASC',
+      `SELECT ${cols} FROM products WHERE business_id = $1 ORDER BY name ASC`,
       [req.user.business_id]
     );
     res.json(result.rows);

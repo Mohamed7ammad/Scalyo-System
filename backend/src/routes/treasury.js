@@ -155,28 +155,30 @@ async function backfillTreasury() {
      input — safe by construction.                                          */
   const COMM_BACKFILL = [
     {
-      source:   'comm_confirmed',
-      rateCol:  'comm_confirmed',
-      statuses: [`'تم التأكيد'`, `'تم الشحن'`],
-      label:    'تأكيد',
+      source:    'comm_confirmed',
+      rateCol:   'comm_confirmed',
+      predicate: `o."Status" IN ('تم التأكيد', 'تم الشحن')`,
+      label:     'تأكيد',
     },
     {
-      source:   'comm_delivered',
-      rateCol:  'comm_delivered',
-      statuses: [`'تم التوصيل'`, `'تم الإرجاع'`],
-      label:    'توصيل',
+      source:    'comm_delivered',
+      rateCol:   'comm_delivered',
+      predicate: `o."Status" IN ('تم التوصيل', 'تم الإرجاع')`,
+      label:     'توصيل',
     },
     {
-      source:   'comm_rejected',
-      rateCol:  'comm_rejected',
-      statuses: [`'تم الرفض'`],
-      label:    'رفض',
+      source:    'comm_rejected',
+      rateCol:   'comm_rejected',
+      predicate: `o."Status" = 'تم الرفض'`,
+      label:     'رفض',
     },
     {
-      source:   'comm_no_answer',
-      rateCol:  'comm_no_answer',
-      statuses: [`'لا يرد'`, `'مؤجل'`],
-      label:    'لا يرد',
+      source:    'comm_no_answer',
+      rateCol:   'comm_no_answer',
+      /* 'لا يرد' earns this ONLY after 5 logged call attempts (anti-abuse rule).
+         'مؤجل' grants NO automatic commission. Mirrors orders.js. */
+      predicate: `(o."Status" = 'لا يرد' AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5)`,
+      label:     'لا يرد',
     },
   ];
 
@@ -199,7 +201,7 @@ async function backfillTreasury() {
         FROM   orders o
         JOIN   users  u
           ON   LOWER(TRIM(u.email)) = LOWER(TRIM(o."AssignedTo"))
-        WHERE  o."Status" IN (${c.statuses.join(', ')})
+        WHERE  ${c.predicate}
           AND  o."AssignedTo" IS NOT NULL
           AND  TRIM(o."AssignedTo") <> ''
           AND  COALESCE(u."${c.rateCol}"::numeric, 0) > 0
