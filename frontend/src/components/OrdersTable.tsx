@@ -118,12 +118,12 @@ export default function OrdersTable({
     setQuickEdit(order);
   };
 
-  const handleLogAttempt = async () => {
-    if (!quickEdit || loggingAttempt) return;
+  const handleLogAttempt = async (orderId: number) => {
+    if (!orderId || loggingAttempt) return;
     setLoggingAttempt(true);
     setAttemptMsg('');
     try {
-      const { data } = await logNoAnswerAttempt(quickEdit.id);
+      const { data } = await logNoAnswerAttempt(orderId);
       setNoAnswerLogs(data.no_answer_logs);
       if (data.commissionAwarded) {
         setAttemptMsg(`🎉 تم الوصول إلى ${data.required} محاولات — تم منح عمولة "لا يرد"`);
@@ -198,6 +198,8 @@ export default function OrdersTable({
   /* ─── Admin full-edit modal ────────────────────────────────── */
   const openEditModal = (order: Order) => {
     setEditForm({ ...order });
+    setNoAnswerLogs(Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+    setAttemptMsg('');
     setEditModal(order);
   };
 
@@ -730,7 +732,7 @@ export default function OrdersTable({
 
               <button
                 type="button"
-                onClick={handleLogAttempt}
+                onClick={() => handleLogAttempt(quickEdit.id)}
                 disabled={loggingAttempt}
                 className="w-full inline-flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold
                   bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white
@@ -880,6 +882,63 @@ export default function OrdersTable({
                 {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
+
+            {/* No-answer call attempts — shown only when status is لا يرد.
+                NOTE: works on the SAVED status (editModal.Status). Change the
+                status to لا يرد and save first, then reopen to log attempts. */}
+            {editModal?.Status === 'لا يرد' && (
+              <div className="rounded-xl border border-amber-200 dark:border-amber-700/50 p-4 bg-amber-50/50 dark:bg-amber-900/10">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-gray-700 dark:text-slate-300">محاولات الاتصال (لا يرد)</span>
+                  <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full
+                    ${noAnswerLogs.length >= NO_ANSWER_REQUIRED
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                    محاولة {noAnswerLogs.length} من {NO_ANSWER_REQUIRED}
+                  </span>
+                </div>
+
+                {noAnswerLogs.length > 0 && (
+                  <ul className="mb-3 max-h-28 overflow-y-auto space-y-1 text-xs text-gray-500 dark:text-slate-400 pr-1">
+                    {noAnswerLogs.map((ts, i) => (
+                      <li key={i} className="flex items-center gap-2">
+                        <span className="w-5 text-gray-400 dark:text-slate-600 shrink-0">{i + 1}.</span>
+                        <span dir="ltr">
+                          {(() => { const d = new Date(ts); return isNaN(d.getTime()) ? String(ts)
+                            : d.toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' }); })()}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => handleLogAttempt(editModal.id)}
+                  disabled={loggingAttempt}
+                  className="w-full inline-flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold
+                    bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white
+                    disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-[0.98]"
+                >
+                  {loggingAttempt ? (
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                    </svg>
+                  )}
+                  تسجيل محاولة اتصال
+                </button>
+
+                {attemptMsg && (
+                  <p className="text-xs text-center mt-2 text-gray-600 dark:text-slate-400">{attemptMsg}</p>
+                )}
+              </div>
+            )}
 
             {/* Rejection reason — shown only when status is تم الرفض */}
             {editForm.Status === 'تم الرفض' && (
