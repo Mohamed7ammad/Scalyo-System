@@ -157,8 +157,8 @@ function buildAgentSql(joinOnClause, whereClause) {
 
       /* commission = confirmed×cc + delivered×cd + rejected×cr + noAnswer×cn
          NOTE: 'لا يرد' earns comm_no_answer ONLY after 5 logged call attempts
-         (anti-abuse rule). 'مؤجل' earns it immediately. This MUST match the
-         treasury logic in orders.js / treasury.js or the figures diverge. */
+         (anti-abuse rule). 'مؤجل' grants NO automatic commission. This MUST
+         match the treasury logic in orders.js / treasury.js or figures diverge. */
       ROUND(
           COUNT(o.id) FILTER (WHERE o."Status" IN (
             'تم التأكيد', 'تم الشحن', 'تم التوصيل',
@@ -169,9 +169,8 @@ function buildAgentSql(joinOnClause, whereClause) {
         + COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')
             * COALESCE(u.comm_rejected, 0)
         + COUNT(o.id) FILTER (WHERE
-            o."Status" = 'مؤجل'
-            OR (o."Status" = 'لا يرد'
-                AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5)
+            o."Status" = 'لا يرد'
+            AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5
           ) * COALESCE(u.comm_no_answer, 0),
         2
       )                                                                 AS earned_commission

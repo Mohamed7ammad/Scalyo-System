@@ -744,17 +744,16 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
        'تم التأكيد'  → source 'comm_confirmed'  (comm_confirmed column)
        'تم التوصيل' → source 'comm_delivered'   (comm_delivered column)
        'تم الرفض'   → source 'comm_rejected'    (comm_rejected column)
-       'لا يرد'     → source 'comm_no_answer'   (comm_no_answer column)
-       'مؤجل'       → source 'comm_no_answer'   (same bucket as لا يرد)   */
+       'لا يرد'     → source 'comm_no_answer'   (comm_no_answer column)   */
   if (updates.Status && updates.Status !== currentStatus) {
     const COMM_MAP = {
       'تم التأكيد':  { field: 'comm_confirmed', source: 'comm_confirmed', label: 'تأكيد'   },
       'تم التوصيل': { field: 'comm_delivered',  source: 'comm_delivered',  label: 'توصيل'   },
       'تم الرفض':   { field: 'comm_rejected',   source: 'comm_rejected',   label: 'رفض'     },
-      'مؤجل':       { field: 'comm_no_answer',  source: 'comm_no_answer',  label: 'مؤجل'    },
-      /* NOTE: 'لا يرد' is intentionally NOT here. Its comm_no_answer commission is
-         earned only after 5 logged call attempts — handled by the dedicated
-         POST /:id/no-answer-attempt endpoint, NOT on the status change itself. */
+      /* NOTE: neither 'لا يرد' nor 'مؤجل' is here.
+         • 'لا يرد' earns comm_no_answer ONLY after 5 logged call attempts —
+           handled by POST /:id/no-answer-attempt, not on the status change.
+         • 'مؤجل' grants NO automatic commission at all. */
     };
 
     const commInfo   = COMM_MAP[updates.Status];
@@ -799,7 +798,8 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
        تم التأكيد / تم الشحن → comm_confirmed
        تم التوصيل            → comm_confirmed + comm_delivered + bosta_cod (COD revenue)
        تم الرفض              → comm_rejected
-       لا يرد / مؤجل         → comm_no_answer
+       لا يرد                → comm_no_answer (only if 5+ attempts already logged)
+       مؤجل                  → NONE  (no automatic commission)
        جديد / ملغي / غيره    → NONE  (all status-driven txns voided)
 
      NOTE: source 'deposit' is intentionally NOT touched — it represents real
@@ -814,7 +814,7 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
       'تم التوصيل': ['comm_confirmed', 'comm_delivered', 'bosta_cod'],
       'تم الرفض':   ['comm_rejected'],
       'لا يرد':     ['comm_no_answer'],
-      'مؤجل':       ['comm_no_answer'],
+      'مؤجل':       [],   // postponed → NO automatic commission; void all (deposit kept)
       'معلق حتي الدفع': [],   // pending-until-payment → NO commission; void all (deposit kept)
     };
     const validSources = new Set(VALID_BY_STATUS[updates.Status] || []); // جديد/ملغي/… → none

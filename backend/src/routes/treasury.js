@@ -175,9 +175,9 @@ async function backfillTreasury() {
     {
       source:    'comm_no_answer',
       rateCol:   'comm_no_answer',
-      /* 'مؤجل' earns this commission always; 'لا يرد' ONLY after 5 logged call
-         attempts (the anti-abuse rule). Mirrors the orders.js attempt endpoint. */
-      predicate: `(o."Status" = 'مؤجل' OR (o."Status" = 'لا يرد' AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5))`,
+      /* 'لا يرد' earns this ONLY after 5 logged call attempts (anti-abuse rule).
+         'مؤجل' grants NO automatic commission. Mirrors orders.js. */
+      predicate: `(o."Status" = 'لا يرد' AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5)`,
       label:     'لا يرد',
     },
   ];
