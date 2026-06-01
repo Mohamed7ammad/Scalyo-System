@@ -766,7 +766,8 @@ router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
        unique index (treasury_comm_na_uidx). */
     if (count >= NO_ANSWER_REQUIRED_ATTEMPTS && order.Status === 'لا يرد' && order.AssignedTo) {
       const uRes = await pool.query(
-        `SELECT comm_no_answer AS rate FROM users WHERE email = $1 AND business_id = $2`,
+        `SELECT comm_no_answer AS rate FROM users
+          WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) AND business_id = $2`,
         [order.AssignedTo, businessId]
       );
       const rate = parseFloat(uRes.rows[0]?.rate) || 0;

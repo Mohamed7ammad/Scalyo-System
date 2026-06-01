@@ -129,6 +129,8 @@ export default function OrdersTable({
         setAttemptMsg(`🎉 تم الوصول إلى ${data.required} محاولات — تم منح عمولة "لا يرد"`);
       } else if (data.count < data.required) {
         setAttemptMsg(`تبقّى ${data.required - data.count} محاولة لاستحقاق العمولة`);
+      } else {
+        setAttemptMsg(`تم تسجيل المحاولة (${data.count}) — العمولة مُحتسبة بالفعل`);
       }
     } catch {
       setAttemptMsg('تعذّر تسجيل المحاولة، حاول مرة أخرى');
@@ -219,6 +221,16 @@ export default function OrdersTable({
     await onDelete(deleteConfirm);
     setDeleteConfirm(null);
   };
+
+  /* Live, trimmed status of the order open in each modal — read from the current
+     `orders` prop (not the stale snapshot) so the no-answer section always
+     reflects the order's real status. */
+  const quickLiveStatus = quickEdit
+    ? String(orders.find((o) => o.id === quickEdit.id)?.Status ?? quickEdit.Status ?? '').trim()
+    : '';
+  const editLiveStatus = editModal
+    ? String(orders.find((o) => o.id === editModal.id)?.Status ?? editModal.Status ?? '').trim()
+    : '';
 
   /* ─── Empty state ──────────────────────────────────────────── */
   if (!orders.length) {
@@ -704,7 +716,7 @@ export default function OrdersTable({
           </div>
 
           {/* ── No-answer call attempts (only for 'لا يرد') ─────────────── */}
-          {quickEdit?.Status === 'لا يرد' && (
+          {quickLiveStatus === 'لا يرد' && (
             <div className="mt-4 pt-4 border-t border-gray-100 dark:border-slate-700/60">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-gray-700 dark:text-slate-300">محاولات الاتصال</span>
@@ -886,7 +898,7 @@ export default function OrdersTable({
             {/* No-answer call attempts — shown only when status is لا يرد.
                 NOTE: works on the SAVED status (editModal.Status). Change the
                 status to لا يرد and save first, then reopen to log attempts. */}
-            {editModal?.Status === 'لا يرد' && (
+            {editLiveStatus === 'لا يرد' && (
               <div className="rounded-xl border border-amber-200 dark:border-amber-700/50 p-4 bg-amber-50/50 dark:bg-amber-900/10">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-semibold text-gray-700 dark:text-slate-300">محاولات الاتصال (لا يرد)</span>
