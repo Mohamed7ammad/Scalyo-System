@@ -871,21 +871,19 @@ export default function DashboardPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {isAdmin && (
-              <button
-                onClick={openAddModal}
-                title="إضافة طلب يدوي"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
-                  bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
-                  text-white text-sm font-semibold shadow-sm shadow-indigo-500/20
-                  transition-all duration-150 active:scale-95"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
-                إضافة طلب
-              </button>
-            )}
+            <button
+              onClick={openAddModal}
+              title="إضافة طلب يدوي"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
+                bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                text-white text-sm font-semibold shadow-sm shadow-indigo-500/20
+                transition-all duration-150 active:scale-95"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              إضافة طلب
+            </button>
             <button
               onClick={fetchOrders}
               title="تحديث الطلبات"

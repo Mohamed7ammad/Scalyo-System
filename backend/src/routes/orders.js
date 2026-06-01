@@ -80,17 +80,22 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-/* ── POST /api/orders — admin only: manual order creation ───────────────────
+/* ── POST /api/orders — manual order creation (admins + agents) ──────────────
    Creates an external order (WhatsApp / Facebook / phone) that behaves exactly
    like a store-imported one:
      • status initialised to 'جديد'
-     • scoped to the admin's business_id
+     • scoped to the creator's business_id
      • optional BostaTrackingCode stored so the existing Bosta webhooks/cron
        track it normally
      • fires the (throttled) Bosta consignee-ranking enrichment, like imports
+   Assignment:
+     • an AGENT who creates an order is assigned it directly (they brought the
+       sale in)
+     • an ADMIN's manual order is fairly auto-assigned to the least-loaded
+       present agent
    Treasury/commission logic needs no special handling — it keys off status
    changes via PATCH, so manual orders integrate automatically.                */
-router.post('/', authenticate, requireAdmin, async (req, res) => {
+router.post('/', authenticate, async (req, res) => {
   const { FullName, Phone, City, Address, ProductPrice, ProductName, sku } = req.body;
 
   if (!FullName || !String(FullName).trim() || !Phone || !String(Phone).trim()) {
@@ -119,42 +124,52 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 
     let order = result.rows[0];
 
-    /* ── Auto-assign to the least-loaded present agent ──────────────────────
-       Balances workload by giving the new order to the present, active agent
-       who currently has the FEWEST pending ('جديد') orders. This mirrors the
-       auto-distribute philosophy for a single order WITHOUT reshuffling anyone
-       else's existing assignments. Done BEFORE the response so the returned
-       order already carries AssignedTo (frontend reflects it instantly).      */
+    /* ── Assignment ─────────────────────────────────────────────────────────
+       • AGENT creator → assign directly to them (they brought in the sale).
+       • ADMIN creator → fairly auto-assign to the least-loaded present agent:
+         the active, present agent with the FEWEST pending ('جديد') orders.
+         This mirrors the auto-distribute philosophy for a single order WITHOUT
+         reshuffling anyone else's existing assignments.
+       Done BEFORE the response so the returned order already carries AssignedTo
+       (frontend reflects it instantly).                                        */
     try {
-      const { rows: agentRows } = await pool.query(
-        `SELECT u.email,
-                COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
-           FROM users u
-           LEFT JOIN orders o
-             ON o."AssignedTo" = u.email AND o.business_id = u.business_id
-          WHERE u.role = 'agent'
-            AND COALESCE(u.is_active,  true)  = true
-            AND COALESCE(u.is_absent, false)  = false
-            AND u.business_id = $1
-          GROUP BY u.email
-          ORDER BY load ASC, u.email ASC
-          LIMIT 1`,
-        [req.user.business_id]
-      );
+      let assignee = null;
 
-      if (agentRows.length) {
+      if (req.user.role === 'agent') {
+        assignee = req.user.email;
+      } else {
+        const { rows: agentRows } = await pool.query(
+          `SELECT u.email,
+                  COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
+             FROM users u
+             LEFT JOIN orders o
+               ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+            WHERE u.role = 'agent'
+              AND COALESCE(u.is_active,  true)  = true
+              AND COALESCE(u.is_absent, false)  = false
+              AND u.business_id = $1
+            GROUP BY u.email
+            ORDER BY load ASC, u.email ASC
+            LIMIT 1`,
+          [req.user.business_id]
+        );
+        if (agentRows.length) assignee = agentRows[0].email;
+      }
+
+      if (assignee) {
         const upd = await pool.query(
           `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
             WHERE id = $2 AND business_id = $3 RETURNING *`,
-          [agentRows[0].email, order.id, req.user.business_id]
+          [assignee, order.id, req.user.business_id]
         );
         if (upd.rows.length) order = upd.rows[0];
-        console.log(`[Manual Order] 🤝 #${order.id} auto-assigned to ${order.AssignedTo}`);
+        const how = req.user.role === 'agent' ? 'self (creator)' : 'least-loaded';
+        console.log(`[Manual Order] 🤝 #${order.id} assigned to ${order.AssignedTo} (${how})`);
       } else {
         console.log(`[Manual Order] ℹ️  #${order.id} left unassigned — no present agents`);
       }
     } catch (assignErr) {
-      console.warn('[Manual Order] auto-assign skipped:', assignErr.message);
+      console.warn('[Manual Order] assignment skipped:', assignErr.message);
     }
 
     console.log(`[Manual Order] ✅ #${order.id} created for tenant ${req.user.business_id}`);
