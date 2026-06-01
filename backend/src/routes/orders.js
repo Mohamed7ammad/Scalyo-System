@@ -672,6 +672,53 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
     }
   }
 
+  /* ── Step 3.5c: Treasury — VOID stale commission/revenue on status change ───
+     The hooks above only ADD commission/revenue on forward transitions; they
+     never remove anything. So reverting an order (e.g. تم الشحن → جديد, or
+     تم التوصيل → تم التأكيد, or → ملغي) used to leave phantom commissions and
+     expected revenue in the treasury. Here we delete every status-driven txn
+     that is NO LONGER valid for the order's new status.
+
+     Funnel-aware validity (a milestone's commission survives only while the
+     order is at/past that milestone):
+       تم التأكيد / تم الشحن → comm_confirmed
+       تم التوصيل            → comm_confirmed + comm_delivered + bosta_cod (COD revenue)
+       تم الرفض              → comm_rejected
+       لا يرد / مؤجل         → comm_no_answer
+       جديد / ملغي / غيره    → NONE  (all status-driven txns voided)
+
+     NOTE: source 'deposit' is intentionally NOT touched — it represents real
+     collected cash and is managed solely by the depositAmount hook above.       */
+  if (updates.Status && updates.Status !== currentStatus) {
+    const STATUS_DRIVEN_SOURCES = [
+      'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer', 'bosta_cod',
+    ];
+    const VALID_BY_STATUS = {
+      'تم التأكيد':  ['comm_confirmed'],
+      'تم الشحن':   ['comm_confirmed'],
+      'تم التوصيل': ['comm_confirmed', 'comm_delivered', 'bosta_cod'],
+      'تم الرفض':   ['comm_rejected'],
+      'لا يرد':     ['comm_no_answer'],
+      'مؤجل':       ['comm_no_answer'],
+    };
+    const validSources = new Set(VALID_BY_STATUS[updates.Status] || []); // جديد/ملغي/… → none
+    const toVoid = STATUS_DRIVEN_SOURCES.filter((s) => !validSources.has(s));
+
+    if (toVoid.length > 0) {
+      /* Excludes the source(s) the commission hook may be inserting concurrently,
+         so the just-earned commission is never deleted — safe regardless of order. */
+      pool.query(
+        `DELETE FROM treasury_transactions
+          WHERE order_id = $1 AND business_id = $2 AND source = ANY($3::text[])`,
+        [id, businessId, toVoid]
+      ).then((r) => {
+        if (r.rowCount > 0) {
+          console.log(`[Treasury] 🧹 Voided ${r.rowCount} stale txn(s) for order ${id} → "${updates.Status}" (removed sources: ${toVoid.join(', ')})`);
+        }
+      }).catch((e) => console.error('[Treasury] Void-on-revert failed:', e.message));
+    }
+  }
+
   /* ── Send 200 OK after all inventory + treasury work is dispatched ── */
   res.json(updatedOrder);
 });
