@@ -13,7 +13,7 @@ import {
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
 
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'تم الشحن'];
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
 
 const getShortName = (name?: string) => {
   if (!name) return '';

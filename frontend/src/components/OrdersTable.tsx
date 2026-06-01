@@ -4,11 +4,11 @@ import { useState } from 'react';
 import { Order } from '@/lib/api';
 
 // All possible statuses — used in the admin full-edit modal only
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'تم الشحن', 'تم التوصيل'];
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل'];
 
 // Statuses agents (and inline table controls) are allowed to set manually.
 // 'تم الشحن' / 'تم التوصيل' are set automatically by the shipping API — never by hand.
-const MANUAL_STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد'];
+const MANUAL_STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع'];
 
 const STATUS_STYLES: Record<string, string> = {
   'جديد':       'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
@@ -16,6 +16,8 @@ const STATUS_STYLES: Record<string, string> = {
   'تم الرفض':   'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
   'مؤجل':       'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
   'لا يرد':     'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400',
+  // Pending until the customer pays a deposit (low delivery-success customers)
+  'معلق حتي الدفع': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300',
   'تم الشحن':    'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300',
   // Set automatically by Bosta webhook — never selectable in the inline dropdown
   'تم التوصيل':  'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',

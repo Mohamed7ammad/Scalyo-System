@@ -700,6 +700,7 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
       'تم الرفض':   ['comm_rejected'],
       'لا يرد':     ['comm_no_answer'],
       'مؤجل':       ['comm_no_answer'],
+      'معلق حتي الدفع': [],   // pending-until-payment → NO commission; void all (deposit kept)
     };
     const validSources = new Set(VALID_BY_STATUS[updates.Status] || []); // جديد/ملغي/… → none
     const toVoid = STATUS_DRIVEN_SOURCES.filter((s) => !validSources.has(s));
