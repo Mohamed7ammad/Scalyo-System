@@ -27,6 +27,9 @@ const migrations = [
   /* ── Email verification (OTP) ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified  BOOLEAN       DEFAULT false`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_code        VARCHAR(6)`,
+  /* ── Persisted auto-distribution weight (%) — drives weighted round-robin
+        assignment of incoming EasyOrder webhook orders. 0 = excluded. ── */
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS distribution_percentage NUMERIC(5,2) NOT NULL DEFAULT 0`,
 ];
 
 migrations.forEach((sql) =>
@@ -67,6 +70,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
         COALESCE(comm_delivered, 0)                 AS comm_delivered,
         COALESCE(comm_rejected,  0)                 AS comm_rejected,
         COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
+        COALESCE(distribution_percentage, 0)        AS distribution_percentage,
         created_at
       FROM users
       WHERE business_id = $1
@@ -363,6 +367,63 @@ router.post('/:id/toggle-attendance', authenticate, requireAdmin, async (req, re
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[toggle-attendance] Transaction error:', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  } finally {
+    client.release();
+  }
+});
+
+/* ── POST /api/staff/distribution ─────────────────────────────────────────────
+   Persist per-agent auto-distribution weights (%). These drive the weighted
+   round-robin assignment of incoming EasyOrder webhook orders.
+
+   Body: { allocations: [{ agentId, percentage }, …] }
+   • Each percentage is clamped to 0–100. Agents omitted from the payload are
+     reset to 0 (excluded from auto-distribution) so the saved set is exactly
+     what the admin configured.
+   • Tenant-scoped: only the caller's own agents are updated. Admin only.        */
+router.post('/distribution', authenticate, requireAdmin, async (req, res) => {
+  const businessId  = req.user.business_id;
+  const allocations = Array.isArray(req.body.allocations) ? req.body.allocations : [];
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Reset everyone to 0 first, then set the supplied weights — so de-selected
+    // agents drop out cleanly.
+    await client.query(
+      `UPDATE users SET distribution_percentage = 0
+        WHERE role = 'agent' AND business_id = $1`,
+      [businessId]
+    );
+
+    for (const a of allocations) {
+      const id  = parseInt(a.agentId, 10);
+      const pct = Math.max(0, Math.min(100, Number(a.percentage) || 0));
+      if (!id || isNaN(id)) continue;
+      await client.query(
+        `UPDATE users SET distribution_percentage = $1
+          WHERE id::text = $2 AND role = 'agent' AND business_id = $3`,
+        [pct, String(id), businessId]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const { rows } = await pool.query(
+      `SELECT id, COALESCE(name,'') AS name, email,
+              COALESCE(distribution_percentage, 0) AS distribution_percentage
+         FROM users
+        WHERE role = 'agent' AND business_id = $1
+        ORDER BY created_at ASC`,
+      [businessId]
+    );
+    console.log(`[Distribution] saved weights for tenant ${businessId} (${allocations.length} agent(s))`);
+    res.json({ message: 'تم حفظ نسب التوزيع', agents: rows });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[POST /staff/distribution]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   } finally {
     client.release();

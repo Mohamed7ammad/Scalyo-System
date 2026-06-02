@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   getOrders, updateOrder, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
-  getStaff, distributeOrders, transferOrders, bulkDeleteOrders, getBulkAwb,
+  getStaff, distributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
@@ -106,6 +106,7 @@ export default function DashboardPage() {
   /* ── Staff / routing state ───────────────────────────────────── */
   const [staff,         setStaff]         = useState<StaffMember[]>([]);
   const [distributing,  setDistributing]  = useState(false);
+  const [savingDist,    setSavingDist]    = useState(false);
   /* Distribution modal */
   const [showDistModal, setShowDistModal] = useState(false);
   const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
@@ -325,6 +326,28 @@ export default function DashboardPage() {
       showToast(msg, 'error');
     } finally {
       setDistributing(false);
+    }
+  };
+
+  /* ── Save custom percentages for AUTO-distribution (EasyOrder webhook) ──
+     Persists the weights so new incoming orders are auto-assigned by them. */
+  const handleSaveDistribution = async () => {
+    setSavingDist(true);
+    try {
+      const allocations: DistributionAllocation[] = activeAgentsForDist.map((a) => ({
+        agentId:    a.id,
+        percentage: Number(distPercents[a.id] ?? 0) || 0,
+      }));
+      await saveDistributionConfig(allocations);
+      showToast('تم حفظ نسب التوزيع التلقائي ✓', 'success');
+      await fetchStaff();   // refresh saved percentages
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل حفظ النسب';
+      showToast(msg, 'error');
+    } finally {
+      setSavingDist(false);
     }
   };
 
@@ -583,17 +606,27 @@ export default function DashboardPage() {
     (s, a) => s + (Number(distPercents[a.id] ?? 0) || 0), 0
   );
 
-  /* Open the distribution modal — seed an equal split as a sensible default. */
+  /* Open the distribution modal. If saved auto-distribution percentages exist,
+     seed from them (so the admin sees/edits the persisted split); otherwise seed
+     an equal split as a sensible default. */
   const openDistModal = () => {
-    setDistMode('equal');
-    const n = activeAgentsForDist.length;
+    const hasSaved = activeAgentsForDist.some((a) => Number(a.distribution_percentage ?? 0) > 0);
     const seed: Record<number, string> = {};
-    if (n > 0) {
-      const base = Math.floor(100 / n);
-      let rem = 100 - base * n;
+    if (hasSaved) {
       activeAgentsForDist.forEach((a) => {
-        seed[a.id] = String(base + (rem-- > 0 ? 1 : 0));
+        seed[a.id] = String(Number(a.distribution_percentage ?? 0) || 0);
       });
+      setDistMode('custom');
+    } else {
+      setDistMode('equal');
+      const n = activeAgentsForDist.length;
+      if (n > 0) {
+        const base = Math.floor(100 / n);
+        let rem = 100 - base * n;
+        activeAgentsForDist.forEach((a) => {
+          seed[a.id] = String(base + (rem-- > 0 ? 1 : 0));
+        });
+      }
     }
     setDistPercents(seed);
     setShowDistModal(true);
@@ -1264,6 +1297,23 @@ export default function DashboardPage() {
                         : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800/50'}`}>
                       <span>إجمالي النسب</span>
                       <span>{distSum}% {distSum === 100 ? '✓' : `(يجب أن يساوي 100%)`}</span>
+                    </div>
+
+                    {/* Save for auto-distribution (EasyOrder webhook) */}
+                    <div className="mt-3 rounded-xl border border-indigo-100 dark:border-indigo-900/40
+                      bg-indigo-50/50 dark:bg-indigo-950/20 px-3 py-3">
+                      <p className="text-xs text-indigo-700/90 dark:text-indigo-300/80 leading-relaxed mb-2">
+                        احفظ هذه النسب ليتم توزيع الطلبات الواردة من إيزي أوردر تلقائياً عليها (Weighted Round-Robin).
+                      </p>
+                      <button
+                        onClick={handleSaveDistribution}
+                        disabled={savingDist || activeAgentsForDist.length === 0}
+                        className="w-full inline-flex items-center justify-center gap-2 py-2 px-4 rounded-lg
+                          text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white
+                          disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-[0.98]"
+                      >
+                        {savingDist ? 'جارٍ الحفظ…' : '💾 حفظ نسب التوزيع التلقائي'}
+                      </button>
                     </div>
                   </div>
                 )}

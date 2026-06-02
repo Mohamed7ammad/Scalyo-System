@@ -313,6 +313,7 @@ export interface StaffMember {
   comm_delivered:  number;       // bonus per delivered order
   comm_rejected:   number;       // payout per rejected order
   comm_no_answer:  number;       // payout per no-answer / postponed order
+  distribution_percentage?: number;  // saved auto-distribution weight (%)
   created_at:      string;
 }
 
@@ -360,6 +361,14 @@ export const updateStaff = (id: number, data: UpdateStaffPayload) =>
 
 export const toggleAttendance = (id: number, isAbsent: boolean) =>
   api.post<ToggleAttendanceResult>(`/api/staff/${id}/toggle-attendance`, { isAbsent });
+
+/** Persist per-agent auto-distribution weights (%). Drives weighted round-robin
+    assignment of incoming EasyOrder webhook orders. Admin only. */
+export const saveDistributionConfig = (allocations: DistributionAllocation[]) =>
+  api.post<{ message: string; agents: StaffMember[] }>(
+    '/api/staff/distribution',
+    { allocations },
+  );
 
 /** Delete a staff member. Admin only. Server protects self + founding admin. */
 export const deleteStaff = (id: number) =>

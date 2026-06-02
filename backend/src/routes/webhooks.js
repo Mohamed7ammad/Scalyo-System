@@ -135,37 +135,98 @@ function extractOrderFields(body) {
   };
 }
 
-/* ── Auto-assignment ──────────────────────────────────────────────────────────
-   Assigns a freshly-created order to the least-loaded present agent (the agent
-   with the FEWEST pending 'جديد' orders) — round-robin by workload. Mirrors the
-   manual-order-creation logic so EasyOrder webhook orders never sit unassigned
-   (غير محدد). Returns the updated order row, or null when no agent is available
-   / on error (the order then stays unassigned but creation still succeeds).     */
-async function autoAssignLeastLoaded(orderId, businessId) {
-  try {
-    const { rows } = await pool.query(
-      `SELECT u.email,
-              COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
-         FROM users u
-         LEFT JOIN orders o
-           ON o."AssignedTo" = u.email AND o.business_id = u.business_id
-        WHERE u.role = 'agent'
-          AND COALESCE(u.is_active,  true)  = true
-          AND COALESCE(u.is_absent, false)  = false
-          AND u.business_id = $1
-        GROUP BY u.email
-        ORDER BY load ASC, u.email ASC
-        LIMIT 1`,
-      [businessId]
-    );
-    if (!rows.length) return null;
+/* ── Assignment helpers ───────────────────────────────────────────────────────
+   Persist one order to an agent (tenant-scoped). Returns the updated row.       */
+async function assignOrderTo(orderId, businessId, email) {
+  const upd = await pool.query(
+    `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+      WHERE id = $2 AND business_id = $3 RETURNING *`,
+    [email, orderId, businessId]
+  );
+  return upd.rows[0] || null;
+}
 
-    const upd = await pool.query(
-      `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
-        WHERE id = $2 AND business_id = $3 RETURNING *`,
-      [rows[0].email, orderId, businessId]
-    );
-    return upd.rows[0] || null;
+/* WEIGHTED round-robin: assign to the present agent whose CURRENT share of
+   assigned orders is furthest below their configured target percentage
+   (deficit = targetShare − actualShare). This honours the admin's custom split
+   over time. Agents with distribution_percentage = 0 are excluded.
+   Returns the updated order row, or null when no weighted agent is eligible
+   (caller then falls back to least-loaded).                                     */
+async function autoAssignWeighted(orderId, businessId) {
+  const { rows } = await pool.query(
+    `SELECT u.email,
+            COALESCE(u.distribution_percentage, 0)::float AS weight,
+            COUNT(o.id)::int                              AS assigned_count
+       FROM users u
+       LEFT JOIN orders o
+         ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+      WHERE u.role = 'agent'
+        AND COALESCE(u.is_active,  true)  = true
+        AND COALESCE(u.is_absent, false)  = false
+        AND u.business_id = $1
+        AND COALESCE(u.distribution_percentage, 0) > 0
+      GROUP BY u.email, u.distribution_percentage`,
+    [businessId]
+  );
+  if (!rows.length) return null;   // no weighted config → let caller fall back
+
+  const totalWeight = rows.reduce((s, r) => s + r.weight, 0);
+  const totalCount  = rows.reduce((s, r) => s + r.assigned_count, 0);
+  if (totalWeight <= 0) return null;
+
+  /* Pick the max deficit = (weight/ΣW) − (count/ΣC). When nothing is assigned
+     yet (ΣC = 0) every actualShare is 0, so the highest-weight agent wins.      */
+  let best = null;
+  for (const r of rows) {
+    const targetShare = r.weight / totalWeight;
+    const actualShare = totalCount > 0 ? r.assigned_count / totalCount : 0;
+    const deficit     = targetShare - actualShare;
+    if (
+      !best ||
+      deficit > best.deficit ||
+      (deficit === best.deficit && r.weight > best.weight) ||
+      (deficit === best.deficit && r.weight === best.weight && r.email < best.email)
+    ) {
+      best = { email: r.email, weight: r.weight, deficit };
+    }
+  }
+
+  const updated = await assignOrderTo(orderId, businessId, best.email);
+  if (updated) {
+    console.log(`[EasyOrder webhook] weighted pick → ${best.email} (deficit ${best.deficit.toFixed(3)})`);
+  }
+  return updated;
+}
+
+/* LEAST-LOADED fallback: the present agent with the FEWEST pending 'جديد'
+   orders. Used when no agent has a distribution percentage configured, so
+   orders never sit unassigned (غير محدد).                                       */
+async function autoAssignLeastLoaded(orderId, businessId) {
+  const { rows } = await pool.query(
+    `SELECT u.email,
+            COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
+       FROM users u
+       LEFT JOIN orders o
+         ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+      WHERE u.role = 'agent'
+        AND COALESCE(u.is_active,  true)  = true
+        AND COALESCE(u.is_absent, false)  = false
+        AND u.business_id = $1
+      GROUP BY u.email
+      ORDER BY load ASC, u.email ASC
+      LIMIT 1`,
+    [businessId]
+  );
+  if (!rows.length) return null;
+  return assignOrderTo(orderId, businessId, rows[0].email);
+}
+
+/* Orchestrator: weighted first (honours custom %), else least-loaded. Never
+   throws — assignment problems must not fail order creation.                    */
+async function autoAssignOrder(orderId, businessId) {
+  try {
+    return (await autoAssignWeighted(orderId, businessId))
+        || (await autoAssignLeastLoaded(orderId, businessId));
   } catch (err) {
     console.warn('[EasyOrder webhook] auto-assign skipped:', err.message);
     return null;
@@ -216,10 +277,10 @@ async function ingestEasyOrder(body, businessId) {
   let newOrder = result.rows[0];
   console.log(`✅  EasyOrder webhook: order #${newOrder.id} (tenant ${businessId}, qty ${newOrder.quantity}) created`);
 
-  /* Auto-assign to the least-loaded present agent so the order never sits
-     unassigned (غير محدد). Done before responding so the returned order carries
-     AssignedTo. */
-  const assigned = await autoAssignLeastLoaded(newOrder.id, businessId);
+  /* Auto-assign: weighted round-robin by the admin's saved percentages, falling
+     back to least-loaded. Done before responding so the returned order carries
+     AssignedTo and never sits unassigned (غير محدد). */
+  const assigned = await autoAssignOrder(newOrder.id, businessId);
   if (assigned) {
     newOrder = assigned;
     console.log(`🤝  EasyOrder webhook: order #${newOrder.id} auto-assigned to ${newOrder.AssignedTo}`);
