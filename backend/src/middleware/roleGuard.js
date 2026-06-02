@@ -2,8 +2,10 @@
 const AGENT_ALLOWED_FIELDS = new Set([
   'Status',
   'Note',
+  'ShippingNotes',    // inline shipping-notes column (printed on the Bosta AWB)
   'DeliveryRate',
   'ProductName',
+  'quantity',         // agents can correct the order quantity from the edit modal
   'PostponedDate',
   'rejectionReason',  // sent alongside Status='تم الرفض' from the rejection picker modal
   // Quick-edit customer / shipping details — agents fix customer typos

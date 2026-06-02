@@ -21,6 +21,7 @@ export interface Order {
   Address: string;
   Status: string;
   Note: string | null;
+  ShippingNotes?: string | null;   // courier note — printed on the Bosta AWB
   createdAt: string;
   ProductName?: string;
   ProductPrice?: string;

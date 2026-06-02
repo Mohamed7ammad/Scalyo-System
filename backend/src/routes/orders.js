@@ -35,6 +35,13 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "PostponedDate" DATE`)
   .then(() => console.log('✅  Orders: "PostponedDate" column ready'))
   .catch((err) => console.warn('⚠️   Orders PostponedDate column check:', err.message));
 
+/* ── Shipping notes ─────────────────────────────────────────────────────────
+   Free-text note for the courier; mapped to Bosta's `notes` so it prints on the
+   airway bill. Inline-editable in the orders table by admins and agents.      */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "ShippingNotes" TEXT`)
+  .then(() => console.log('✅  Orders: "ShippingNotes" column ready'))
+  .catch((err) => console.warn('⚠️   Orders ShippingNotes column check:', err.message));
+
 /* ── No-answer call-attempt log ─────────────────────────────────────────────
    JSONB array of ISO timestamps — one per logged call attempt. The
    comm_no_answer commission is only earned once this reaches 5 attempts while
@@ -538,7 +545,7 @@ const PATCH_WHITELIST = new Set([
   // ── Order details ─────────────────────────────────────────────────
   'ProductName', 'ProductPrice', 'quantity', 'DeliveryRate', 'sku',
   // ── Workflow ──────────────────────────────────────────────────────
-  'Status', 'Note', 'PostponedDate', 'rejectionReason', 'AssignedTo',
+  'Status', 'Note', 'ShippingNotes', 'PostponedDate', 'rejectionReason', 'AssignedTo',
   // ── Shipping ──────────────────────────────────────────────────────
   'BostaTrackingCode',
   // ── Finance ───────────────────────────────────────────────────────

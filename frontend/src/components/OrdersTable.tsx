@@ -110,8 +110,8 @@ export default function OrdersTable({
   const [quickEdit, setQuickEdit] = useState<Order | null>(null);
   const [quickForm, setQuickForm] = useState<{
     FullName: string; Phone: string; City: string; Address: string;
-    hasDeposit: boolean; depositAmount: string;
-  }>({ FullName: '', Phone: '', City: '', Address: '', hasDeposit: false, depositAmount: '' });
+    quantity: string; hasDeposit: boolean; depositAmount: string;
+  }>({ FullName: '', Phone: '', City: '', Address: '', quantity: '1', hasDeposit: false, depositAmount: '' });
   const [quickSaving, setQuickSaving] = useState(false);
   /* No-answer call-attempt log (shown in quick-edit when status is 'لا يرد') */
   const [noAnswerLogs,  setNoAnswerLogs]  = useState<string[]>([]);
@@ -128,6 +128,7 @@ export default function OrdersTable({
       Phone:    order.Phone    ?? '',
       City:     order.City     ?? '',
       Address:  order.Address  ?? '',
+      quantity: String(order.quantity ?? 1),
       hasDeposit:    order.hasDeposit ?? false,
       depositAmount: order.depositAmount != null && order.depositAmount !== 0
         ? String(order.depositAmount) : '',
@@ -194,6 +195,7 @@ export default function OrdersTable({
         Phone:    quickForm.Phone.trim(),
         City:     quickForm.City.trim(),
         Address:  quickForm.Address.trim(),
+        quantity: Math.max(1, parseInt(quickForm.quantity, 10) || 1),
         hasDeposit:    depositOn,
         depositAmount: depositAmt,
       });
@@ -241,6 +243,22 @@ export default function OrdersTable({
     if (Note === (order.Note ?? '')) return;
     setSavingId(order.id);
     await onUpdate(order.id, { Note });
+    setSavingId(null);
+  };
+
+  /* ─── Address inline edit (save on blur) — all roles ──────── */
+  const handleAddressBlur = async (order: Order, Address: string) => {
+    if (Address === (order.Address ?? '')) return;
+    setSavingId(order.id);
+    await onUpdate(order.id, { Address });
+    setSavingId(null);
+  };
+
+  /* ─── Shipping-notes inline edit (save on blur) — all roles ── */
+  const handleShippingNotesBlur = async (order: Order, ShippingNotes: string) => {
+    if (ShippingNotes === (order.ShippingNotes ?? '')) return;
+    setSavingId(order.id);
+    await onUpdate(order.id, { ShippingNotes });
     setSavingId(null);
   };
 
@@ -343,7 +361,7 @@ export default function OrdersTable({
                 <Th>العنوان</Th>
                 <Th>الحالة</Th>
                 <Th>الدفع</Th>
-                <Th>تاريخ التأجيل</Th>
+                <Th>ملاحظات شركة الشحن</Th>
                 <Th>الملاحظة</Th>
                 <Th>إجراءات</Th>
               </tr>
@@ -478,8 +496,24 @@ export default function OrdersTable({
                       {order.City}
                     </td>
 
-                    <td className="px-4 py-3 text-gray-600 dark:text-slate-400 max-w-[180px] truncate" title={order.Address}>
-                      {order.Address}
+                    {/* Address — inline editable (all roles) */}
+                    <td className="px-4 py-3">
+                      <input
+                        key={`${order.id}-addr-${order.Address}`}
+                        type="text"
+                        defaultValue={order.Address ?? ''}
+                        onBlur={(e) => handleAddressBlur(order, e.target.value)}
+                        title={order.Address}
+                        placeholder="أضف العنوان..."
+                        className="w-full min-w-[160px] max-w-[220px] px-2 py-1 text-sm rounded-lg
+                          border border-transparent outline-none bg-transparent
+                          hover:border-gray-300 dark:hover:border-slate-700
+                          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+                          focus:bg-white dark:focus:bg-slate-800
+                          text-gray-600 dark:text-slate-400
+                          placeholder-gray-300 dark:placeholder-slate-600
+                          transition"
+                      />
                     </td>
 
                     {/* Status cell — all roles
@@ -615,22 +649,24 @@ export default function OrdersTable({
                       </div>
                     </td>
 
-                    {/* Postponed date — only shown for مؤجل */}
+                    {/* Shipping notes — inline editable (all roles); printed on the Bosta AWB */}
                     <td className="px-4 py-3">
-                      {order.Status === 'مؤجل' ? (
-                        <input
-                          type="date"
-                          dir="ltr"
-                          value={toDateInput(order.PostponedDate)}
-                          onChange={(e) => onUpdate(order.id, { PostponedDate: e.target.value })}
-                          className="px-2 py-1 text-xs rounded-lg outline-none
-                            focus:ring-2 focus:ring-amber-400 cursor-pointer
-                            border border-amber-300 bg-amber-50 text-amber-800
-                            dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-300"
-                        />
-                      ) : (
-                        <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
-                      )}
+                      <input
+                        key={`${order.id}-ship-${order.ShippingNotes}`}
+                        type="text"
+                        defaultValue={order.ShippingNotes ?? ''}
+                        onBlur={(e) => handleShippingNotesBlur(order, e.target.value)}
+                        placeholder="ملاحظة للشحن..."
+                        title="تُطبع على بوليصة الشحن"
+                        className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
+                          border border-transparent outline-none bg-transparent
+                          hover:border-gray-300 dark:hover:border-slate-700
+                          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+                          focus:bg-white dark:focus:bg-slate-800
+                          text-gray-700 dark:text-slate-300
+                          placeholder-gray-300 dark:placeholder-slate-600
+                          transition"
+                      />
                     </td>
 
                     {/* Note inline edit — all roles */}
@@ -760,6 +796,20 @@ export default function OrdersTable({
                 rows={3}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm
                   bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none resize-none
+                  focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">الكمية</label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={quickForm.quantity}
+                onChange={(e) => setQuickForm((p) => ({ ...p, quantity: e.target.value }))}
+                dir="ltr"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm text-left
+                  bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none
                   focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
               />
             </div>

@@ -217,8 +217,14 @@ function toBosta(order, allowOpen = false) {
     firstLine: order.Address  || '',
   };
 
+  // Shipping notes printed on the AWB for the courier (Bosta `notes`).
+  const shippingNotes = (order.ShippingNotes || '').toString().trim();
+
   return {
     type: 10, // Bosta standard integer ID for regular forward delivery
+
+    // Printed on the airway bill so the courier sees special handling notes.
+    notes: shippingNotes,
 
     // ── Package-opening flag — all known Bosta V2 field variants ──
     allowToOpenPackage:     isAllowed, // ✅ PRIMARY V2 field (drives waybill print)
@@ -233,10 +239,11 @@ function toBosta(order, allowOpen = false) {
       isAllowedToOpenPackage: isAllowed, // specs-level alternate B
       packageDetails: {
         description:          order.ProductName || 'منتج',
-        itemsCount:           order.Quantity    || 1,
+        itemsCount:           order.quantity    || 1,
         allowToOpenPackage:   isAllowed, // nested primary
         allowExploration:     isAllowed, // nested alternate
       },
+      notes: shippingNotes,   // specs-level mirror (Bosta version variance)
     },
 
     // Both casing variants — Bosta V2 inconsistently uses both across endpoints
