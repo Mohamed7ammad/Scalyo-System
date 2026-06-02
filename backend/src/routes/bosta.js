@@ -909,11 +909,11 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
         return extractList(r.data);
       };
 
-      /* COMPLETED "Returned to business / تم الاسترجاع" master states — these
-         live in Bosta's archived/unsuccessful bucket (NOT the active returning
-         leg), keyed by code 45/46/47. We search these IN ADDITION to the active
-         returning-leg codes so fully-returned parcels are always found.        */
-      const COMPLETED_RETURN_STATE_CODES = ['45', '46', '47'];
+      /* EXACT stateCodes Bosta's dashboard POSTs for the "غير ناجح / Returned"
+         tab (reverse-engineered from the browser Network tab). This is the
+         AUTHORITATIVE source for fully-returned (تم الاسترجاع) parcels — every
+         delivery it returns IS a received-back return.                          */
+      const RETURNED_TAB_CODES = ['46:R', '104', '100&16', '101', '50', '48', '60'];
 
       const PAGE = 50;
       const seen     = new Set();
@@ -921,12 +921,15 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
 
       /* Paginate one stateCodes bucket WITHOUT early-exit on dates.
          We do NOT assume the API is strictly -updatedAt sorted, so we scan every
-         page up to the cap and filter each row in memory by its updatedAt day.  */
-      const collectBucket = async (stateCodes, label, maxPages = 40) => {
+         page up to the cap and filter each row in memory by its updatedAt day.
+
+         `trusted` = the stateCodes payload itself defines a returns tab, so every
+         row is a return → skip the status-string re-validation (those weird codes
+         may not surface a recognisable status string). For the untrusted catch-all
+         sweep we still gate on canonicalizeStatus ∈ FINAL_RETURN_STATUSES.        */
+      const collectBucket = async (stateCodes, label, { maxPages = 40, trusted = false } = {}) => {
         for (let page = 1; page <= maxPages; page++) {
           let list;
-          /* Omit stateCodes entirely for the catch-all sweep so Bosta returns
-             every delivery (sorted by most-recently-updated). */
           const body = stateCodes
             ? { limit: PAGE, page, sortBy: '-updatedAt', stateCodes }
             : { limit: PAGE, page, sortBy: '-updatedAt' };
@@ -939,38 +942,45 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
           }
           if (!Array.isArray(list) || list.length === 0) break;
 
+          let kept = 0;
           for (const d of list) {
             summary.scanned++;
             const tn = pickName(d.trackingNumber ?? d.tracking_number ?? d._id);
             if (!tn || seen.has(tn)) continue;
 
-            const stateStr = pickName(
-              d.state?.nameAr ?? d.state?.value ?? d.masterStatus?.nameAr ??
-              d.masterStatus?.value ?? d.masterStatus ?? d.status
-            );
-            if (!FINAL_RETURN_STATUSES.has(canonicalizeStatus(stateStr))) continue; // received-back only
+            if (!trusted) {
+              const stateStr = pickName(
+                d.state?.nameAr ?? d.state?.value ?? d.masterStatus?.nameAr ??
+                d.masterStatus?.value ?? d.masterStatus ?? d.status
+              );
+              if (!FINAL_RETURN_STATUSES.has(canonicalizeStatus(stateStr))) continue; // received-back only
+            }
 
             // Filter by the day the parcel was last updated (when it was returned).
-            // NEVER filter on createdAt — these orders are weeks old.
+            // NEVER filter on createdAt — these orders can be weeks old.
             if (dateFilter) {
               const dDate = egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.returnedAt);
               if (dDate !== dateFilter) continue;   // no early-exit — keep scanning
             }
             seen.add(tn);
             received.push(tn);
+            kept++;
           }
+          console.log(`[bosta/sync-returns] ${label} page ${page}: ${list.length} rows, +${kept} kept (total ${received.length})`);
           if (list.length < PAGE) break;   // genuine last page
         }
       };
 
-      // Active returning leg + completed/archived returns + a catch-all sweep
-      // (no state filter) so a return in ANY bucket updated on the target day is
-      // found regardless of Bosta's exact state code. Union, deduped.
-      await collectBucket(RETURNING_STATE_CODES, 'returning', 40);
-      await collectBucket(COMPLETED_RETURN_STATE_CODES, 'completed-returns', 40);
-      // Catch-all: most-recently-updated deliveries (any bucket). Today's returns
-      // sort to the top, so 12 pages (600 rows) reliably covers the target day.
-      await collectBucket(null, 'all-recent', 12);
+      // 1) AUTHORITATIVE returned-tab codes (the user's exact dashboard payload).
+      //    Every row IS a received-back return → trusted.
+      await collectBucket(RETURNED_TAB_CODES, 'returned-tab', { maxPages: 40, trusted: true });
+      // 2) Active returning-leg codes — status-gated so only rows that already
+      //    canonicalise to a RECEIVED return pass (in-transit ones are skipped,
+      //    avoiding premature restock).
+      await collectBucket(RETURNING_STATE_CODES, 'returning', { maxPages: 40, trusted: false });
+      // 3) Catch-all: most-recently-updated deliveries (any bucket), status-gated.
+      //    Today's returns sort to the top, so 12 pages (600 rows) covers the day.
+      await collectBucket(null, 'all-recent', { maxPages: 12, trusted: false });
 
       trackingNumbers = received;
     }
