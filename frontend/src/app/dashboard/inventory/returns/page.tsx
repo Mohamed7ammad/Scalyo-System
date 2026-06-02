@@ -28,7 +28,9 @@ export default function ReturnsPage() {
 
   /* ── Bosta returns-sync modal state ──────────────────────────────────── */
   const [syncOpen,    setSyncOpen]    = useState(false);
+  const [syncMode,    setSyncMode]    = useState<'date' | 'tracking'>('date');
   const [syncDate,    setSyncDate]    = useState<string>(todayISO());
+  const [syncTracking, setSyncTracking] = useState('');
   const [syncing,     setSyncing]     = useState(false);
   const [toast,       setToast]       = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
@@ -119,26 +121,52 @@ export default function ReturnsPage() {
     setTimeout(() => setToast(null), 6000);
   };
 
-  const openSync = () => { setSyncDate(date || todayISO()); setSyncOpen(true); };
+  const openSync = () => {
+    setSyncMode('date');
+    setSyncDate(date || todayISO());
+    setSyncTracking('');
+    setSyncOpen(true);
+  };
 
   const handleSync = async () => {
+    // Parse tracking numbers split by comma / whitespace / newline.
+    const trackingList = syncTracking
+      .split(/[\s,]+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    if (syncMode === 'tracking' && trackingList.length === 0) {
+      showToast('الرجاء لصق رقم تتبع واحد على الأقل', 'error');
+      return;
+    }
+
     setSyncing(true);
     try {
-      const { data } = await syncBostaReturns({ date: syncDate });
+      const payload = syncMode === 'tracking'
+        ? { trackingNumbers: trackingList }
+        : { date: syncDate };
+      const { data } = await syncBostaReturns(payload);
       setSyncOpen(false);
+
+      const scope = syncMode === 'tracking'
+        ? `${trackingList.length} رقم تتبع`
+        : `تاريخ ${fmtDateAr(syncDate)}`;
+
       if (data.matchedLocal === 0) {
-        showToast(`لا توجد مرتجعات من Bosta بتاريخ ${fmtDateAr(syncDate)} لمطابقتها.`, 'success');
+        showToast(`لم تتم مطابقة أي مرتجع (${scope}).` +
+          (data.notFound.length ? ` (${data.notFound.length} غير موجود محلياً)` : ''), 'error');
       } else {
         showToast(
-          `تمت المزامنة ✓ — ${data.processed} طلب من ${fmtDateAr(syncDate)}: ` +
+          `تمت المزامنة ✓ — ${data.processed} طلب (${scope}): ` +
           `${data.restocked} منها أُعيد للمخزون.` +
           (data.notFound.length ? ` (${data.notFound.length} لم يُطابَق محلياً)` : ''),
           'success',
         );
       }
-      // Refresh the list to reflect newly-logged returns.
-      setDate(syncDate);
-      fetchReturns(syncDate);
+
+      // Refresh the list. For date mode, jump to that day.
+      if (syncMode === 'date') { setDate(syncDate); fetchReturns(syncDate); }
+      else { fetchReturns(date); }
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error
@@ -285,27 +313,68 @@ export default function ReturnsPage() {
               <div>
                 <h2 className="font-bold text-gray-800 dark:text-slate-100 leading-tight">مزامنة المرتجعات من Bosta</h2>
                 <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-                  يجلب الطلبات المُسترجعة في اليوم المحدد ويعيدها للمخزون
+                  يجلب الطلبات المُسترجعة ويعيدها للمخزون
                 </p>
               </div>
             </div>
 
-            <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1.5">تاريخ الاسترجاع</label>
-            <input
-              type="date"
-              value={syncDate}
-              max={todayISO()}
-              onChange={(e) => setSyncDate(e.target.value)}
-              dir="ltr"
-              className="w-full px-3 py-2.5 rounded-xl text-sm outline-none mb-5
-                border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800
-                text-gray-900 dark:text-slate-100 focus:ring-2 focus:ring-purple-400"
-            />
+            {/* Mode tabs */}
+            <div className="flex gap-1 p-1 mb-4 rounded-xl bg-slate-100 dark:bg-slate-800">
+              {([
+                { v: 'date',     label: 'حسب التاريخ' },
+                { v: 'tracking', label: 'بأرقام التتبع' },
+              ] as const).map((t) => (
+                <button
+                  key={t.v}
+                  onClick={() => setSyncMode(t.v)}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition
+                    ${syncMode === t.v
+                      ? 'bg-white dark:bg-slate-900 text-purple-700 dark:text-purple-300 shadow-sm'
+                      : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'}`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {syncMode === 'date' ? (
+              <>
+                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1.5">تاريخ الاسترجاع</label>
+                <input
+                  type="date"
+                  value={syncDate}
+                  max={todayISO()}
+                  onChange={(e) => setSyncDate(e.target.value)}
+                  dir="ltr"
+                  className="w-full px-3 py-2.5 rounded-xl text-sm outline-none mb-5
+                    border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800
+                    text-gray-900 dark:text-slate-100 focus:ring-2 focus:ring-purple-400"
+                />
+              </>
+            ) : (
+              <>
+                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1.5">أرقام التتبع</label>
+                <textarea
+                  value={syncTracking}
+                  onChange={(e) => setSyncTracking(e.target.value)}
+                  rows={5}
+                  dir="ltr"
+                  placeholder={'الصق أرقام التتبع هنا\nمفصولة بمسافة أو فاصلة أو سطر جديد'}
+                  className="w-full px-3 py-2.5 rounded-xl text-sm outline-none mb-2 resize-none font-mono
+                    border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800
+                    text-gray-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                    focus:ring-2 focus:ring-purple-400"
+                />
+                <p className="text-xs text-gray-400 dark:text-slate-500 mb-5">
+                  {syncTracking.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean).length} رقم تتبع
+                </p>
+              </>
+            )}
 
             <div className="flex gap-3">
               <button
                 onClick={handleSync}
-                disabled={syncing || !syncDate}
+                disabled={syncing || (syncMode === 'date' ? !syncDate : !syncTracking.trim())}
                 className="flex-1 inline-flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700
                   text-white py-2.5 rounded-xl text-sm font-semibold transition
                   disabled:opacity-50 disabled:cursor-not-allowed"

@@ -918,6 +918,7 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
       const PAGE = 50;
       const seen     = new Set();
       const received = [];
+      const dbg      = { n: 0 };   // temporary: dump raw date fields for diagnosis
 
       /* Paginate one stateCodes bucket WITHOUT early-exit on dates.
          We do NOT assume the API is strictly -updatedAt sorted, so we scan every
@@ -956,10 +957,26 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
               if (!FINAL_RETURN_STATUSES.has(canonicalizeStatus(stateStr))) continue; // received-back only
             }
 
+            /* ── TEMP DEBUG: inspect the raw date fields Bosta returns for the
+               authoritative returned-tab, so we can confirm the exact field name
+               + timezone format vs our in-memory filter. Remove once resolved. */
+            if (label === 'returned-tab' && dbg.n < 8) {
+              dbg.n++;
+              console.log(
+                `[DEBUG sync-returns] #${dbg.n} tn=${tn}` +
+                ` | updatedAt=${JSON.stringify(d.updatedAt)}` +
+                ` | lastUpdateDate=${JSON.stringify(d.lastUpdateDate)}` +
+                ` | updateDate=${JSON.stringify(d.updateDate)}` +
+                ` | state.updatedAt=${JSON.stringify(d.state?.updatedAt)}` +
+                ` | egyptDate=${egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.returnedAt)}` +
+                ` | target=${dateFilter}`
+              );
+            }
+
             // Filter by the day the parcel was last updated (when it was returned).
             // NEVER filter on createdAt — these orders can be weeks old.
             if (dateFilter) {
-              const dDate = egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.returnedAt);
+              const dDate = egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.updateDate ?? d.state?.updatedAt ?? d.returnedAt);
               if (dDate !== dateFilter) continue;   // no early-exit — keep scanning
             }
             seen.add(tn);
