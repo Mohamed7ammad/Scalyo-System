@@ -15,6 +15,11 @@ import OrdersTable from '@/components/OrdersTable';
 
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
 
+/* Every status that means the order successfully PASSED confirmation — used for
+   a cumulative confirmation rate so the % doesn't collapse as orders move on to
+   shipped/delivered. Mirrors the backend analytics `status_confirmed` set. */
+const PASSED_CONFIRMATION = ['تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
+
 /* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
 const EGYPT_GOVERNORATES = [
   'القاهرة', 'الجيزة', 'الإسكندرية', 'القليوبية', 'الشرقية', 'الدقهلية', 'البحيرة',
@@ -737,6 +742,11 @@ export default function DashboardPage() {
     postponed: dateScoped.filter((o) => normStatus(o.Status) === 'مؤجل').length,
     noAnswer:  dateScoped.filter((o) => normStatus(o.Status) === 'لا يرد').length,
     shipped:   dateScoped.filter((o) => normStatus(o.Status) === 'تم الشحن').length,
+    /* Cumulative: every order that ever passed confirmation (confirmed + shipped
+       + delivered + returning/returned). This is the numerator for the
+       confirmation rate so it reflects daily performance, not the shrinking
+       count of orders still sitting in 'تم التأكيد'. */
+    confirmedCumulative: dateScoped.filter((o) => PASSED_CONFIRMATION.includes(normStatus(o.Status))).length,
   };
   const pct = (n: number) =>
     stats.total ? Math.round((n / stats.total) * 100) : 0;
@@ -2031,14 +2041,14 @@ export default function DashboardPage() {
             valueColor="text-blue-600 dark:text-blue-400"
             active={activeFilter === 'جديد'}
             onClick={() => setActiveFilter('جديد')} />
-          <StatCard label="تم التأكيد" value={stats.confirmed}
+          <StatCard label="تم التأكيد" value={stats.confirmedCumulative}
             valueColor="text-emerald-600 dark:text-emerald-400"
-            pct={pct(stats.confirmed)} pctLabel="نسبة التأكيد"
+            pct={pct(stats.confirmedCumulative)} pctLabel="نسبة التأكيد" pctPrimary
             active={activeFilter === 'تم التأكيد'}
             onClick={() => setActiveFilter('تم التأكيد')} />
           <StatCard label="تم الرفض"   value={stats.rejected}
             valueColor="text-red-500 dark:text-red-400"
-            pct={pct(stats.rejected)} pctLabel="نسبة الرفض"
+            pct={pct(stats.rejected)} pctLabel="نسبة الرفض" pctPrimary
             active={activeFilter === 'تم الرفض'}
             onClick={() => setActiveFilter('تم الرفض')} />
           <StatCard label="مؤجل"       value={stats.postponed}
@@ -2047,7 +2057,7 @@ export default function DashboardPage() {
             onClick={() => setActiveFilter('مؤجل')} />
           <StatCard label="لا يرد"     value={stats.noAnswer}
             valueColor="text-slate-500 dark:text-slate-400"
-            pct={pct(stats.noAnswer)} pctLabel="نسبة عدم الرد"
+            pct={pct(stats.noAnswer)} pctLabel="نسبة عدم الرد" pctPrimary
             active={activeFilter === 'لا يرد'}
             onClick={() => setActiveFilter('لا يرد')} />
           <StatCard label="تم الشحن"  value={stats.shipped}
@@ -2422,16 +2432,22 @@ export default function DashboardPage() {
 
 /* ── StatCard ─────────────────────────────────────────────────── */
 function StatCard({
-  label, value, valueColor, pct, pctLabel, onClick, active,
+  label, value, valueColor, pct, pctLabel, pctPrimary, onClick, active,
 }: {
   label:       string;
   value:       number;
   valueColor?: string;        // semantic text color for the number only
   pct?:        number;
   pctLabel?:   string;
+  pctPrimary?: boolean;       // when true: % is the big number, count is secondary
   onClick?:    () => void;
   active?:     boolean;
 }) {
+  /* When a percentage is the headline metric (e.g. Confirmation Rate), show it
+     big and demote the absolute count to secondary text — so a card whose count
+     naturally drains to 0 during the day still reflects real performance. */
+  const primaryIsPct = pctPrimary && pct !== undefined;
+
   return (
     <div
       onClick={onClick}
@@ -2447,20 +2463,36 @@ function StatCard({
           : 'border-slate-200 dark:border-slate-800'}
       `}
     >
-      {/* Main number */}
-      <div className={`text-3xl font-bold tracking-tight leading-none
-        ${valueColor ?? 'text-slate-800 dark:text-white'}`}>
-        {value}
-      </div>
-
-      {/* Percentage row */}
-      {pct !== undefined && (
-        <div className="flex items-baseline gap-1.5 mt-1.5">
-          <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">{pct}%</span>
-          {pctLabel && (
-            <span className="text-xs text-slate-400 dark:text-slate-500 leading-tight">{pctLabel}</span>
+      {primaryIsPct ? (
+        <>
+          {/* Primary: the percentage */}
+          <div className={`text-3xl font-bold tracking-tight leading-none
+            ${valueColor ?? 'text-slate-800 dark:text-white'}`}>
+            {pct}%
+          </div>
+          {/* Secondary: the absolute count */}
+          <div className="flex items-baseline gap-1.5 mt-1.5">
+            <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">{value}</span>
+            <span className="text-xs text-slate-400 dark:text-slate-500 leading-tight">طلب</span>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Primary: the absolute count */}
+          <div className={`text-3xl font-bold tracking-tight leading-none
+            ${valueColor ?? 'text-slate-800 dark:text-white'}`}>
+            {value}
+          </div>
+          {/* Secondary: the percentage (if any) */}
+          {pct !== undefined && (
+            <div className="flex items-baseline gap-1.5 mt-1.5">
+              <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">{pct}%</span>
+              {pctLabel && (
+                <span className="text-xs text-slate-400 dark:text-slate-500 leading-tight">{pctLabel}</span>
+              )}
+            </div>
           )}
-        </div>
+        </>
       )}
 
       {/* Label */}
