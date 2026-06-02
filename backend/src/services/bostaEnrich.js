@@ -5,6 +5,7 @@
  */
 const axios = require('axios');
 const pool  = require('../config/db');
+const { enqueueBosta } = require('./bostaQueue');
 
 /** '010XXXXXXXX' → '+2010XXXXXXXX', '+2…' → unchanged */
 function formatPhone(raw) {
@@ -38,75 +39,34 @@ function mapRanking(ranking) {
   return 'ضعيف';
 }
 
-/* ── Throttled enrichment queue ──────────────────────────────────────────────
-   Bosta rate-limits the consignee-ranking endpoint (HTTP 429). When a bulk sync
-   (Google-Sheet cron / many webhooks) fires, calling enrichDeliveryRate per order
-   would burst dozens of concurrent requests → 429s. So every caller now ENQUEUES
-   and a single worker drains the queue ONE request at a time, with a fixed gap
-   between calls and exponential back-off + retry on 429.                        */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/* Tunables (overridable via env). */
-const ENRICH_DELAY_MS   = Number(process.env.BOSTA_ENRICH_DELAY_MS) || 1500; // gap between calls
-const RATE_LIMIT_BASE   = Number(process.env.BOSTA_ENRICH_BACKOFF_MS) || 30_000; // 429 cooldown
-const MAX_RETRIES       = 4;     // per-order retries on 429 before giving up
-
-const _queue = [];
-let _draining = false;
+/* ── Throttled enrichment via the shared Bosta queue ─────────────────────────
+   Bosta rate-limits the consignee-ranking endpoint (HTTP 429). Rather than keep
+   a SEPARATE queue here, enrichment now funnels through the SAME global queue
+   (services/bostaQueue) that the bulk dispatch uses — so ALL outbound Bosta
+   traffic (webhook-triggered enrichment + frontend dispatch) shares one rate
+   limiter and can never collectively burst past the limit.                     */
 
 /**
- * PUBLIC, fire-and-forget. Enqueues an enrichment job and starts the worker.
- * Same signature as before — callers must NOT await it.
+ * PUBLIC, fire-and-forget. Enqueues an enrichment job onto the shared Bosta
+ * queue. Same signature as before — callers must NOT await it.
  */
 function enrichDeliveryRate(orderId, phone) {
   if (!orderId || !phone) return;
-  _queue.push({ orderId, phone, attempts: 0 });
-  if (_queue.length === 1 && !_draining) console.log(`[bostaEnrich] queued order ${orderId} (queue: ${_queue.length})`);
-  drainQueue();   // no await — fire and forget
-}
-
-/** Single-flight worker: processes the queue serially with throttling. */
-async function drainQueue() {
-  if (_draining) return;
-  _draining = true;
-  try {
-    while (_queue.length > 0) {
-      const job = _queue.shift();
-      const status = await processEnrichment(job.orderId, job.phone);
-
-      if (status === 'ratelimited') {
-        if (job.attempts < MAX_RETRIES) {
-          job.attempts += 1;
-          /* Exponential back-off: 30s, 60s, 120s, 240s … then re-queue. */
-          const wait = RATE_LIMIT_BASE * 2 ** (job.attempts - 1);
-          console.warn(`[bostaEnrich] 429 — backing off ${Math.round(wait / 1000)}s then retrying order ${job.orderId} (attempt ${job.attempts}/${MAX_RETRIES})`);
-          _queue.push(job);            // retry later, at the back of the line
-          await sleep(wait);
-        } else {
-          console.error(`[bostaEnrich] order ${job.orderId} gave up after ${MAX_RETRIES} rate-limited attempts`);
-          await sleep(ENRICH_DELAY_MS);
-        }
-      } else {
-        /* Normal spacing between successful/!429 calls. */
-        await sleep(ENRICH_DELAY_MS);
-      }
-    }
-  } finally {
-    _draining = false;
-  }
+  enqueueBosta(() => processEnrichment(orderId, phone), `enrich order ${orderId}`)
+    .catch((err) => {
+      // Retries (incl. 429 back-off) are handled inside the queue; this only
+      // fires when they're exhausted or a non-retryable error escaped.
+      console.error(`[bostaEnrich] order ${orderId} enrichment failed:`, err.message);
+    });
 }
 
 /**
  * Does the actual Bosta lookup + DB update for ONE order.
- * Returns a status the worker uses to decide pacing:
- *   'ok' | 'ratelimited' | 'skipped' | 'error'
  *
- * - On success  : updates to the mapped Arabic label.
- * - On 404      : updates to 'جديد' (customer has no shipping history).
- * - On 429      : returns 'ratelimited' so the worker backs off + retries.
- * - On any other error : logs and returns 'error'.
- *
- * Never throws.
+ * - On success  : updates to the mapped Arabic label, returns 'ok'.
+ * - On 404      : updates to 'جديد' (no shipping history), returns 'ok'.
+ * - On 429      : RE-THROWS so the shared queue backs off + retries.
+ * - On any other error : logs and returns 'error' (no retry).
  */
 async function processEnrichment(orderId, phone) {
   /* ── TENANT: resolve the owning business of this order first ────────
@@ -215,9 +175,9 @@ async function processEnrichment(orderId, phone) {
     }
 
     if (status === 429) {
-      /* Rate-limited — signal the worker to back off and retry. */
+      /* Rate-limited — re-throw so the shared bostaQueue backs off and retries. */
       console.warn(`⏳  Bosta 429 (rate limit) for order ${orderId} [${formattedPhone}]`);
-      return 'ratelimited';
+      throw err;
     }
 
     console.error('❌ Bosta Live Sync Failed for phone:', formattedPhone);

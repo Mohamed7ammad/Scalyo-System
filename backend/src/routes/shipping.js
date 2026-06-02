@@ -3,6 +3,7 @@ const axios        = require('axios');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
+const { enqueueBosta } = require('../services/bostaQueue');
 
 const router = express.Router();
 
@@ -402,13 +403,19 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
     for (const order of orders) {
       try {
         const payload  = toBosta(order, allowOpen);
-        const bostaRes = await axios.post(`${BOSTA_BASE}/deliveries`, payload, {
-          headers: {
-            'Authorization': apiKey,
-            'Content-Type':  'application/json',
-          },
-          timeout: 15_000,
-        });
+        /* Funnel every shipment-creation call through the shared global Bosta
+           queue: serialized with a safe gap + 429 back-off, so a bulk dispatch
+           of dozens of orders (or a webhook spike) never trips the rate limit. */
+        const bostaRes = await enqueueBosta(
+          () => axios.post(`${BOSTA_BASE}/deliveries`, payload, {
+            headers: {
+              'Authorization': apiKey,
+              'Content-Type':  'application/json',
+            },
+            timeout: 15_000,
+          }),
+          `dispatch order ${order.id}`
+        );
 
         /* Log full Bosta response so we can inspect every returned field */
         console.log('✅ Bosta Success Response Data:', JSON.stringify(bostaRes.data, null, 2));
