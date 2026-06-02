@@ -51,8 +51,10 @@ function mapRanking(ranking) {
  * queue. Same signature as before — callers must NOT await it.
  */
 function enrichDeliveryRate(orderId, phone) {
-  if (!orderId || !phone) return;
-  enqueueBosta(() => processEnrichment(orderId, phone), `enrich order ${orderId}`)
+  if (!orderId || !phone) return Promise.resolve();
+  // Returns a promise that ALWAYS resolves (errors are caught here), so
+  // fire-and-forget callers can ignore it while batch scripts can await it.
+  return enqueueBosta(() => processEnrichment(orderId, phone), `enrich order ${orderId}`)
     .catch((err) => {
       // Retries (incl. 429 back-off) are handled inside the queue; this only
       // fires when they're exhausted or a non-retryable error escaped.
