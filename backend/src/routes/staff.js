@@ -30,6 +30,9 @@ const migrations = [
   /* ── Persisted auto-distribution weight (%) — drives weighted round-robin
         assignment of incoming EasyOrder webhook orders. 0 = excluded. ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS distribution_percentage NUMERIC(5,2) NOT NULL DEFAULT 0`,
+  /* ── Presence heartbeat — last time the user pinged while logged in. Powers
+        the Online/Offline badge in the staff table. ── */
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ`,
 ];
 
 migrations.forEach((sql) =>
@@ -71,6 +74,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
         COALESCE(comm_rejected,  0)                 AS comm_rejected,
         COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
         COALESCE(distribution_percentage, 0)        AS distribution_percentage,
+        last_active_at,
         created_at
       FROM users
       WHERE business_id = $1
@@ -427,6 +431,25 @@ router.post('/distribution', authenticate, requireAdmin, async (req, res) => {
     res.status(500).json({ error: 'خطأ في الخادم' });
   } finally {
     client.release();
+  }
+});
+
+/* ── POST /api/staff/heartbeat ────────────────────────────────────────────────
+   Lightweight presence ping — stamps last_active_at = NOW() for the currently
+   authenticated user. Any logged-in role may call it (the frontend pings every
+   ~90s). Matched by email (case-insensitive) + tenant to dodge the users.id
+   VARCHAR type drift.                                                          */
+router.post('/heartbeat', authenticate, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE users SET last_active_at = NOW()
+        WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) AND business_id = $2`,
+      [req.user.email, req.user.business_id]
+    );
+    res.json({ ok: true, at: new Date().toISOString() });
+  } catch (err) {
+    console.error('[POST /staff/heartbeat]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
 

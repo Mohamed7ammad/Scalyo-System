@@ -130,6 +130,14 @@ function KpiCard({ label, value, sub, icon, accent='slate' }: {
   );
 }
 
+/* A user is "online" if their heartbeat landed within this window. */
+const ONLINE_WINDOW_MS = 4 * 60 * 1000; // 4 minutes
+function isOnline(lastActiveAt?: string | null): boolean {
+  if (!lastActiveAt) return false;
+  const t = new Date(lastActiveAt).getTime();
+  return Number.isFinite(t) && Date.now() - t <= ONLINE_WINDOW_MS;
+}
+
 /* ════════════════════════════════════════════════════════════════════
    Main Page
    ════════════════════════════════════════════════════════════════════ */
@@ -180,6 +188,15 @@ export default function StaffPage() {
     finally { setLoading(false); }
   }, []);
   useEffect(() => { loadStaff(); }, [loadStaff]);
+
+  /* Silent presence refresh — re-fetch the staff list every 60s (no spinner)
+     so the Online/Offline badges stay current without a manual reload. */
+  useEffect(() => {
+    const id = setInterval(() => {
+      getStaff().then((r) => setStaff(r.data)).catch(() => { /* silent */ });
+    }, 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   const [search, setSearch] = useState('');
   const filtered = useMemo(() => {
@@ -511,11 +528,23 @@ export default function StaffPage() {
                           </span>
                         </td>
                         <td className="px-5 py-4">
-                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
-                            ${m.is_active?'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300':'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-500'}`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${m.is_active?'bg-emerald-500':'bg-slate-400'}`}/>
-                            {m.is_active?'نشط':'غير نشط'}
-                          </span>
+                          {(() => {
+                            const online = isOnline(m.last_active_at);
+                            const title = m.last_active_at
+                              ? `آخر نشاط: ${new Date(m.last_active_at).toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' })}`
+                              : 'لم يسجّل دخوله بعد';
+                            return (
+                              <span
+                                title={title}
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
+                                  ${online
+                                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                                    : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'}`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${online ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'}`}/>
+                                {online ? 'نشط' : 'غير نشط'}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td className="px-5 py-4">
                           {m.role==='agent' ? (

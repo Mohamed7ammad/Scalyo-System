@@ -315,6 +315,7 @@ export interface StaffMember {
   comm_rejected:   number;       // payout per rejected order
   comm_no_answer:  number;       // payout per no-answer / postponed order
   distribution_percentage?: number;  // saved auto-distribution weight (%)
+  last_active_at?: string | null;    // presence heartbeat timestamp (ISO)
   created_at:      string;
 }
 
@@ -362,6 +363,11 @@ export const updateStaff = (id: number, data: UpdateStaffPayload) =>
 
 export const toggleAttendance = (id: number, isAbsent: boolean) =>
   api.post<ToggleAttendanceResult>(`/api/staff/${id}/toggle-attendance`, { isAbsent });
+
+/** Presence heartbeat — stamps the current user's last_active_at = NOW().
+    Pinged on an interval while logged in. Any role. */
+export const sendHeartbeat = () =>
+  api.post<{ ok: boolean; at: string }>('/api/staff/heartbeat');
 
 /** Persist per-agent auto-distribution weights (%). Drives weighted round-robin
     assignment of incoming EasyOrder webhook orders. Admin only. */

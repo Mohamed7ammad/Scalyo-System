@@ -3,7 +3,10 @@
 import { useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
-import { getBusinessProfile } from '@/lib/api';
+import { getBusinessProfile, sendHeartbeat } from '@/lib/api';
+
+/** How often the presence heartbeat pings the backend (ms). */
+const HEARTBEAT_INTERVAL_MS = 90_000; // 90s
 
 /* Path prefixes an 'affiliate' plan tenant is NOT allowed to open directly.
    These are the eCommerce-only sections (orders, shipping, inventory, …). */
@@ -56,6 +59,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     getBusinessProfile()
       .then((res) => { if (res.data?.brand_name) setBrandName(res.data.brand_name); })
       .catch(() => { /* silently fall back to default */ });
+  }, []);
+
+  /* ── Presence heartbeat ─────────────────────────────────────────────────
+     While the dashboard is mounted (i.e. the user is logged in), silently ping
+     the backend every ~90s so the staff table can show real-time Online/Offline.
+     Fires once immediately, again when the tab regains focus, then on interval. */
+  useEffect(() => {
+    const ping = () => { sendHeartbeat().catch(() => { /* silent */ }); };
+    ping();
+    const id = setInterval(ping, HEARTBEAT_INTERVAL_MS);
+    const onFocus = () => ping();
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(id); window.removeEventListener('focus', onFocus); };
   }, []);
 
   return (
