@@ -12,6 +12,11 @@ const NO_ANSWER_REQUIRED = 5;
    for ALL orders regardless of source — and therefore for admins too. */
 const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
 
+/* Normalise any date value to YYYY-MM-DD for <input type="date"> and badges.
+   A DATE column comes back from pg as an ISO timestamp ("2026-06-02T00:00:00Z");
+   a plain "2026-06-02" passes through unchanged. */
+const toDateInput = (v?: string | null) => (v ? String(v).slice(0, 10) : '');
+
 // All possible statuses — used in the admin full-edit modal only
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل'];
 
@@ -99,6 +104,7 @@ export default function OrdersTable({
   const [editForm,        setEditForm]        = useState<Partial<Order>>({});
   const [deleteConfirm,   setDeleteConfirm]   = useState<number | null>(null);
   const [pendingRejection, setPendingRejection] = useState<{ id: number; reason: string } | null>(null);
+  const [pendingPostpone,  setPendingPostpone]  = useState<{ id: number; date: string } | null>(null);
 
   /* ─── Quick-edit (customer/shipping details) modal ─────────── */
   const [quickEdit, setQuickEdit] = useState<Order | null>(null);
@@ -203,6 +209,12 @@ export default function OrdersTable({
     // Intercept "تم الرفض" to collect a rejection reason before saving
     if (Status === 'تم الرفض') {
       setPendingRejection({ id, reason: '' });
+      return;
+    }
+    // Intercept "مؤجل" to collect the follow-up date before saving
+    if (Status === 'مؤجل') {
+      const existing = orders.find((o) => o.id === id)?.PostponedDate;
+      setPendingPostpone({ id, date: toDateInput(existing) });
       return;
     }
     setSavingId(id);
@@ -521,6 +533,24 @@ export default function OrdersTable({
                         </div>
                       )}
 
+                      {/* Postponed follow-up date — badge under the status for مؤجل */}
+                      {normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate) && (
+                        <div
+                          title="تاريخ المتابعة"
+                          className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs
+                            text-amber-700 dark:text-amber-300
+                            bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40
+                            rounded-md mx-auto leading-snug"
+                          dir="ltr"
+                        >
+                          <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                          </svg>
+                          {toDateInput(order.PostponedDate)}
+                        </div>
+                      )}
+
                       {/* Quick no-answer attempt logger — shown inline when status
                           is 'لا يرد' so BOTH roles log a call without opening a modal.
                           Uses normalised comparison so it works for imported/synced
@@ -591,7 +621,7 @@ export default function OrdersTable({
                         <input
                           type="date"
                           dir="ltr"
-                          value={order.PostponedDate ?? ''}
+                          value={toDateInput(order.PostponedDate)}
                           onChange={(e) => onUpdate(order.id, { PostponedDate: e.target.value })}
                           className="px-2 py-1 text-xs rounded-lg outline-none
                             focus:ring-2 focus:ring-amber-400 cursor-pointer
@@ -1064,7 +1094,7 @@ export default function OrdersTable({
                 <input
                   type="date"
                   dir="ltr"
-                  value={editForm.PostponedDate ?? ''}
+                  value={toDateInput(editForm.PostponedDate)}
                   onChange={(e) => setEditForm((p) => ({ ...p, PostponedDate: e.target.value }))}
                   className="w-full px-3 py-2 rounded-xl text-sm outline-none
                     border border-amber-300 dark:border-amber-700/50
@@ -1266,6 +1296,74 @@ export default function OrdersTable({
             </button>
             <button
               onClick={() => setPendingRejection(null)}
+              className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition
+                bg-gray-100 hover:bg-gray-200 text-gray-700
+                dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300"
+            >
+              إلغاء
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Postpone Date Picker ────────────────────────────────── */}
+      {pendingPostpone !== null && (
+        <Modal onClose={() => setPendingPostpone(null)}>
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-10 h-10 rounded-xl shrink-0 flex items-center justify-center
+              bg-amber-100 dark:bg-amber-900/30">
+              <svg className="w-5 h-5 text-amber-600 dark:text-amber-400"
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="font-bold text-gray-800 dark:text-slate-100 leading-tight">
+                تأجيل الطلب
+              </h2>
+              <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                اختر التاريخ الذي طلب العميل التواصل فيه
+              </p>
+            </div>
+          </div>
+
+          <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1.5">
+            تاريخ المتابعة
+          </label>
+          <input
+            type="date"
+            dir="ltr"
+            value={pendingPostpone.date}
+            min={new Date().toISOString().slice(0, 10)}
+            onChange={(e) => setPendingPostpone((p) => p ? { ...p, date: e.target.value } : null)}
+            className="w-full px-3 py-2.5 rounded-xl text-sm outline-none mb-5
+              border border-amber-300 dark:border-amber-700/50
+              bg-amber-50 dark:bg-amber-900/20
+              text-amber-800 dark:text-amber-300
+              focus:ring-2 focus:ring-amber-400"
+          />
+
+          <div className="flex gap-3">
+            <button
+              onClick={async () => {
+                if (!pendingPostpone || !pendingPostpone.date) return;
+                setSavingId(pendingPostpone.id);
+                await onUpdate(pendingPostpone.id, {
+                  Status: 'مؤجل',
+                  PostponedDate: pendingPostpone.date,
+                });
+                setSavingId(null);
+                setPendingPostpone(null);
+              }}
+              disabled={savingId !== null || !pendingPostpone.date}
+              className="flex-1 bg-amber-600 hover:bg-amber-700 text-white py-2.5 rounded-xl
+                text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              تأكيد التأجيل
+            </button>
+            <button
+              onClick={() => setPendingPostpone(null)}
               className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition
                 bg-gray-100 hover:bg-gray-200 text-gray-700
                 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300"

@@ -27,6 +27,14 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "quantity" INTEGER NOT N
   .then(() => console.log('✅  Orders: "quantity" column ready'))
   .catch((err) => console.warn('⚠️   Orders quantity column check:', err.message));
 
+/* ── Postponed follow-up date ───────────────────────────────────────────────
+   The date the customer asked to be re-contacted, captured when an agent moves
+   an order to 'مؤجل'. Stored as DATE; the API returns it and the frontend
+   normalises to YYYY-MM-DD for the date picker / badge.                       */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "PostponedDate" DATE`)
+  .then(() => console.log('✅  Orders: "PostponedDate" column ready'))
+  .catch((err) => console.warn('⚠️   Orders PostponedDate column check:', err.message));
+
 /* ── No-answer call-attempt log ─────────────────────────────────────────────
    JSONB array of ISO timestamps — one per logged call attempt. The
    comm_no_answer commission is only earned once this reaches 5 attempts while
@@ -556,6 +564,10 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
   if (!Object.keys(updates).length) {
     return res.status(400).json({ error: 'لا توجد حقول للتحديث' });
   }
+
+  /* Empty date string → NULL (the "PostponedDate" DATE column rejects '').
+     Lets an agent clear a follow-up date without a 500. */
+  if (updates.PostponedDate === '') updates.PostponedDate = null;
 
   /* ── Step 1: Fetch the current order from the DB ────────────────────
      The frontend only sends the fields being changed (e.g. {Status: '…'}).
