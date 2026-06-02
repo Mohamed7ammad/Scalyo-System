@@ -279,6 +279,24 @@ export interface ManualReturnResult {
 export const postManualReturn = (data: ManualReturnPayload) =>
   api.post<ManualReturnResult>('/api/returns/manual', data);
 
+/* ── Bosta returns sync (backfill physically-returned orders) ─────── */
+export interface SyncReturnsResult {
+  message:      string;
+  mode:         'explicit' | 'auto' | 'date';
+  date:         string | null;
+  scanned:      number;
+  matchedLocal: number;
+  processed:    number;   // orders newly status→returned + logged
+  restocked:    number;   // of those, how many incremented product stock
+  notFound:     string[]; // Bosta tracking numbers with no local order
+  details:      unknown[];
+}
+
+/** Sync physically-returned Bosta orders. Pass { date:'YYYY-MM-DD' } to sync one
+    day, { trackingNumbers:[…] } for specific ones, or {} for a full sweep. Admin only. */
+export const syncBostaReturns = (payload: { date?: string; trackingNumbers?: string[] } = {}) =>
+  api.post<SyncReturnsResult>('/api/bosta/sync-returns', payload);
+
 /* ── Purchase Batches (Supply / WAC) ─────────────────────────────── */
 export interface PurchasePayload {
   productId:    string;    // products.id (UUID)

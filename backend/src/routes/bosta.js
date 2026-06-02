@@ -866,16 +866,30 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
     ? [...new Set(req.body.trackingNumbers.map((t) => String(t).trim()).filter(Boolean))]
     : null;
 
+  // Optional date filter (YYYY-MM-DD) — only returns from THAT Egypt-local day.
+  const dateFilter = typeof req.body?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.date.trim())
+    ? req.body.date.trim()
+    : null;
+
   const summary = {
-    mode: explicit ? 'explicit' : 'auto',
+    mode: explicit ? 'explicit' : (dateFilter ? 'date' : 'auto'),
+    date: dateFilter,
     scanned: 0, matchedLocal: 0, processed: 0, restocked: 0,
     notFound: [], details: [],
+  };
+
+  /* Egypt-local YYYY-MM-DD for a timestamp (Bosta returns UTC ISO strings). */
+  const egyptDate = (ts) => {
+    if (!ts) return null;
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return null;
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo' }).format(d); // YYYY-MM-DD
   };
 
   try {
     let trackingNumbers = explicit;
 
-    /* ── AUTO mode: pull the returning bucket from Bosta ─────────────────── */
+    /* ── AUTO / DATE mode: pull the returning bucket from Bosta ──────────── */
     if (!explicit) {
       const creds = await readBostaCreds(businessId);
       if (!creds.bearerToken && !(creds.email && creds.password)) {
@@ -906,6 +920,8 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
           break;
         }
         if (!Array.isArray(list) || list.length === 0) break;
+
+        let pageOlderThanFilter = false;
         for (const d of list) {
           summary.scanned++;
           const stateStr = pickName(
@@ -914,10 +930,21 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
           );
           const canon = canonicalizeStatus(stateStr);
           const tn = pickName(d.trackingNumber ?? d.tracking_number ?? d._id);
-          // Only RECEIVED-BACK returns (not in-transit) → matches the webhook gate.
-          if (tn && FINAL_RETURN_STATUSES.has(canon)) received.push(tn);
+          if (!tn || !FINAL_RETURN_STATUSES.has(canon)) continue;  // received-back only
+
+          if (dateFilter) {
+            const dDate = egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.returnedAt ?? d.createdAt);
+            if (dDate !== dateFilter) {
+              // Results are sorted -updatedAt; once we pass below the target day
+              // we can stop early on subsequent pages.
+              if (dDate && dDate < dateFilter) pageOlderThanFilter = true;
+              continue;
+            }
+          }
+          received.push(tn);
         }
         if (list.length < PAGE) break;
+        if (dateFilter && pageOlderThanFilter) break;   // gone past the target day
       }
       trackingNumbers = [...new Set(received)];
     }

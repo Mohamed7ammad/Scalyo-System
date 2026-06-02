@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  getDailyReturns, postManualReturn,
+  getDailyReturns, postManualReturn, syncBostaReturns,
   getProducts, Product, DailyReturn,
 } from '@/lib/api';
 
@@ -25,6 +25,12 @@ export default function ReturnsPage() {
   const [rows,    setRows]    = useState<DailyReturn[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
+
+  /* ── Bosta returns-sync modal state ──────────────────────────────────── */
+  const [syncOpen,    setSyncOpen]    = useState(false);
+  const [syncDate,    setSyncDate]    = useState<string>(todayISO());
+  const [syncing,     setSyncing]     = useState(false);
+  const [toast,       setToast]       = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
   /* ── Manual return modal state ───────────────────────────────────────── */
   const [modalOpen,   setModalOpen]   = useState(false);
@@ -104,6 +110,42 @@ export default function ReturnsPage() {
       setSubmitError(msg);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /* ── Sync Bosta returns for a chosen date ────────────────────────────── */
+  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 6000);
+  };
+
+  const openSync = () => { setSyncDate(date || todayISO()); setSyncOpen(true); };
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const { data } = await syncBostaReturns({ date: syncDate });
+      setSyncOpen(false);
+      if (data.matchedLocal === 0) {
+        showToast(`لا توجد مرتجعات من Bosta بتاريخ ${fmtDateAr(syncDate)} لمطابقتها.`, 'success');
+      } else {
+        showToast(
+          `تمت المزامنة ✓ — ${data.processed} طلب من ${fmtDateAr(syncDate)}: ` +
+          `${data.restocked} منها أُعيد للمخزون.` +
+          (data.notFound.length ? ` (${data.notFound.length} لم يُطابَق محلياً)` : ''),
+          'success',
+        );
+      }
+      // Refresh the list to reflect newly-logged returns.
+      setDate(syncDate);
+      fetchReturns(syncDate);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? (err instanceof Error ? err.message : 'تعذّرت المزامنة');
+      showToast(msg, 'error');
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -195,9 +237,102 @@ export default function ReturnsPage() {
               </svg>
               تسجيل مرتجع يدوي
             </button>
+
+            {/* Sync Bosta returns */}
+            <button
+              onClick={openSync}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold
+                bg-white dark:bg-slate-800 border border-purple-300 dark:border-purple-700/60
+                text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-slate-700
+                transition-all duration-150 whitespace-nowrap"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              مزامنة المرتجعات
+            </button>
           </div>
         </div>
       </div>
+
+      {/* ── Toast ─────────────────────────────────────────────────────────── */}
+      {toast && (
+        <div className={`fixed top-5 left-1/2 -translate-x-1/2 z-[60] px-5 py-3 rounded-xl shadow-lg
+          text-white text-sm font-medium max-w-md text-center
+          ${toast.type === 'success' ? 'bg-emerald-600' : 'bg-red-600'}`}>
+          {toast.msg}
+        </div>
+      )}
+
+      {/* ── Sync Returns modal ────────────────────────────────────────────── */}
+      {syncOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={(e) => e.target === e.currentTarget && !syncing && setSyncOpen(false)}
+          dir="rtl"
+        >
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6
+            border border-slate-200 dark:border-slate-700/60">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl shrink-0 flex items-center justify-center
+                bg-purple-100 dark:bg-purple-900/40">
+                <svg className="w-5 h-5 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="font-bold text-gray-800 dark:text-slate-100 leading-tight">مزامنة المرتجعات من Bosta</h2>
+                <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                  يجلب الطلبات المُسترجعة في اليوم المحدد ويعيدها للمخزون
+                </p>
+              </div>
+            </div>
+
+            <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1.5">تاريخ الاسترجاع</label>
+            <input
+              type="date"
+              value={syncDate}
+              max={todayISO()}
+              onChange={(e) => setSyncDate(e.target.value)}
+              dir="ltr"
+              className="w-full px-3 py-2.5 rounded-xl text-sm outline-none mb-5
+                border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800
+                text-gray-900 dark:text-slate-100 focus:ring-2 focus:ring-purple-400"
+            />
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleSync}
+                disabled={syncing || !syncDate}
+                className="flex-1 inline-flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700
+                  text-white py-2.5 rounded-xl text-sm font-semibold transition
+                  disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {syncing ? (
+                  <>
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                    جارٍ المزامنة…
+                  </>
+                ) : 'مزامنة'}
+              </button>
+              <button
+                onClick={() => setSyncOpen(false)}
+                disabled={syncing}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition
+                  bg-gray-100 hover:bg-gray-200 text-gray-700
+                  dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 disabled:opacity-50"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Summary cards ─────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
