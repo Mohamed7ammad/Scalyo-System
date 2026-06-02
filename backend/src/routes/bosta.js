@@ -918,7 +918,6 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
       const PAGE = 50;
       const seen     = new Set();
       const received = [];
-      const dbg      = { n: 0 };   // temporary: dump raw date fields for diagnosis
 
       /* Paginate one stateCodes bucket WITHOUT early-exit on dates.
          We do NOT assume the API is strictly -updatedAt sorted, so we scan every
@@ -955,22 +954,6 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
                 d.masterStatus?.value ?? d.masterStatus ?? d.status
               );
               if (!FINAL_RETURN_STATUSES.has(canonicalizeStatus(stateStr))) continue; // received-back only
-            }
-
-            /* ── TEMP DEBUG: inspect the raw date fields Bosta returns for the
-               authoritative returned-tab, so we can confirm the exact field name
-               + timezone format vs our in-memory filter. Remove once resolved. */
-            if (label === 'returned-tab' && dbg.n < 8) {
-              dbg.n++;
-              console.log(
-                `[DEBUG sync-returns] #${dbg.n} tn=${tn}` +
-                ` | updatedAt=${JSON.stringify(d.updatedAt)}` +
-                ` | lastUpdateDate=${JSON.stringify(d.lastUpdateDate)}` +
-                ` | updateDate=${JSON.stringify(d.updateDate)}` +
-                ` | state.updatedAt=${JSON.stringify(d.state?.updatedAt)}` +
-                ` | egyptDate=${egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.returnedAt)}` +
-                ` | target=${dateFilter}`
-              );
             }
 
             // Filter by the day the parcel was last updated (when it was returned).
