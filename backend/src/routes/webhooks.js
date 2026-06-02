@@ -135,6 +135,43 @@ function extractOrderFields(body) {
   };
 }
 
+/* ── Auto-assignment ──────────────────────────────────────────────────────────
+   Assigns a freshly-created order to the least-loaded present agent (the agent
+   with the FEWEST pending 'جديد' orders) — round-robin by workload. Mirrors the
+   manual-order-creation logic so EasyOrder webhook orders never sit unassigned
+   (غير محدد). Returns the updated order row, or null when no agent is available
+   / on error (the order then stays unassigned but creation still succeeds).     */
+async function autoAssignLeastLoaded(orderId, businessId) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.email,
+              COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
+         FROM users u
+         LEFT JOIN orders o
+           ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+        WHERE u.role = 'agent'
+          AND COALESCE(u.is_active,  true)  = true
+          AND COALESCE(u.is_absent, false)  = false
+          AND u.business_id = $1
+        GROUP BY u.email
+        ORDER BY load ASC, u.email ASC
+        LIMIT 1`,
+      [businessId]
+    );
+    if (!rows.length) return null;
+
+    const upd = await pool.query(
+      `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+        WHERE id = $2 AND business_id = $3 RETURNING *`,
+      [rows[0].email, orderId, businessId]
+    );
+    return upd.rows[0] || null;
+  } catch (err) {
+    console.warn('[EasyOrder webhook] auto-assign skipped:', err.message);
+    return null;
+  }
+}
+
 /* ── Shared ingest ────────────────────────────────────────────────────────────
    Inserts an EasyOrder payload into orders for a SPECIFIC tenant (businessId),
    with dedup + multi-unit quantity. Returns { ok, status, payload }.            */
@@ -176,8 +213,20 @@ async function ingestEasyOrder(body, businessId) {
     return { ok: true, status: 200, payload: { success: true, skipped: true, reason: 'duplicate order' } };
   }
 
-  const newOrder = result.rows[0];
+  let newOrder = result.rows[0];
   console.log(`✅  EasyOrder webhook: order #${newOrder.id} (tenant ${businessId}, qty ${newOrder.quantity}) created`);
+
+  /* Auto-assign to the least-loaded present agent so the order never sits
+     unassigned (غير محدد). Done before responding so the returned order carries
+     AssignedTo. */
+  const assigned = await autoAssignLeastLoaded(newOrder.id, businessId);
+  if (assigned) {
+    newOrder = assigned;
+    console.log(`🤝  EasyOrder webhook: order #${newOrder.id} auto-assigned to ${newOrder.AssignedTo}`);
+  } else {
+    console.log(`ℹ️   EasyOrder webhook: order #${newOrder.id} left unassigned — no present agents`);
+  }
+
   enrichDeliveryRate(newOrder.id, f.Phone);   // background — fire-and-forget
   return { ok: true, status: 201, payload: { success: true, order: newOrder } };
 }

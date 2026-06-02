@@ -5,7 +5,7 @@
  */
 const axios = require('axios');
 const pool  = require('../config/db');
-const { enqueueBosta } = require('./bostaQueue');
+const { enqueueBosta, LANES } = require('./bostaQueue');
 
 /** '010XXXXXXXX' → '+2010XXXXXXXX', '+2…' → unchanged */
 function formatPhone(raw) {
@@ -54,7 +54,7 @@ function enrichDeliveryRate(orderId, phone) {
   if (!orderId || !phone) return Promise.resolve();
   // Returns a promise that ALWAYS resolves (errors are caught here), so
   // fire-and-forget callers can ignore it while batch scripts can await it.
-  return enqueueBosta(() => processEnrichment(orderId, phone), `enrich order ${orderId}`)
+  return enqueueBosta(() => processEnrichment(orderId, phone), `enrich order ${orderId}`, LANES.ENRICH)
     .catch((err) => {
       // Retries (incl. 429 back-off) are handled inside the queue; this only
       // fires when they're exhausted or a non-retryable error escaped.

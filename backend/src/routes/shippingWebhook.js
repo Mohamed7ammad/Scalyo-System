@@ -522,28 +522,30 @@ router.post('/bosta', async (req, res) => {
     }
 
     /* ── Step 4c: Log the return in product_returns ───────────────────────
-       The (product_name, return_date) unique constraint is kept for backward
-       compatibility with the manual returns route (returns.js).
-       Two returns of the same product on the same day correctly aggregate.
-
-       sku      — pulled directly from the order, no JOIN required
-       order_id — used by the idempotency check (Step 4a) and the partial
-                  unique index that prevents exact duplicate rows           */
+       Conflict target is the order_id partial unique index — which is created
+       UNCONDITIONALLY in this file's boot migration, so the ON CONFLICT always
+       has a matching index. (The previous (product_name, return_date,
+       business_id) target depended on an index that initTenancy only creates
+       conditionally; when it was absent the INSERT threw and NOTHING logged —
+       the cause of the empty Returns Log.) One row per returned order.        */
     const today = new Date().toISOString().slice(0, 10);
 
-    await pool.query(
+    const logRes = await pool.query(
       `INSERT INTO product_returns (product_name, sku, order_id, return_date, quantity, business_id)
        VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
-       ON CONFLICT (product_name, return_date, business_id) DO UPDATE SET
-         quantity = product_returns.quantity + $4,
-         sku      = COALESCE(EXCLUDED.sku, product_returns.sku)`,
+       ON CONFLICT (order_id) WHERE order_id IS NOT NULL DO NOTHING
+       RETURNING id`,
       [productName, orderSku, order.id, orderQty, businessId]
     );
 
-    console.log(
-      `✅  product_returns logged: "${productName}" x${orderQty}` +
-      ` (SKU: ${orderSku ?? 'none'}, order #${order.id}) on ${today}`
-    );
+    if (logRes.rowCount > 0) {
+      console.log(
+        `✅  product_returns logged: "${productName}" x${orderQty}` +
+        ` (SKU: ${orderSku ?? 'none'}, order #${order.id}) on ${today}`
+      );
+    } else {
+      console.warn(`[Bosta Webhook] product_returns row for order #${order.id} already existed — skipped.`);
+    }
 
   } catch (err) {
     /* Post-response catch — never calls res.status() again.

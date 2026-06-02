@@ -90,7 +90,7 @@ interface Props {
 export default function OrdersTable({
   orders, role, onUpdate, onDelete,
   selectedIds = [], onToggleSelect, onSelectAll,
-  agents = [], showProduct = false,
+  agents = [],
   emptyMessage = 'لا توجد طلبات لعرضها',
   onToast,
 }: Props) {
@@ -390,8 +390,10 @@ export default function OrdersTable({
                         {order.FullName}
                       </p>
 
-                      {/* Product badge — only in "كل المنتجات" view */}
-                      {showProduct && order.ProductName && (
+                      {/* Product badge — always shown (all roles) so employees
+                          see the product for their assigned orders, not only
+                          admins in the "كل المنتجات" view. */}
+                      {order.ProductName && (
                         <span
                           title={order.ProductName}
                           className="mt-1 inline-flex items-center gap-1 max-w-[200px]

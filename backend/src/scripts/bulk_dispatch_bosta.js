@@ -20,7 +20,7 @@
 require('dotenv').config();
 const pool = require('../config/db');
 const { enrichDeliveryRate } = require('../services/bostaEnrich');
-const { bostaQueueLength }   = require('../services/bostaQueue');
+const { bostaQueueLength, LANES } = require('../services/bostaQueue');
 
 const PENDING_RATE = 'بدون';   // receiving-status default that enrichment overwrites
 
@@ -68,7 +68,7 @@ async function main() {
         if (done % 10 === 0 || done === total) {
           console.log(
             `⏳ Progress: ${done}/${total} processed ` +
-            `(${bostaQueueLength()} still waiting in queue) — ` +
+            `(${bostaQueueLength(LANES.ENRICH)} still waiting in queue) — ` +
             `~${etaMin(total - done)} min left`
           );
         }
