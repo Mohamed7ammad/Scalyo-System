@@ -415,8 +415,14 @@ export default function OrdersTable({
                     )}
 
                     <td className="px-4 py-3">
-                      {/* Customer name */}
-                      <p className="font-semibold text-gray-800 dark:text-slate-200 whitespace-nowrap leading-snug">
+                      {/* Customer name — truncated so a long value (e.g. an
+                          address typed into the name field) can't stretch the
+                          column; full text on hover via title. */}
+                      <p
+                        title={order.FullName}
+                        className="font-semibold text-gray-800 dark:text-slate-200
+                          max-w-[200px] truncate leading-snug"
+                      >
                         {order.FullName}
                       </p>
 

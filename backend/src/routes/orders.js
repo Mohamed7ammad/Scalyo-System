@@ -581,25 +581,70 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
      ProductName, sku, and the previous Status are NOT in req.body — they
      must come from the database.
      ─────────────────────────────────────────────────────────────────── */
-  let currentProductName = '';
-  let currentStatus      = '';
-  let currentSku         = null;   // null means no SKU → fall back to name match
+  let currentProductName  = '';
+  let currentStatus       = '';
+  let currentSku          = null;   // null means no SKU → fall back to name match
+  let currentProductPrice = '';
+  let currentQty          = 1;
 
   try {
     const row = await pool.query(
-      'SELECT "Status", "ProductName", "sku" FROM orders WHERE id = $1 AND business_id = $2',
+      'SELECT "Status", "ProductName", "sku", "ProductPrice", COALESCE("quantity", 1) AS quantity FROM orders WHERE id = $1 AND business_id = $2',
       [id, businessId]
     );
     if (!row.rows.length) {
       return res.status(404).json({ error: 'الطلب غير موجود' });
     }
-    currentProductName = (row.rows[0].ProductName || '').trim();
-    currentStatus      = row.rows[0].Status || '';
+    currentProductName  = (row.rows[0].ProductName || '').trim();
+    currentStatus       = row.rows[0].Status || '';
     // Treat empty string as null so the SQL $1 IS NOT NULL guard works correctly
-    currentSku         = row.rows[0].sku || null;
+    currentSku          = row.rows[0].sku || null;
+    currentProductPrice = row.rows[0].ProductPrice ?? '';
+    currentQty          = Math.max(1, parseInt(row.rows[0].quantity, 10) || 1);
   } catch (err) {
     console.error('Step 1 – fetch order failed:', err.message);
     return res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+
+  /* ── Step 1b: Recalculate total price when quantity changes ─────────
+     total = unit_price × new_qty. Unit price is taken from the product
+     catalogue (by SKU, else name) and, when the order has no matching product
+     (manual/imported), derived from the order's own current unit price
+     (oldTotal ÷ oldQty). The new ProductPrice is injected into `updates` so it
+     is saved and returned to the frontend. (No per-order shipping-fee column
+     exists — Bosta shipping/COD is handled separately.)                    */
+  if (updates.quantity !== undefined) {
+    const newQty = Math.max(1, parseInt(updates.quantity, 10) || 1);
+    updates.quantity = newQty;   // normalise
+
+    const parsePrice = (v) =>
+      parseFloat(String(v ?? '').replace(/[^0-9.]/g, '')) || 0;
+
+    let unitPrice = null;
+    try {
+      const prod = await pool.query(
+        `SELECT selling_price FROM products
+          WHERE business_id = $1 AND (sku = $2 OR TRIM(name) = TRIM($3))
+          ORDER BY (sku = $2) DESC
+          LIMIT 1`,
+        [businessId, currentSku, currentProductName]
+      );
+      if (prod.rows.length) unitPrice = parseFloat(prod.rows[0].selling_price) || null;
+    } catch (e) {
+      console.warn('[PATCH] product unit-price lookup failed:', e.message);
+    }
+
+    // Fallback: derive the unit price from the order's existing total.
+    if (unitPrice == null || unitPrice <= 0) {
+      const oldTotal = parsePrice(currentProductPrice);
+      if (oldTotal > 0) unitPrice = oldTotal / currentQty;
+    }
+
+    if (unitPrice != null && unitPrice > 0) {
+      const newTotal = Math.round(unitPrice * newQty * 100) / 100;
+      updates.ProductPrice = String(newTotal);
+      console.log(`[PATCH] qty ${currentQty}→${newQty} on order ${id}: unit=${unitPrice} → ProductPrice=${newTotal}`);
+    }
   }
 
   /* ── Step 2: Execute the main order update ──────────────────────────
