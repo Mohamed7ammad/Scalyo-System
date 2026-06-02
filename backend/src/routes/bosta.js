@@ -889,7 +889,7 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
   try {
     let trackingNumbers = explicit;
 
-    /* ── AUTO / DATE mode: pull the returning bucket from Bosta ──────────── */
+    /* ── AUTO / DATE mode: pull returns from Bosta ───────────────────────── */
     if (!explicit) {
       const creds = await readBostaCreds(businessId);
       if (!creds.bearerToken && !(creds.email && creds.password)) {
@@ -909,44 +909,70 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
         return extractList(r.data);
       };
 
-      const PAGE = 50, MAX_PAGES = 20;
+      /* COMPLETED "Returned to business / تم الاسترجاع" master states — these
+         live in Bosta's archived/unsuccessful bucket (NOT the active returning
+         leg), keyed by code 45/46/47. We search these IN ADDITION to the active
+         returning-leg codes so fully-returned parcels are always found.        */
+      const COMPLETED_RETURN_STATE_CODES = ['45', '46', '47'];
+
+      const PAGE = 50;
+      const seen     = new Set();
       const received = [];
-      for (let page = 1; page <= MAX_PAGES; page++) {
-        let list;
-        try {
-          list = await runSearch({ limit: PAGE, page, sortBy: '-updatedAt', stateCodes: RETURNING_STATE_CODES });
-        } catch (err) {
-          if (page === 1) throw err;   // total failure on first page → bubble up
-          break;
-        }
-        if (!Array.isArray(list) || list.length === 0) break;
 
-        let pageOlderThanFilter = false;
-        for (const d of list) {
-          summary.scanned++;
-          const stateStr = pickName(
-            d.state?.nameAr ?? d.state?.value ?? d.masterStatus?.nameAr ??
-            d.masterStatus?.value ?? d.masterStatus ?? d.status
-          );
-          const canon = canonicalizeStatus(stateStr);
-          const tn = pickName(d.trackingNumber ?? d.tracking_number ?? d._id);
-          if (!tn || !FINAL_RETURN_STATUSES.has(canon)) continue;  // received-back only
-
-          if (dateFilter) {
-            const dDate = egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.returnedAt ?? d.createdAt);
-            if (dDate !== dateFilter) {
-              // Results are sorted -updatedAt; once we pass below the target day
-              // we can stop early on subsequent pages.
-              if (dDate && dDate < dateFilter) pageOlderThanFilter = true;
-              continue;
-            }
+      /* Paginate one stateCodes bucket WITHOUT early-exit on dates.
+         We do NOT assume the API is strictly -updatedAt sorted, so we scan every
+         page up to the cap and filter each row in memory by its updatedAt day.  */
+      const collectBucket = async (stateCodes, label, maxPages = 40) => {
+        for (let page = 1; page <= maxPages; page++) {
+          let list;
+          /* Omit stateCodes entirely for the catch-all sweep so Bosta returns
+             every delivery (sorted by most-recently-updated). */
+          const body = stateCodes
+            ? { limit: PAGE, page, sortBy: '-updatedAt', stateCodes }
+            : { limit: PAGE, page, sortBy: '-updatedAt' };
+          try {
+            list = await runSearch(body);
+          } catch (err) {
+            console.warn(`[bosta/sync-returns] ${label} page ${page} failed: ` +
+              `HTTP ${err.response?.status ?? 'ERR'} ${err.response?.data?.message ?? err.message}`);
+            return;   // skip this bucket on error; other buckets still run
           }
-          received.push(tn);
+          if (!Array.isArray(list) || list.length === 0) break;
+
+          for (const d of list) {
+            summary.scanned++;
+            const tn = pickName(d.trackingNumber ?? d.tracking_number ?? d._id);
+            if (!tn || seen.has(tn)) continue;
+
+            const stateStr = pickName(
+              d.state?.nameAr ?? d.state?.value ?? d.masterStatus?.nameAr ??
+              d.masterStatus?.value ?? d.masterStatus ?? d.status
+            );
+            if (!FINAL_RETURN_STATUSES.has(canonicalizeStatus(stateStr))) continue; // received-back only
+
+            // Filter by the day the parcel was last updated (when it was returned).
+            // NEVER filter on createdAt — these orders are weeks old.
+            if (dateFilter) {
+              const dDate = egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.returnedAt);
+              if (dDate !== dateFilter) continue;   // no early-exit — keep scanning
+            }
+            seen.add(tn);
+            received.push(tn);
+          }
+          if (list.length < PAGE) break;   // genuine last page
         }
-        if (list.length < PAGE) break;
-        if (dateFilter && pageOlderThanFilter) break;   // gone past the target day
-      }
-      trackingNumbers = [...new Set(received)];
+      };
+
+      // Active returning leg + completed/archived returns + a catch-all sweep
+      // (no state filter) so a return in ANY bucket updated on the target day is
+      // found regardless of Bosta's exact state code. Union, deduped.
+      await collectBucket(RETURNING_STATE_CODES, 'returning', 40);
+      await collectBucket(COMPLETED_RETURN_STATE_CODES, 'completed-returns', 40);
+      // Catch-all: most-recently-updated deliveries (any bucket). Today's returns
+      // sort to the top, so 12 pages (600 rows) reliably covers the target day.
+      await collectBucket(null, 'all-recent', 12);
+
+      trackingNumbers = received;
     }
 
     /* ── Process each tracking number against the local DB ───────────────── */
