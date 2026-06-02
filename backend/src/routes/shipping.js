@@ -114,137 +114,154 @@ function calcCod(order) {
      4. Passes through already-English values; warns + returns raw otherwise.
    ──────────────────────────────────────────────────────────────────────────── */
 
-/** Normalise an Arabic string for tolerant matching. */
+/** Normalise an Arabic string for tolerant matching. ة↔ه and ي↔ى are unified
+    because Bosta's dictionary uses the ه/ي forms while the DB usually has ة/ى. */
 function normalizeArabic(s) {
   return String(s ?? '')
     .replace(/[ً-ْٰـ]/g, '') // harakat + tatweel
     .replace(/[أإآ]/g, 'ا')
     .replace(/ى/g, 'ي')
-    .replace(/ـ/g, '')
+    .replace(/ة/g, 'ه')
     .replace(/^(محافظة|محافظه|مركز|مدينة|مدينه|قسم|حي)\s+/u, '') // admin prefix
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-/* All 27 Egyptian governorates → Bosta's EXACT expected names.
-   Keys are written naturally; they're normalised at build time so every
-   spelling variant (hamza/yaa/prefix) collapses onto the same entry.        */
-const GOVERNORATE_MAP_RAW = {
-  'القاهرة':        'Cairo',
-  'الجيزة':         'Giza',
-  'الإسكندرية':     'Alexandria',
-  'الدقهلية':       'Dakahlia',
-  'البحر الأحمر':   'Red Sea',
-  'البحيرة':        'Beheira',
-  'الفيوم':         'Fayoum',
-  'الغربية':        'Gharbia',
-  'الإسماعيلية':    'Ismailia',
-  'المنوفية':       'Menofia',
-  'المنيا':         'Minya',
-  'القليوبية':      'Qaliubia',
-  'الوادي الجديد':  'New Valley',
-  'السويس':         'Suez',
-  'أسوان':          'Aswan',
-  'أسيوط':          'Assiut',
-  'بني سويف':       'Beni Suef',
-  'بورسعيد':        'Port Said',
-  'دمياط':          'Damietta',
-  'الشرقية':        'Sharkia',
-  'جنوب سيناء':     'South Sinai',
-  'كفر الشيخ':      'Kafr Alsheikh',
-  'مطروح':          'Matrouh',
-  'مرسى مطروح':     'Matrouh',
-  'الأقصر':         'Luxor',
-  'قنا':            'Qena',
-  'شمال سيناء':     'North Sinai',
-  'سوهاج':          'Sohag',
-};
+/* ── Bosta governorate dictionary — SOURCE OF TRUTH ──────────────────────────
+   Pulled verbatim from this account's GET /api/v2/cities. `name` is the EXACT
+   string Bosta expects; `id` (_id) and `code` are sent alongside so routing is
+   immune to any spelling drift. All 27 governorates.                          */
+const BOSTA_CITIES = [
+  { name: 'Alexandria',   id: 'Jrb6X6ucjiYgMP4T7', code: 'EG-02', nameAr: 'الاسكندريه' },
+  { name: 'Assuit',       id: '7mDPAohM3ArSZmWTm', code: 'EG-17', nameAr: 'اسيوط' },
+  { name: 'Aswan',        id: 'kLvZ5JY6LJPL5chzN', code: 'EG-21', nameAr: 'اسوان' },
+  { name: 'Bani Suif',    id: 'LzbbvTzZ7D2CgE2PL', code: 'EG-16', nameAr: 'بني سويف' },
+  { name: 'Behira',       id: 'g3GchTSmCgR2JynsJ', code: 'EG-04', nameAr: 'البحيره' },
+  { name: 'Cairo',        id: 'FceDyHXwpSYYF9zGW', code: 'EG-01', nameAr: 'القاهره' },
+  { name: 'Dakahlia',     id: 'RrDhS8YYsXAwZ9Zfo', code: 'EG-05', nameAr: 'الدقهليه' },
+  { name: 'Damietta',     id: 'qoZvYcZ8Cqji4pGp5', code: 'EG-14', nameAr: 'دمياط' },
+  { name: 'El Kalioubia', id: 'yp3atroeTwnyiBNKE', code: 'EG-06', nameAr: 'القليوبيه' },
+  { name: 'Fayoum',       id: 'BW5MiNxEirB7tuz2y', code: 'EG-15', nameAr: 'الفيوم' },
+  { name: 'Gharbia',      id: 'K3RwC677J8kJytdZD', code: 'EG-07', nameAr: 'الغربيه' },
+  { name: 'Giza',         id: '0064Qb0OgcA',       code: 'EG-25', nameAr: 'الجيزه' },
+  { name: 'Ismailia',     id: 'PJqNriLtFtx2cfkKP', code: 'EG-11', nameAr: 'الاسماعيليه' },
+  { name: 'Kafr Alsheikh',id: 'ByP7rFCjL6XzF6j4S', code: 'EG-08', nameAr: 'كفر الشيخ' },
+  { name: 'Luxor',        id: 'wgYEdH2WMzxGE2Ztp', code: 'EG-22', nameAr: 'الاقصر' },
+  { name: 'Matrouh',      id: 'KBpGiRZJMIx',       code: 'EG-28', nameAr: 'مرسي مطروح' },
+  { name: 'Menya',        id: 'si6eLnKjXqTFTMBj9', code: 'EG-19', nameAr: 'المنيا' },
+  { name: 'Monufia',      id: 'ruBSjGBDX9wpRa3cc', code: 'EG-09', nameAr: 'المنوفيه' },
+  { name: 'New Valley',   id: 'w4yDVHVJWqa4HpbzA', code: 'EG-24', nameAr: 'الوادي الجديد' },
+  { name: 'North Sinai',  id: 'ZuCaDAVQlPT',       code: 'EG-27', nameAr: 'شمال سيناء' },
+  { name: 'Port Said',    id: 'skFtf6ZmKo8kBEBDK', code: 'EG-13', nameAr: 'بور سعيد' },
+  { name: 'Qena',         id: 'vfTHTes3uGjAszgtg', code: 'EG-20', nameAr: 'قنا' },
+  { name: 'Red Sea',      id: 'r5TscLCNSjR2GimxQ', code: 'EG-23', nameAr: 'البحر الاحمر' },
+  { name: 'Sharqia',      id: '6ExcoGbpYHnggP8JD', code: 'EG-10', nameAr: 'الشرقيه' },
+  { name: 'Sohag',        id: 'n3EENg2adhuR9xBZK', code: 'EG-18', nameAr: 'سوهاج' },
+  { name: 'South Sinai',  id: 'nG_c44vHQht',       code: 'EG-26', nameAr: 'جنوب سيناء' },
+  { name: 'Suez',         id: 'PickurJ5uJZ9rDTHW', code: 'EG-12', nameAr: 'السويس' },
+];
 
-/* Major cities / districts → their Bosta governorate (so a city-level value
-   still routes to the right governorate the waybill expects).               */
-const CITY_MAP_RAW = {
-  // Greater Cairo
-  'شبرا الخيمة': 'Qaliubia', 'بنها': 'Qaliubia', 'القناطر الخيرية': 'Qaliubia',
+const CAIRO = BOSTA_CITIES.find((c) => c.name === 'Cairo');
+
+/* Lookups (built once):
+     byKey      — normalised Arabic nameAr → governorate object
+     byEnglish  — lowercased English name  → governorate object               */
+const byKey     = {};
+const byEnglish = {};
+for (const c of BOSTA_CITIES) {
+  byKey[normalizeArabic(c.nameAr)] = c;
+  byEnglish[c.name.toLowerCase()]  = c;
+}
+
+/* Extra Arabic aliases the DB / EasyOrder / the manual-order dropdown may use,
+   that don't exactly equal Bosta's nameAr. Value = canonical Bosta `name`.    */
+const ALIAS_RAW = {
+  // Governorate spelling variants
+  'مطروح': 'Matrouh', 'مرسى مطروح': 'Matrouh', 'مرسي مطروح': 'Matrouh',
+  'بورسعيد': 'Port Said', 'بور سعيد': 'Port Said',
+  'القليوبية': 'El Kalioubia', 'القليوبيه': 'El Kalioubia',
+  'المنوفية': 'Monufia', 'الشرقية': 'Sharkia', 'البحيرة': 'Behira',
+  'الدقهلية': 'Dakahlia', 'الغربية': 'Gharbia', 'الإسماعيلية': 'Ismailia',
+  'الاسكندرية': 'Alexandria', 'اسكندرية': 'Alexandria',
+  'أسيوط': 'Assuit', 'اسيوط': 'Assuit', 'المنيا': 'Menya',
+  'بنى سويف': 'Bani Suif', 'كفرالشيخ': 'Kafr Alsheikh',
+  // Major cities / districts → their governorate
+  'شبرا الخيمة': 'El Kalioubia', 'بنها': 'El Kalioubia', 'العبور': 'El Kalioubia',
   'مدينة نصر': 'Cairo', 'حلوان': 'Cairo', 'المقطم': 'Cairo', 'مصر الجديدة': 'Cairo',
-  'عين شمس': 'Cairo', 'المطرية': 'Cairo', 'المعادي': 'Cairo', 'الزمالك': 'Cairo',
-  'التجمع': 'Cairo', 'التجمع الخامس': 'Cairo', 'القاهرة الجديدة': 'Cairo',
-  'العبور': 'Qaliubia', 'الشروق': 'Cairo', 'بدر': 'Cairo', '15 مايو': 'Cairo',
-  'العاشر من رمضان': 'Sharkia',
+  'عين شمس': 'Cairo', 'المعادي': 'Cairo', 'التجمع': 'Cairo', 'التجمع الخامس': 'Cairo',
+  'القاهرة الجديدة': 'Cairo', 'الشروق': 'Cairo', 'بدر': 'Cairo',
   'الهرم': 'Giza', 'فيصل': 'Giza', 'إمبابة': 'Giza', 'الدقي': 'Giza',
   'السادس من أكتوبر': 'Giza', '6 أكتوبر': 'Giza', 'أكتوبر': 'Giza', 'الشيخ زايد': 'Giza',
-  // Delta
   'المنصورة': 'Dakahlia', 'طلخا': 'Dakahlia', 'ميت غمر': 'Dakahlia',
-  'طنطا': 'Gharbia', 'المحلة الكبرى': 'Gharbia', 'المحلة': 'Gharbia', 'كفر الزيات': 'Gharbia',
-  'الزقازيق': 'Sharkia', 'أبو كبير': 'Sharkia', 'بلبيس': 'Sharkia', 'العاشر': 'Sharkia',
-  'دمنهور': 'Beheira', 'كفر الدوار': 'Beheira', 'رشيد': 'Beheira',
-  'شبين الكوم': 'Menofia', 'منوف': 'Menofia', 'السادات': 'Menofia',
-  'كفرالشيخ': 'Kafr Alsheikh', 'دسوق': 'Kafr Alsheikh',
-  // Canal
-  'الإسماعيلية': 'Ismailia',
-  // Upper Egypt
-  'الغردقة': 'Red Sea', 'سفاجا': 'Red Sea', 'مرسى علم': 'Red Sea', 'رأس غارب': 'Red Sea',
-  'شرم الشيخ': 'South Sinai', 'شرم': 'South Sinai', 'دهب': 'South Sinai',
-  'الطور': 'South Sinai', 'رأس السدر': 'South Sinai', 'طابا': 'South Sinai',
-  'العريش': 'North Sinai', 'بئر العبد': 'North Sinai',
-  'الخارجة': 'New Valley', 'الداخلة': 'New Valley',
+  'طنطا': 'Gharbia', 'المحلة الكبرى': 'Gharbia', 'المحلة': 'Gharbia',
+  'الزقازيق': 'Sharkia', 'بلبيس': 'Sharkia', 'العاشر من رمضان': 'Sharkia',
+  'دمنهور': 'Behira', 'كفر الدوار': 'Behira',
+  'شبين الكوم': 'Monufia', 'السادات': 'Monufia',
+  'دسوق': 'Kafr Alsheikh',
+  'الغردقة': 'Red Sea', 'سفاجا': 'Red Sea', 'مرسى علم': 'Red Sea',
+  'شرم الشيخ': 'South Sinai', 'دهب': 'South Sinai', 'الطور': 'South Sinai',
+  'رأس السدر': 'South Sinai', 'طابا': 'South Sinai',
+  'العريش': 'North Sinai', 'الخارجة': 'New Valley', 'الداخلة': 'New Valley',
 };
-
-/** Build a normalised lookup table from a raw {arabic: bosta} map. */
-function buildNormalizedMap(raw) {
-  const out = {};
-  for (const [k, v] of Object.entries(raw)) out[normalizeArabic(k)] = v;
-  return out;
+for (const [k, engName] of Object.entries(ALIAS_RAW)) {
+  const gov = byEnglish[engName.toLowerCase()];
+  if (gov) byKey[normalizeArabic(k)] = gov;   // alias → same governorate object
 }
-const GOVERNORATE_MAP = buildNormalizedMap(GOVERNORATE_MAP_RAW);
-const CITY_MAP        = buildNormalizedMap(CITY_MAP_RAW);
 
 /**
- * Resolve an Arabic (or already-English) city/governorate name to the exact
- * string Bosta expects. Falls back to the raw value if already English, or
- * 'Cairo' if blank.
+ * Resolve a DB city/governorate name to the Bosta governorate object
+ * { name, id, code }. Guarantees a 1-to-1 match with Bosta's dictionary so an
+ * order can never silently fall back to Cairo on the AWB.
+ *   • blank            → Cairo
+ *   • exact / alias    → matched governorate
+ *   • already-English  → matched by English name, else passthrough
+ *   • partial          → "contains" scan
+ *   • unmatched Arabic → logged; sent raw (Bosta errors loudly, not silent)
  */
-function mapToBostaCity(raw) {
-  if (!raw || !String(raw).trim()) return 'Cairo';
+function resolveBostaCity(raw) {
+  if (!raw || !String(raw).trim()) return CAIRO;
   const norm = normalizeArabic(raw);
 
-  // 1. Exact governorate, then exact city/district.
-  if (GOVERNORATE_MAP[norm]) return GOVERNORATE_MAP[norm];
-  if (CITY_MAP[norm])        return CITY_MAP[norm];
+  if (byKey[norm]) return byKey[norm];
 
-  // 2. Already English (no Arabic letters) → assume a valid Bosta slug.
-  if (!/[؀-ۿ]/.test(norm)) return raw.trim();
-
-  // 3. "Contains" fallback — a governorate keyword anywhere in the string.
-  for (const [key, val] of Object.entries(GOVERNORATE_MAP)) {
-    if (norm.includes(key)) return val;
-  }
-  for (const [key, val] of Object.entries(CITY_MAP)) {
-    if (norm.includes(key)) return val;
+  // Already English → match Bosta's English name exactly, else passthrough.
+  if (!/[؀-ۿ]/.test(norm)) {
+    const eng = byEnglish[String(raw).trim().toLowerCase()];
+    return eng || { name: String(raw).trim(), id: null, code: null };
   }
 
-  // 4. Unknown — surface it in logs; send raw so Bosta's error (not a silent
-  //    Cairo fallback) makes the mismatch visible.
-  console.warn(`⚠️  Bosta: unmapped city/governorate "${raw}" (normalised "${norm}") — sending as-is`);
-  return raw.trim();
+  // "Contains" fallback (e.g. 'كفر الشيخ - دسوق' → Kafr Alsheikh).
+  for (const key of Object.keys(byKey)) {
+    if (norm.includes(key)) return byKey[key];
+  }
+
+  console.warn(`⚠️  Bosta: unmapped city/governorate "${raw}" (normalised "${norm}") — sending raw name only`);
+  return { name: String(raw).trim(), id: null, code: null };
 }
 
-// Backward-compatible alias.
+/** Backward-compatible string resolver (returns just the Bosta name). */
+function mapToBostaCity(raw) { return resolveBostaCity(raw).name; }
 const normalizeCity = mapToBostaCity;
 
 /** Map one DB order row to a Bosta delivery payload */
 function toBosta(order, allowOpen = false) {
   const { firstName, lastName } = splitName(order.FullName);
-  const city    = normalizeCity(order.City || order.Governorate);
+  const gov     = resolveBostaCity(order.City || order.Governorate);
   const isAllowed = allowOpen === true;
 
   // Diagnostic: confirm resolved values before sending to Bosta
   console.log(
     `[toBosta] order=${order.id} | city_raw="${order.City || order.Governorate}"` +
-    ` → city_resolved="${city}" | allowOpen=${allowOpen} → isAllowed=${isAllowed}`
+    ` → city="${gov.name}" cityId="${gov.id ?? '(none)'}" code="${gov.code ?? '(none)'}"` +
+    ` | allowOpen=${allowOpen} → isAllowed=${isAllowed}`
   );
 
+  /* Send the EXACT Bosta name AND the cityId/cityCode from Bosta's own
+     dictionary, so routing is immune to any name-string drift. */
   const addressBlock = {
-    city,
+    city:     gov.name,
+    ...(gov.id   ? { cityId: gov.id }     : {}),
+    ...(gov.code ? { cityCode: gov.code } : {}),
     zone:      order.Zone     || '',
     district:  order.District || '',
     firstLine: order.Address  || '',
