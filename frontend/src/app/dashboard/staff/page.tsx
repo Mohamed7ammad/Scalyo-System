@@ -66,9 +66,10 @@ interface FormState {
   comm_no_answer:  number;
 }
 const ALL_PERMISSIONS = [
-  { key:'orders',    label:'تأكيد الطلبات',           description:'عرض وتعديل الطلبات',             alwaysOn:true },
-  { key:'analytics', label:'لوحة التحكم والتحليلات', description:'عرض الإحصاءات والتقارير' },
-  { key:'inventory', label:'إدارة المخزون',           description:'عرض المنتجات ومستويات المخزون' },
+  { key:'orders',             label:'تأكيد الطلبات',           description:'عرض وتعديل الطلبات',             alwaysOn:true },
+  { key:'analytics',          label:'لوحة التحكم والتحليلات', description:'عرض الإحصاءات والتقارير' },
+  { key:'inventory',          label:'إدارة المخزون',           description:'عرض المنتجات ومستويات المخزون' },
+  { key:'shipping_followups', label:'متابعات شركة الشحن',     description:'متابعة وتحديث حالات الشحن المتقدمة' },
 ];
 const EMPTY_FORM: FormState = {
   name:'', email:'', password:'', role:'agent', is_active:true, permissions:['orders'],

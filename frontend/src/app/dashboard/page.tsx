@@ -2326,8 +2326,8 @@ export default function DashboardPage() {
               </button>
             )}
 
-            {/* ── Bosta follow-ups button — admin only ────────────── */}
-            {isAdmin && (
+            {/* ── Bosta follow-ups button — admin OR shipping-followups permission ── */}
+            {(isAdmin || user?.permissions?.includes('shipping_followups')) && (
               <button
                 onClick={openFollowUps}
                 title="متابعة الشحنات التي تحتاج إجراء أو المرتجعات العائدة من شركة الشحن"

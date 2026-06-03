@@ -28,7 +28,7 @@ const express          = require('express');
 const axios            = require('axios');
 const pool             = require('../config/db');
 const authenticate     = require('../middleware/auth');
-const { requireAdmin } = require('../middleware/roleGuard');
+const { requireAdmin, requireAdminOrPermission } = require('../middleware/roleGuard');
 /* Shared physical-return processor + status helpers (defined in the Bosta
    webhook) so the backfill sync below uses the EXACT same logic. */
 const { applyPhysicalReturn, canonicalizeStatus, FINAL_RETURN_STATUSES } = require('./shippingWebhook');
@@ -583,7 +583,7 @@ function mapDelivery(d) {
   };
 }
 
-router.get('/follow-ups', authenticate, requireAdmin, async (req, res) => {
+router.get('/follow-ups', authenticate, requireAdminOrPermission('shipping_followups'), async (req, res) => {
   const creds = await readBostaCreds(req.user.business_id);
 
   if (!creds.bearerToken && !(creds.email && creds.password)) {
@@ -754,7 +754,7 @@ async function enrichWithLocalOrder(rows, businessId) {
 
    Body: { return_note?: string, return_shipping_fee?: number }
    ════════════════════════════════════════════════════════════════════════════ */
-router.patch('/follow-ups/:trackingNumber', authenticate, requireAdmin, async (req, res) => {
+router.patch('/follow-ups/:trackingNumber', authenticate, requireAdminOrPermission('shipping_followups'), async (req, res) => {
   const trackingNumber = String(req.params.trackingNumber || '').trim();
   if (!trackingNumber) {
     return res.status(400).json({ error: 'رقم التتبع مطلوب' });
