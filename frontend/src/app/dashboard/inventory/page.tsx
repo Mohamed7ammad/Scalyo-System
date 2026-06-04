@@ -403,7 +403,7 @@ export default function InventoryPage() {
       <div className="max-w-screen-2xl mx-auto px-6 pt-8 pb-10 space-y-6">
 
         {/* ── Page header ─────────────────────────────────────────────── */}
-        <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold text-gray-900 dark:text-white leading-tight">
               إدارة المخزون
@@ -561,7 +561,8 @@ export default function InventoryPage() {
         ) : (
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200
             dark:border-slate-800 overflow-hidden shadow-sm">
-            <div className="overflow-x-auto">
+            {/* Desktop table — lg and up */}
+            <div className="hidden lg:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 dark:bg-slate-800/50 border-b
                   border-slate-200 dark:border-slate-700
@@ -697,6 +698,88 @@ export default function InventoryPage() {
                 </tbody>
               </table>
             </div>
+
+            {/* Mobile cards — below lg. Same data + the same modal-driven
+                handlers (openEdit / setDeleteConfirm) as the desktop table. */}
+            <ul className="lg:hidden divide-y divide-slate-100 dark:divide-slate-800">
+              {filtered.map((product) => {
+                const cost   = parseN(product.cost_price);
+                const price  = parseN(product.selling_price);
+                const margin = price - cost;
+                const pct    = price > 0 ? (margin / price) * 100 : 0;
+                const isGood = pct >= 30;
+                const isFair = pct >= 15 && pct < 30;
+                const marginCls = isGood
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : isFair
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : 'text-red-600 dark:text-red-400';
+                return (
+                  <li key={product.id} className="p-4">
+                    {/* Header: avatar + name + SKU, stock badge */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <ProductAvatar name={product.name} imageUrl={product.image_url} />
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-800 dark:text-slate-200 leading-snug truncate">
+                            {product.name}
+                          </p>
+                          <span className="inline-block mt-1 font-mono text-[11px] px-1.5 py-0.5 rounded-md
+                            bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400
+                            border border-slate-200 dark:border-slate-700" dir="ltr">
+                            {product.sku}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        <StockBadge qty={product.stock_quantity} />
+                      </div>
+                    </div>
+
+                    {/* Metrics */}
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 mt-3.5">
+                      {isAdmin && (
+                        <Metric label="سعر التكلفة" value={`${fmtPrice(product.cost_price)} ج.م`} />
+                      )}
+                      {isAdmin && (
+                        <Metric label="إجمالي التكلفة" value={`${fmtPrice(cost * product.stock_quantity)} ج.م`} strong />
+                      )}
+                      <Metric label="سعر البيع" value={`${fmtPrice(product.selling_price)} ج.م`} strong />
+                      <div>
+                        <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-0.5">هامش الربح</p>
+                        <p className={`text-sm font-bold ${marginCls}`} dir="ltr">
+                          {pct.toFixed(1)}%
+                          <span className="font-normal text-xs text-slate-400 dark:text-slate-600 mr-1">
+                            ({fmtPrice(margin)} ج.م)
+                          </span>
+                        </p>
+                      </div>
+                      <Metric label="المخزون" value={`${product.stock_quantity} قطعة`} />
+                    </div>
+
+                    {/* Actions — identical handlers to the desktop table */}
+                    <div className="flex items-center gap-2 mt-4">
+                      <button
+                        onClick={() => openEdit(product)}
+                        className="flex-1 py-2 text-xs rounded-lg font-medium transition
+                          bg-indigo-50 text-indigo-700 hover:bg-indigo-100
+                          dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
+                      >
+                        تعديل
+                      </button>
+                      <button
+                        onClick={() => setDeleteConfirm(product)}
+                        className="flex-1 py-2 text-xs rounded-lg font-medium transition
+                          bg-red-50 text-red-600 hover:bg-red-100
+                          dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
+                      >
+                        حذف
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
 
             {/* Footer */}
             <div className="px-5 py-3 bg-slate-50 dark:bg-slate-800/50 border-t
@@ -1183,6 +1266,23 @@ function Th({ children }: { children: React.ReactNode }) {
     <th className="px-4 py-3 text-right font-semibold whitespace-nowrap">
       {children}
     </th>
+  );
+}
+
+/* Compact label/value pair used in the mobile product cards. Presentational only. */
+function Metric({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-0.5">{label}</p>
+      <p
+        className={`text-sm truncate ${strong
+          ? 'font-semibold text-slate-800 dark:text-slate-200'
+          : 'font-medium text-slate-600 dark:text-slate-300'}`}
+        dir="ltr"
+      >
+        {value}
+      </p>
+    </div>
   );
 }
 

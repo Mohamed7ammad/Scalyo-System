@@ -306,7 +306,8 @@ export default function OrdersTable({
               <tr>
                 {/* Select-all checkbox — admin only */}
                 {role === 'admin' && onToggleSelect && (
-                  <th className="px-4 py-3 w-10 text-right">
+                  <th className="sticky right-0 z-20 bg-gray-50 dark:bg-slate-800
+                    border-l border-gray-200 dark:border-slate-700 px-4 py-3 w-10 text-right">
                     <input
                       type="checkbox"
                       aria-label="تحديد الكل"
@@ -342,11 +343,14 @@ export default function OrdersTable({
                 return (
                   <tr
                     key={order.id}
-                    className={`hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${saving ? 'opacity-60 pointer-events-none' : ''}`}
+                    className={`group hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${saving ? 'opacity-60 pointer-events-none' : ''}`}
                   >
                     {/* Row checkbox — admin only */}
                     {role === 'admin' && onToggleSelect && (
-                      <td className="px-4 py-3 w-10" onClick={(e) => e.stopPropagation()}>
+                      <td className="sticky right-0 z-10 bg-white dark:bg-slate-900
+                        group-hover:bg-gray-50 dark:group-hover:bg-slate-800
+                        border-l border-gray-100 dark:border-slate-800
+                        px-4 py-3 w-10 transition-colors" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           aria-label={`تحديد طلب ${order.id}`}

@@ -115,13 +115,13 @@ function SummaryCard({ label, value, sub, colour, icon, onClick }: SummaryCardPr
   return (
     <div
       onClick={onClick}
-      className={`flex items-center gap-4 p-5 rounded-2xl border shadow-sm ${c.wrap}
+      className={`flex items-center gap-3 md:gap-4 p-4 md:p-6 rounded-2xl border shadow-sm ${c.wrap}
         ${onClick ? 'cursor-pointer hover:shadow-md hover:brightness-[0.97] active:scale-[0.99] transition-all duration-150 select-none' : ''}`}
     >
-      <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${c.iconWrap} ${c.iconText}`}>
+      <div className={`w-10 h-10 md:w-11 md:h-11 rounded-xl flex items-center justify-center shrink-0 ${c.iconWrap} ${c.iconText}`}>
         {icon}
       </div>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 text-right">
         <div className="flex items-center gap-1.5">
           <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5 truncate">{label}</p>
           {onClick && (
@@ -131,7 +131,7 @@ function SummaryCard({ label, value, sub, colour, icon, onClick }: SummaryCardPr
             </svg>
           )}
         </div>
-        <p className={`text-xl font-bold tabular-nums ${c.text}`}>{value}</p>
+        <p className={`text-xl md:text-2xl font-bold tabular-nums whitespace-nowrap leading-tight ${c.text}`}>{value}</p>
         {sub && <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5 leading-tight">{sub}</p>}
       </div>
     </div>
@@ -871,17 +871,17 @@ export default function TreasuryPage() {
           Live Bosta wallet balance — fetched directly from Bosta
       ════════════════════════════════════════════════════════════ */}
       <div className="mb-6">
-        <div className="relative overflow-hidden flex flex-wrap items-center gap-4 px-5 py-4 rounded-2xl
+        <div className="relative overflow-hidden flex flex-wrap items-center gap-3 md:gap-4 p-4 md:p-5 rounded-2xl
           border border-orange-200/80 dark:border-orange-700/30
           bg-gradient-to-l from-orange-50 to-amber-50 dark:from-orange-900/15 dark:to-amber-900/10 shadow-sm">
-          <div className="w-12 h-12 rounded-xl bg-orange-100 dark:bg-orange-800/40 flex items-center justify-center shrink-0">
+          <div className="w-11 h-11 md:w-12 md:h-12 rounded-xl bg-orange-100 dark:bg-orange-800/40 flex items-center justify-center shrink-0">
             <svg className="w-6 h-6 text-orange-600 dark:text-orange-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
             </svg>
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1 text-right">
+            <div className="flex flex-wrap items-center gap-2">
               <p className="text-xs font-semibold text-orange-700/80 dark:text-orange-300/80">
                 رصيد محفظة شركة الشحن (Bosta) — مباشر
               </p>
@@ -897,7 +897,7 @@ export default function TreasuryPage() {
             ) : walletError ? (
               <p className="text-sm text-red-600 dark:text-red-400 mt-1">{walletError}</p>
             ) : (
-              <p className="text-2xl font-bold tabular-nums text-orange-700 dark:text-orange-300 mt-0.5">
+              <p className="text-xl md:text-2xl font-bold tabular-nums whitespace-nowrap leading-tight text-orange-700 dark:text-orange-300 mt-0.5">
                 {wallet?.balance != null ? `${fmt(wallet.balance)} ج` : '— غير متاح —'}
               </p>
             )}
@@ -951,31 +951,31 @@ export default function TreasuryPage() {
           ════════════════════════════════════════════════════════ */}
           <div className="mb-6">
             <div
-              className={`relative overflow-hidden flex flex-wrap items-center gap-5 px-6 py-6 rounded-2xl border shadow-sm
+              className={`relative overflow-hidden flex flex-wrap items-center gap-3 md:gap-4 p-4 md:p-6 rounded-2xl border shadow-sm
                 ${summary.current_total_balance >= 0
                   ? 'border-emerald-200/80 dark:border-emerald-700/30 bg-gradient-to-l from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/10'
                   : 'border-red-200/80 dark:border-red-700/30 bg-gradient-to-l from-red-50 to-rose-50 dark:from-red-900/20 dark:to-rose-900/10'}`}
             >
               <div
-                className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0
+                className={`w-12 h-12 md:w-14 md:h-14 rounded-2xl flex items-center justify-center shrink-0
                   ${summary.current_total_balance >= 0
                     ? 'bg-emerald-100 dark:bg-emerald-800/40 text-emerald-600 dark:text-emerald-300'
                     : 'bg-red-100 dark:bg-red-800/40 text-red-600 dark:text-red-300'}`}
               >
-                <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-6 h-6 md:w-7 md:h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
                 </svg>
               </div>
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1 text-right">
                 <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
                   رصيد الشركة الفعلي
                 </p>
-                <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-1">
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-1 leading-snug">
                   النقد الحقيقي المتاح في الخزينة — الرصيد الافتتاحي + كل الإيرادات − كل المصروفات
                 </p>
                 <p
-                  className={`text-3xl sm:text-4xl font-extrabold tabular-nums
+                  className={`text-2xl md:text-4xl font-extrabold tabular-nums whitespace-nowrap leading-tight
                     ${summary.current_total_balance >= 0
                       ? 'text-emerald-700 dark:text-emerald-300'
                       : 'text-red-700 dark:text-red-300'}`}
@@ -984,9 +984,10 @@ export default function TreasuryPage() {
                 </p>
               </div>
               {summary.opening_balance > 0 && (
-                <div className="shrink-0 text-left">
+                <div className="shrink-0 w-full sm:w-auto text-right sm:text-left
+                  border-t sm:border-t-0 border-slate-200/60 dark:border-slate-700/40 pt-2 sm:pt-0">
                   <p className="text-[11px] text-slate-400 dark:text-slate-500">منها رصيد افتتاحي</p>
-                  <p className="text-base font-bold tabular-nums text-slate-600 dark:text-slate-300">
+                  <p className="text-base font-bold tabular-nums whitespace-nowrap text-slate-600 dark:text-slate-300">
                     {fmt(summary.opening_balance)} ج
                   </p>
                 </div>
@@ -1098,17 +1099,17 @@ export default function TreasuryPage() {
               ROW 3 — Cash in transit (NOT added to net balance)
           ════════════════════════════════════════════════════════ */}
           <div className="mb-8">
-            <div className="flex items-center gap-4 px-5 py-4 rounded-2xl
+            <div className="flex items-center gap-3 md:gap-4 p-4 md:p-5 rounded-2xl
               border-2 border-dashed border-slate-300 dark:border-slate-700
               bg-slate-50 dark:bg-slate-800/30">
-              <div className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-700 flex items-center justify-center shrink-0">
+              <div className="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-slate-200 dark:bg-slate-700 flex items-center justify-center shrink-0">
                 <svg className="w-5 h-5 text-slate-500 dark:text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex flex-wrap items-baseline gap-3">
+              <div className="flex-1 min-w-0 text-right">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                   <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
                     مبالغ لدى شركة الشحن قيد التحصيل
                   </p>
@@ -1117,7 +1118,7 @@ export default function TreasuryPage() {
                     لا تُضاف للرصيد
                   </span>
                 </div>
-                <p className="text-2xl font-bold tabular-nums text-slate-600 dark:text-slate-300 mt-0.5">
+                <p className="text-xl md:text-2xl font-bold tabular-nums whitespace-nowrap leading-tight text-slate-600 dark:text-slate-300 mt-0.5">
                   {fmt(summary.pending_bosta_cash)} ج
                 </p>
                 <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">

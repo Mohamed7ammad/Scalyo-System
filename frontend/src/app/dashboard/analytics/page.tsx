@@ -728,14 +728,14 @@ export default function AnalyticsDashboard() {
 
   return (
     <div dir="rtl" className="min-h-full">
-      <div className="max-w-screen-2xl mx-auto px-6 pt-8 pb-12 space-y-6">
+      <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8 pb-12 space-y-6">
 
         {/* ── White-label branding banner (hidden gracefully if no profile) ── */}
         {businessProfile && (businessProfile.brand_name || businessProfile.logo_url) && (
           <div className="flex items-center gap-4 rounded-2xl border border-slate-200 dark:border-slate-800
             bg-gradient-to-l from-white via-white to-indigo-50/40
             dark:from-slate-900 dark:via-slate-900 dark:to-indigo-900/10
-            px-6 py-5 shadow-sm">
+            px-4 sm:px-6 py-4 sm:py-5 shadow-sm">
             {businessProfile.logo_url ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
@@ -901,7 +901,7 @@ export default function AnalyticsDashboard() {
         {/* Row 1: The Money (4 cards) */}
         <div className="space-y-3">
           <SectionLabel>الأرقام المالية الرئيسية</SectionLabel>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KPICard
               label="إجمالي الطلبات"
               value={loadingDash ? '...' : fmt(totalOrders)}
@@ -944,7 +944,7 @@ export default function AnalyticsDashboard() {
         {extStats?.enabled && (
           <div className="space-y-3">
             <SectionLabel>أرباح منصات الأفليت الخارجية</SectionLabel>
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {extStats.taager.connected && (
                 <KPICard
                   label="أرباح منصة تاجر"
@@ -977,7 +977,7 @@ export default function AnalyticsDashboard() {
         {/* Row 2: Operations & Rates */}
         <div className="space-y-3">
           <SectionLabel>العمليات والمعدلات</SectionLabel>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KPICard
               label="الطلبات المؤكدة"
               value={loadingDash ? '...' : fmt(totalConfirmed)}
@@ -1014,7 +1014,7 @@ export default function AnalyticsDashboard() {
         {/* Row 3: Costs & Averages — 6 cards */}
         <div className="space-y-3">
           <SectionLabel>التكاليف والمتوسطات</SectionLabel>
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
             <KPICard
               label="تكلفة الطلب (CPP/CPA)"
               value={loadingDash ? '...' : fmtEGP(parseFloat(cpp.toFixed(2)))}
@@ -1085,7 +1085,7 @@ export default function AnalyticsDashboard() {
 
             {/* Winner */}
             <div className="rounded-2xl border border-emerald-200 dark:border-emerald-800/40
-              bg-gradient-to-br from-emerald-50 to-white dark:from-emerald-950/30 dark:to-slate-900 p-5">
+              bg-gradient-to-br from-emerald-50 to-white dark:from-emerald-950/30 dark:to-slate-900 p-5 sm:p-6">
               <div className="flex items-start gap-3 mb-4">
                 <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/60
                   flex items-center justify-center shrink-0 mt-0.5">
@@ -1150,7 +1150,7 @@ export default function AnalyticsDashboard() {
 
             {/* Loser */}
             <div className="rounded-2xl border border-red-200 dark:border-red-800/40
-              bg-gradient-to-br from-red-50 to-white dark:from-red-950/30 dark:to-slate-900 p-5">
+              bg-gradient-to-br from-red-50 to-white dark:from-red-950/30 dark:to-slate-900 p-5 sm:p-6">
               <div className="flex items-start gap-3 mb-4">
                 <div className="w-10 h-10 rounded-xl bg-red-100 dark:bg-red-900/60
                   flex items-center justify-center shrink-0 mt-0.5">
@@ -1222,13 +1222,13 @@ export default function AnalyticsDashboard() {
             SECTION 4 — Daily Chart
             ══════════════════════════════════════════════════════════ */}
         <div className="space-y-3">
-          <div className="flex items-center justify-between gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
             <SectionLabel>التحليل اليومي — {chartPeriodLabel}</SectionLabel>
             <ChartToggle view={chartView} onToggle={setChartView} />
           </div>
 
           <div className="bg-white dark:bg-slate-900 rounded-2xl border
-            border-slate-200 dark:border-slate-800 p-6 shadow-sm">
+            border-slate-200 dark:border-slate-800 p-4 sm:p-6 shadow-sm">
 
             <div className="flex flex-wrap items-center gap-5 mb-5">
               {activeSeries.map((s) => (
@@ -1580,7 +1580,7 @@ export default function AnalyticsDashboard() {
           <SectionLabel>تحليل أسباب رفض وتأجيل الطلبات</SectionLabel>
 
           <div className="bg-white dark:bg-slate-800/50 dark:backdrop-blur rounded-2xl border
-            border-slate-200 dark:border-slate-700 p-6 shadow-sm">
+            border-slate-200 dark:border-slate-700 p-4 sm:p-6 shadow-sm">
 
             <div className="flex items-start justify-between gap-4 mb-6">
               <div>

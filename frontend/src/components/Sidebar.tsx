@@ -181,12 +181,22 @@ const NAV_ITEMS: NavItem[] = [
 
 /* ── Sidebar ───────────────────────────────────────────────────── */
 interface SidebarProps {
-  collapsed:  boolean;
-  onToggle:   () => void;
-  brandName?: string;
+  collapsed:   boolean;
+  onToggle:    () => void;
+  brandName?:  string;
+  /** Mobile-only: whether the off-canvas drawer is open (< lg). */
+  mobileOpen?: boolean;
+  /** Mobile-only: called when a nav link is tapped or the drawer is dismissed. */
+  onNavigate?: () => void;
 }
 
-export default function Sidebar({ collapsed, onToggle, brandName = 'Product Pulse' }: SidebarProps) {
+export default function Sidebar({
+  collapsed,
+  onToggle,
+  brandName = 'Product Pulse',
+  mobileOpen = false,
+  onNavigate,
+}: SidebarProps) {
   const pathname = usePathname();
   const router   = useRouter();
   const [user,   setUser]   = useState<{ email: string; role: string; permissions?: string[]; plan_type?: string } | null>(null);
@@ -236,12 +246,17 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
   return (
     <aside
       className={`
-        relative flex flex-col h-screen
+        flex flex-col h-screen shrink-0
         bg-white dark:bg-gray-900
         border-l border-slate-200 dark:border-gray-700/60
         shadow-[-2px_0_12px_rgba(0,0,0,0.06)] dark:shadow-[-2px_0_16px_rgba(0,0,0,0.25)]
-        transition-all duration-300 ease-in-out shrink-0
-        ${collapsed ? 'w-[72px]' : 'w-64'}
+        transition-all duration-300 ease-in-out
+        /* ── Mobile: fixed off-canvas drawer sliding from the right (RTL) ── */
+        fixed top-0 right-0 z-50 w-72 max-w-[85vw]
+        ${mobileOpen ? 'translate-x-0' : 'translate-x-full'}
+        /* ── Desktop (lg+): in-flow, collapsible, always visible ── */
+        lg:relative lg:z-auto lg:translate-x-0 lg:max-w-none
+        ${collapsed ? 'lg:w-[72px]' : 'lg:w-64'}
       `}
     >
       {/* ── Brand header ─────────────────────────────────────── */}
@@ -261,6 +276,19 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
             <p className="text-slate-500 dark:text-gray-500 text-xs truncate">لوحة الإدارة</p>
           </div>
         )}
+        {/* Mobile-only close button — dismisses the drawer */}
+        <button
+          onClick={onNavigate}
+          aria-label="إغلاق القائمة"
+          className="lg:hidden ml-auto p-2 rounded-xl text-slate-500 dark:text-gray-400
+            hover:text-slate-900 hover:bg-slate-100 dark:hover:text-white dark:hover:bg-gray-800
+            transition-all duration-200 shrink-0
+            focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       {/* ── Toggle button — sits on the LEFT edge (facing content) ── */}
@@ -269,7 +297,7 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
         className="absolute -left-3.5 top-[68px] z-10 w-7 h-7
           bg-white dark:bg-gray-800
           border border-slate-300 dark:border-gray-600
-          rounded-full flex items-center justify-center
+          rounded-full hidden lg:flex items-center justify-center
           text-slate-500 dark:text-gray-400
           hover:text-white hover:bg-indigo-600 hover:border-indigo-500 transition-all duration-150
           shadow-md shadow-black/10 dark:shadow-black/40"
@@ -318,6 +346,7 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
                   <Link
                     href={item.href}
                     title={collapsed ? item.label : undefined}
+                    onClick={onNavigate}
                     className={`
                       group/item flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-150
                       ${collapsed ? 'justify-center' : ''}
@@ -346,6 +375,7 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
                             <Link
                               key={child.href}
                               href={child.href}
+                              onClick={onNavigate}
                               className={`
                                 flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-all duration-150
                                 ${childActive
