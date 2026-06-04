@@ -161,7 +161,19 @@ function parseBostaPayload(body) {
     ? Math.max(0, parseFloat(rawCod))
     : null;
 
-  return { trackingNumber, statusStr, stateCode, webhookCod, isReturn };
+  /* Actual delivery timestamp Bosta reports (ISO). Used to stamp delivered_at
+     so analytics can date deliveries precisely. Null when not present. */
+  const rawDeliveryTime =
+    root?.state?.deliveryTime ??
+    root?.deliveryTime        ??
+    root?.deliveredAt         ??
+    root?.state?.delivering?.time ??
+    null;
+  const deliveredAt = rawDeliveryTime && !isNaN(new Date(rawDeliveryTime).getTime())
+    ? new Date(rawDeliveryTime).toISOString()
+    : null;
+
+  return { trackingNumber, statusStr, stateCode, webhookCod, isReturn, deliveredAt };
 }
 
 /**
@@ -261,6 +273,15 @@ async function applyPhysicalReturn(order) {
 
 /* ── Idempotent schema migrations ─────────────────────────────────────────
    All run at startup; safe to repeat on every deploy.                      */
+
+/* ── delivered_at — the TRUE delivery timestamp (from Bosta state.deliveryTime,
+   fallback NOW() at the moment the delivered event is processed). Lets analytics
+   filter delivered orders by WHEN they were delivered, not when the order was
+   placed ("createdAt"). Nullable; set only on the delivered transition.      */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`)
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS orders_delivered_at_idx ON orders (delivered_at)`))
+  .then(() => console.log('✅  Orders: delivered_at column + index ready'))
+  .catch((err) => console.warn('⚠️   delivered_at migration skipped:', err.message));
 
 /* ── product_returns table ─────────────────────────────────────────────── */
 pool.query(`
@@ -393,7 +414,7 @@ router.post('/bosta', async (req, res) => {
   try {
     console.log('[Bosta Webhook] Raw payload:', JSON.stringify(req.body, null, 2));
 
-    const { trackingNumber, statusStr, stateCode, webhookCod, isReturn } = parseBostaPayload(req.body);
+    const { trackingNumber, statusStr, stateCode, webhookCod, isReturn, deliveredAt } = parseBostaPayload(req.body);
 
     if (!trackingNumber) {
       console.warn('[Bosta Webhook] Missing trackingNumber — skipping');
@@ -526,6 +547,14 @@ router.post('/bosta', async (req, res) => {
          1. specs.cod from the Bosta webhook payload  (actual collected)
          2. Calculated from order: ProductPrice − depositAmount  (fallback)  */
     if (canonical === 'delivered') {
+      /* Stamp the true delivery timestamp (idempotent — only when not yet set),
+         so analytics can date this delivery by when it actually happened.     */
+      await pool.query(
+        `UPDATE orders SET delivered_at = COALESCE($1::timestamptz, NOW())
+         WHERE id = $2 AND business_id = $3 AND delivered_at IS NULL`,
+        [deliveredAt, order.id, businessId]
+      );
+
       const codAmount = webhookCod !== null
         ? webhookCod
         : calcOrderCod(order);
