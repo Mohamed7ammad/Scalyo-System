@@ -165,11 +165,30 @@ function parseBostaPayload(body) {
 }
 
 /**
- * Bosta numeric delivery-state codes that mean the parcel has been returned to
- * the merchant/origin (physical return → triggers restock). 45 & 46 are the
- * canonical "Returned to business" / "Delivered to sender" codes.
+ * Bosta numeric state code for a SUCCESSFUL delivery to the consignee.
+ * Code 45 = "Delivered" — a terminal SUCCESS state, NOT a return. Used as a
+ * locale-independent positive signal so a delivery is recognised even when the
+ * status string is missing or localised in Arabic.
  */
-const RETURN_STATE_CODES = new Set([45, 46, 47]);
+const DELIVERED_STATE_CODES = new Set([45]);
+
+/**
+ * Bosta numeric state codes that mean the parcel was PHYSICALLY returned to the
+ * merchant/origin (RTO complete → triggers restock). Code 46 = "Returned to
+ * business".
+ *
+ * IMPORTANT — codes deliberately EXCLUDED:
+ *   • 45  → "Delivered" (success). It was previously (incorrectly) listed here,
+ *           which force-reclassified every delivered parcel as a return — the
+ *           order never reached 'تم التوصيل', so revenue and the delivered count
+ *           read 0 on the dashboard. THIS was the analytics-breaking bug.
+ *   • 47  → "Returning to merchant" but still IN TRANSIT (the dashboard exposes
+ *           it as the in-flight '47:R' returning leg, never in the received-back
+ *           tab). Forcing 'returned' here would restock + finalise a parcel that
+ *           has not physically arrived. The status string maps it correctly to
+ *           'returning_to_merchant' (جاري الإعادة, no stock change).
+ */
+const RETURN_STATE_CODES = new Set([46]);
 
 /**
  * Calculate the net COD amount from the order's own DB fields.
@@ -388,9 +407,27 @@ router.post('/bosta', async (req, res) => {
     /* Normalise the raw Bosta string to a canonical key. */
     let canonical = canonicalizeStatus(statusStr);
 
-    /* Numeric state code takes precedence for returns: codes 45/46 ("Returned
-       to business" / "Delivered to sender") are unambiguous even when the
-       localised string is missing or worded differently. */
+    /* Positive delivery signal: Bosta code 45 = "Delivered". Numeric codes are
+       locale-independent, so this rescues deliveries whose status string is
+       missing or arrives in Arabic. Applied ONLY when the string hasn't already
+       resolved to a return state, so a genuine RTO parcel is never mislabelled
+       as delivered (the isReturn guard below is the final backstop). */
+    if (
+      DELIVERED_STATE_CODES.has(stateCode) &&
+      canonical !== 'returned' &&
+      canonical !== 'returning_to_merchant' &&
+      canonical !== 'delivered_to_merchant'
+    ) {
+      if (canonical !== 'delivered') {
+        console.log(`[Bosta Webhook] state code ${stateCode} → forcing canonical "delivered"`);
+      }
+      canonical = 'delivered';
+    }
+
+    /* Numeric state code takes precedence for PHYSICAL returns: code 46
+       ("Returned to business") is unambiguous even when the localised string is
+       missing or worded differently. 45 (Delivered) and 47 (returning, still in
+       transit) are intentionally NOT in this set — see RETURN_STATE_CODES. */
     if (RETURN_STATE_CODES.has(stateCode)) {
       if (canonical !== 'returned') {
         console.log(`[Bosta Webhook] state code ${stateCode} → forcing canonical "returned"`);
