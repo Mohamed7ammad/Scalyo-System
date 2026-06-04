@@ -770,11 +770,11 @@ router.get('/dashboard', authenticate, async (req, res) => {
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN (
         'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
       ))                                                                              AS total_confirmed,
-      COUNT(id) FILTER (WHERE ${DR} AND "Status" = 'تم التوصيل')                     AS total_delivered,
+      COUNT(id) FILTER (WHERE ${CR} AND "Status" = 'تم التوصيل')                     AS total_delivered,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" = 'تم الرفض')                       AS total_rejected,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جاري الإعادة','تم الإرجاع'))   AS total_returned,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جديد','لا يرد'))              AS total_pending,
-      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${DR} THEN ${P} ELSE 0 END), 0) AS total_revenue
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${CR} THEN ${P} ELSE 0 END), 0) AS total_revenue
     FROM orders
     WHERE 1=1${ordFilter}
   `;
@@ -816,29 +816,23 @@ router.get('/dashboard', authenticate, async (req, res) => {
      Without it the pg driver may return a JavaScript Date object (midnight UTC),
      and serialising that with toISOString() in certain server timezones produces
      the previous calendar day — causing the chart to shift one day to the left.  */
-  /* Placement series — orders + confirmed by createdAt day (range-bounded). */
+  /* Cohort daily series — orders, confirmed, delivered AND revenue ALL grouped
+     by the order's createdAt day. Delivered/revenue are attributed back to the
+     day the order was PLACED (cohort view), so an order created Monday but
+     delivered Thursday lifts MONDAY's delivered + revenue. This is what makes
+     per-day NDR / True CPA / ROAS meaningful for ad performance.               */
   const dailyCreatedSql = `
     SELECT
       TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD') AS stat_date,
       COUNT(id)                                                        AS orders,
       COUNT(id) FILTER (WHERE "Status" IN (
         'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
-      ))                                                               AS confirmed
-    FROM orders
-    WHERE 1=1${ordFilter} AND ${CR}
-    GROUP BY TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
-    ORDER BY stat_date ASC
-  `;
-
-  /* Delivery series — delivered + revenue by ACTUAL delivery day (delivered_at). */
-  const dailyDeliveredSql = `
-    SELECT
-      TO_CHAR((delivered_at + INTERVAL '3 hours')::date, 'YYYY-MM-DD') AS stat_date,
+      ))                                                               AS confirmed,
       COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل')               AS delivered,
       COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0) AS revenue
     FROM orders
-    WHERE 1=1${ordFilter} AND ${DR}
-    GROUP BY TO_CHAR((delivered_at + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
+    WHERE 1=1${ordFilter} AND ${CR}
+    GROUP BY TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
     ORDER BY stat_date ASC
   `;
 
@@ -898,7 +892,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
      broken query (e.g. a missing column) returns an empty result set instead
      of crashing the entire payload.  The exact failure is logged to the
      backend terminal so you can identify which query went wrong.           */
-  const [ovRes, exRes, dayRes, dayDelRes, dayExpRes, govRes, rejRes] = await Promise.all([
+  const [ovRes, exRes, dayRes, dayExpRes, govRes, rejRes] = await Promise.all([
     pool.query(overviewSql, ordParams).catch(err => {
       console.error('[dashboard/overview]   QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [{ total_orders: 0, total_confirmed: 0, total_delivered: 0,
@@ -910,11 +904,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       return { rows: [{ total_expenses: 0, meta_spend: 0, meta_total_orders: 0 }] };
     }),
     pool.query(dailyCreatedSql, ordParams).catch(err => {
-      console.error('[dashboard/daily-created] QUERY FAILED:', err.message, err.detail ?? '');
-      return { rows: [] };
-    }),
-    pool.query(dailyDeliveredSql, ordParams).catch(err => {
-      console.error('[dashboard/daily-delivered] QUERY FAILED:', err.message, err.detail ?? '');
+      console.error('[dashboard/daily]      QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [] };
     }),
     pool.query(dailyExpSql, expParams).catch(err => {
@@ -979,7 +969,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
       });
     }
 
-    /* Placement series (orders/confirmed), keyed by createdAt day. */
+    /* Cohort series — orders, confirmed, delivered AND revenue, all keyed by the
+       order's createdAt day (delivered/revenue attributed to the placement day). */
     const erpByDate = new Map();
     for (const row of dayRes.rows) {
       const key = row.stat_date instanceof Date
@@ -988,40 +979,29 @@ router.get('/dashboard', authenticate, async (req, res) => {
       erpByDate.set(key, {
         erp_orders: parseInt(row.orders,    10) || 0,
         confirmed:  parseInt(row.confirmed, 10) || 0,
+        delivered:  parseInt(row.delivered, 10) || 0,
+        revenue:    parseFloat(row.revenue)     || 0,
       });
     }
 
-    /* Delivery series (delivered/revenue), keyed by ACTUAL delivery day (delivered_at). */
-    const deliveredByDate = new Map();
-    for (const row of dayDelRes.rows) {
-      const key = row.stat_date instanceof Date
-        ? row.stat_date.toISOString().split('T')[0]
-        : String(row.stat_date);
-      deliveredByDate.set(key, {
-        delivered: parseInt(row.delivered, 10) || 0,
-        revenue:   parseFloat(row.revenue)     || 0,
-      });
-    }
-
-    /* Union of all dates from Meta expenses, ERP placement, AND delivery days. */
+    /* Union of all dates from Meta expenses AND ERP (createdAt) cohorts. */
     const allDates = Array.from(new Set([
-      ...expByDate.keys(), ...erpByDate.keys(), ...deliveredByDate.keys(),
+      ...expByDate.keys(), ...erpByDate.keys(),
     ])).sort();
     const daily_chart_stats = allDates.map((dateKey) => {
       /* IMPORTANT: when a date exists only in ERP (no Meta expense row), the
          default object supplies meta_orders = 0, NOT erp_orders.  This is
          intentional — we never substitute ERP orders for Meta orders, so the
          "Total Orders" line on the chart stays strictly Meta-sourced.          */
-      const exp = expByDate.get(dateKey)       ?? { ads_spend: 0, meta_orders: 0 };
-      const erp = erpByDate.get(dateKey)       ?? { erp_orders: 0, confirmed: 0 };
-      const del = deliveredByDate.get(dateKey) ?? { delivered: 0, revenue: 0 };
+      const exp = expByDate.get(dateKey) ?? { ads_spend: 0, meta_orders: 0 };
+      const erp = erpByDate.get(dateKey) ?? { erp_orders: 0, confirmed: 0, delivered: 0, revenue: 0 };
       return {
         date:       dateKey,
         orders:     exp.meta_orders,    // ← strictly Meta purchases; NEVER falls back to erp_orders
         erp_orders: erp.erp_orders,     // ← ERP count kept separately for pixel-efficiency only
         confirmed:  erp.confirmed,
-        delivered:  del.delivered,      // ← keyed by delivered_at (true delivery day)
-        revenue:    parseFloat(del.revenue.toFixed(2)),
+        delivered:  erp.delivered,      // ← cohort: delivered orders attributed to their createdAt day
+        revenue:    parseFloat(erp.revenue.toFixed(2)),
         ads_spend:  parseFloat(exp.ads_spend.toFixed(2)),
       };
     });
