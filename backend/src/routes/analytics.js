@@ -462,7 +462,20 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         ))                                                                  AS total_confirmed,
         COALESCE(SUM(
           CASE WHEN o."Status" = 'تم التوصيل' THEN ${PRICE_O} ELSE 0 END
-        ), 0)                                                               AS delivered_revenue
+        ), 0)                                                               AS delivered_revenue,
+        /* COGS — historically accurate + unit-based:
+             Σ over the product's DELIVERED orders of
+               COALESCE(o.unit_cost_price, p.cost_price) × COALESCE(o.quantity, 1)
+           • unit_cost_price = the WAC SNAPSHOTTED on the order at confirmation —
+             the true cost at sale time; falls back to the product's live cost_price
+             only when the snapshot is missing (older orders).
+           • × quantity so multi-unit orders cost the full units delivered, not 1. */
+        COALESCE(SUM(
+          CASE WHEN o."Status" = 'تم التوصيل'
+            THEN COALESCE(o."unit_cost_price"::numeric, p.cost_price::numeric, 0)
+                 * COALESCE(o."quantity", 1)
+            ELSE 0 END
+        ), 0)                                                               AS cogs
       FROM   products p
       JOIN   orders   o ON (
         o.business_id = ${bizIdx}::integer
@@ -504,6 +517,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       COALESCE(os.units_shipped,        0)     AS units_shipped,
       COALESCE(os.total_confirmed,      0)     AS erp_order_count,
       COALESCE(os.delivered_revenue,    0)     AS delivered_revenue,
+      COALESCE(os.cogs,                 0)     AS cogs,
       COALESCE(es.attributed_spend,     0)     AS attributed_ad_spend,
       COALESCE(es.meta_orders_total,    0)     AS meta_orders_total
     FROM   products p
@@ -550,7 +564,10 @@ router.get('/products-profitability', authenticate, async (req, res) => {
          If the expense row has no SKU match the value is 0 (LEFT JOIN → NULL →
          COALESCE 0); that is a data attribution issue, not a code bug.          */
       const metaOrders  = parseInt(r.meta_orders_total, 10) || 0;
-      const cogs        = parseFloat((costPrice * unitsDelivered).toFixed(2));
+      /* COGS now comes straight from SQL: Σ(snapshot unit cost × delivered qty).
+         No longer cost_price × delivered-order-count (which ignored quantity and
+         the historical snapshot). costPrice above is kept only for display. */
+      const cogs        = parseFloat((parseFloat(r.cogs) || 0).toFixed(2));
       const netProfit   = parseFloat((deliveredRevenue - cogs - attributedSpend).toFixed(2));
       const cpa         = metaOrders > 0
         ? parseFloat((attributedSpend / metaOrders).toFixed(2))
