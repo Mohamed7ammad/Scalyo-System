@@ -445,10 +445,13 @@ export interface AgentAnalytics {
   earned_commission: string | number;
 }
 
-function buildAnalyticsQS(startDate?: string, endDate?: string) {
+function buildAnalyticsQS(startDate?: string, endDate?: string, product?: string) {
   const qs = new URLSearchParams();
   if (startDate) qs.set('startDate', startDate);
   if (endDate)   qs.set('endDate',   endDate);
+  /* Product filter — the dropdown's selected product NAME. 'كل المنتجات' / empty
+     means "all", so we omit it (backend treats absence as no filter). */
+  if (product && product !== 'كل المنتجات') qs.set('product', product);
   const q = qs.toString();
   return q ? `?${q}` : '';
 }
@@ -571,8 +574,8 @@ export interface DashboardStats {
  * — all strictly filtered by the given date range.
  * Admin only.
  */
-export const getDashboardStats = (startDate?: string, endDate?: string) =>
-  api.get<DashboardStats>(`/api/analytics/dashboard${buildAnalyticsQS(startDate, endDate)}`);
+export const getDashboardStats = (startDate?: string, endDate?: string, product?: string) =>
+  api.get<DashboardStats>(`/api/analytics/dashboard${buildAnalyticsQS(startDate, endDate, product)}`);
 
 /* ── Product Profitability ───────────────────────────────────────── */
 export interface ProductProfitability {
@@ -611,9 +614,40 @@ export interface ProductProfitability {
  * Fetch per-product profitability metrics for the given date range.
  * Matches orders and ad spend via product SKU.  Admin only.
  */
-export const getProductsProfitability = (startDate?: string, endDate?: string) =>
+export const getProductsProfitability = (startDate?: string, endDate?: string, product?: string) =>
   api.get<ProductProfitability[]>(
-    `/api/analytics/products-profitability${buildAnalyticsQS(startDate, endDate)}`
+    `/api/analytics/products-profitability${buildAnalyticsQS(startDate, endDate, product)}`
+  );
+
+/* ── Delivered Orders (detailed list, grouped by delivery day) ──────────── */
+export interface DeliveredOrderRow {
+  id:           number;
+  name:         string;
+  phone:        string;
+  product:      string;
+  /** Egypt-local delivery datetime, 'YYYY-MM-DD HH:MM'. */
+  delivered_at: string;
+  /** Order value (ProductPrice) in EGP. */
+  value:        number;
+}
+export interface DeliveredDay {
+  date:        string;   // YYYY-MM-DD (Egypt-local delivery day)
+  count:       number;
+  day_revenue: number;
+  orders:      DeliveredOrderRow[];
+}
+export interface DeliveredOrdersResponse {
+  total: number;
+  days:  DeliveredDay[];
+}
+
+/**
+ * Fetch the detailed list of DELIVERED orders, grouped by actual delivery day
+ * (delivered_at), optionally scoped to a product. Admin + Media Buyer.
+ */
+export const getDeliveredOrders = (startDate?: string, endDate?: string, product?: string) =>
+  api.get<DeliveredOrdersResponse>(
+    `/api/analytics/delivered-orders${buildAnalyticsQS(startDate, endDate, product)}`
   );
 
 /**

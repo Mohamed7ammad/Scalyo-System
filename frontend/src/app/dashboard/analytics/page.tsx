@@ -16,7 +16,8 @@ import {
   Cell,
 } from 'recharts';
 
-import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile } from '@/lib/api';
+import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders } from '@/lib/api';
+import type { DeliveredOrdersResponse } from '@/lib/api';
 import type {
   Product,
   DashboardStats,
@@ -405,6 +406,11 @@ export default function AnalyticsDashboard() {
   const [loadingProfitability, setLoadingProfitability] = useState(false);
   const [businessProfile,      setBusinessProfile]      = useState<BusinessProfile | null>(null);
 
+  /* ── Delivered Orders detailed list (collapsible, lazy-loaded) ──────────── */
+  const [deliveredOpen,    setDeliveredOpen]    = useState(false);
+  const [deliveredData,    setDeliveredData]    = useState<DeliveredOrdersResponse | null>(null);
+  const [deliveredLoading, setDeliveredLoading] = useState(false);
+
   /* ── White-label branding (business name + logo) ────────────────── */
   useEffect(() => {
     let alive = true;
@@ -454,11 +460,11 @@ export default function AnalyticsDashboard() {
     } catch { /* non-admin gets 403 — swallow silently */ }
   }, []);
 
-  const fetchDashStats = useCallback(async (sd?: string, ed?: string) => {
+  const fetchDashStats = useCallback(async (sd?: string, ed?: string, prod?: string) => {
     setLoadingDash(true);
     setErrorDash(null);
     try {
-      const res = await getDashboardStats(sd, ed);
+      const res = await getDashboardStats(sd, ed, prod);
       setDashStats(res.data);
     } catch (err: unknown) {
       setDashStats(null);
@@ -474,10 +480,10 @@ export default function AnalyticsDashboard() {
     }
   }, []);
 
-  const fetchProfitability = useCallback(async (sd?: string, ed?: string) => {
+  const fetchProfitability = useCallback(async (sd?: string, ed?: string, prod?: string) => {
     setLoadingProfitability(true);
     try {
-      const res = await getProductsProfitability(sd, ed);
+      const res = await getProductsProfitability(sd, ed, prod);
       setProfitability(res.data);
     } catch {
       setProfitability([]);
@@ -489,12 +495,25 @@ export default function AnalyticsDashboard() {
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
   useEffect(() => {
-    fetchDashStats(effectiveDates.startDate, effectiveDates.endDate);
-  }, [effectiveDates, fetchDashStats]);
+    fetchDashStats(effectiveDates.startDate, effectiveDates.endDate, product);
+  }, [effectiveDates, product, fetchDashStats]);
 
   useEffect(() => {
-    fetchProfitability(effectiveDates.startDate, effectiveDates.endDate);
-  }, [effectiveDates, fetchProfitability]);
+    fetchProfitability(effectiveDates.startDate, effectiveDates.endDate, product);
+  }, [effectiveDates, product, fetchProfitability]);
+
+  /* Delivered-orders list: lazy-loaded only while the section is expanded;
+     refetches on date-range or product change so it always matches the filters. */
+  useEffect(() => {
+    if (!deliveredOpen) return;
+    let alive = true;
+    setDeliveredLoading(true);
+    getDeliveredOrders(effectiveDates.startDate, effectiveDates.endDate, product)
+      .then((res) => { if (alive) setDeliveredData(res.data); })
+      .catch(() => { if (alive) setDeliveredData({ total: 0, days: [] }); })
+      .finally(() => { if (alive) setDeliveredLoading(false); });
+    return () => { alive = false; };
+  }, [deliveredOpen, effectiveDates, product]);
 
   /* ── Date picker handlers ─────────────────────────────────────── */
   const handleFromDate = (v: string) => { setFromDate(v); setActiveRange(''); };
@@ -1073,6 +1092,89 @@ export default function AnalyticsDashboard() {
               accent="text-indigo-600 dark:text-indigo-400"
             />
           </div>
+        </div>
+
+        {/* ══════════════════════════════════════════════════════════
+            SECTION 2.5 — Delivered Orders (detailed, per delivery day)
+            Lazy-loaded; respects the active date + product filters. Dated by
+            the TRUE delivery day (delivered_at), not order-creation date.
+            ══════════════════════════════════════════════════════════ */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-4 flex-wrap gap-y-2">
+            <SectionLabel>الطلبات المُسلَّمة — تفصيلي</SectionLabel>
+            <button
+              onClick={() => setDeliveredOpen((o) => !o)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg shrink-0
+                bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100
+                dark:bg-teal-900/20 dark:text-teal-400 dark:border-teal-800/50 transition"
+            >
+              {deliveredOpen ? 'إخفاء القائمة' : 'عرض قائمة المُسلَّم'}
+              <svg className={`w-3.5 h-3.5 transition-transform duration-200 ${deliveredOpen ? 'rotate-180' : ''}`}
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+          </div>
+
+          {deliveredOpen && (
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+              {deliveredLoading ? (
+                <div className="flex items-center justify-center py-16 gap-3 text-slate-400 text-sm">
+                  <div className="w-6 h-6 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />
+                  جارٍ تحميل الطلبات المُسلَّمة...
+                </div>
+              ) : !deliveredData || deliveredData.days.length === 0 ? (
+                <div className="py-14 text-center text-sm text-slate-400 dark:text-slate-600">
+                  لا توجد طلبات مُسلَّمة في الفترة المحددة
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  <div className="px-5 py-3 bg-slate-50 dark:bg-slate-800/50 flex items-center justify-between gap-3 flex-wrap">
+                    <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      إجمالي المُسلَّم: {deliveredData.total} طلب
+                    </span>
+                    <span className="text-[11px] text-slate-400 dark:text-slate-500">
+                      مؤرَّخة بتاريخ التسليم الفعلي · تعكس فلاتر التاريخ والمنتج
+                    </span>
+                  </div>
+                  {deliveredData.days.map((day) => (
+                    <div key={day.date}>
+                      <div className="px-5 py-2.5 bg-slate-50/60 dark:bg-slate-800/30 flex items-center justify-between gap-3">
+                        <span className="text-xs font-bold text-slate-700 dark:text-slate-200 whitespace-nowrap">
+                          {fmtDateArabic(day.date)}
+                        </span>
+                        <span className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                          {day.count} طلب · <span className="font-semibold text-emerald-600 dark:text-emerald-400">{fmtEGP(day.day_revenue)}</span>
+                        </span>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-slate-100 dark:border-slate-800 text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                              {['العميل', 'الهاتف', 'المنتج', 'وقت التسليم', 'القيمة'].map((h) => (
+                                <th key={h} className="px-4 py-2 text-right font-semibold whitespace-nowrap">{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {day.orders.map((o) => (
+                              <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                                <td className="px-4 py-2.5 font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">{o.name}</td>
+                                <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400 whitespace-nowrap" dir="ltr">{o.phone}</td>
+                                <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400 max-w-[220px] truncate" title={o.product}>{o.product}</td>
+                                <td className="px-4 py-2.5 text-slate-500 dark:text-slate-500 whitespace-nowrap" dir="ltr">{o.delivered_at}</td>
+                                <td className="px-4 py-2.5 font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtEGP(o.value)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ══════════════════════════════════════════════════════════

@@ -613,22 +613,45 @@ router.get('/dashboard', authenticate, async (req, res) => {
 
   console.log(`[DASHBOARD DEBUG] role=${role} user=${req.user?.id} range:`, startDate, endDate);
 
-  /* ── Order timestamp boundaries (Egypt TZ) ─────────────────────────────── */
-  /* NOTE: We filter on "createdAt" (when the order was placed), NOT "updatedAt".
-     "updatedAt" is auto-stamped by a trigger on every status change, so an order
-     created 30 days ago but confirmed today would appear in today's bucket when
-     filtered by "updatedAt" — collapsing the entire history into a single day.   */
+  /* ── Date range (Egypt TZ) ──────────────────────────────────────────────
+     The date bounds are pushed ONCE as params and then referenced by PER-METRIC
+     predicates, because different metrics key off different dates:
+       • placement metrics (orders/confirmed/rejected/pending/returned) → "createdAt"
+       • DELIVERED count + REVENUE                                       → delivered_at
+     This fixes the bug where "Today/Yesterday" showed 0 delivered/revenue: an
+     order placed last week but DELIVERED today now counts under today.        */
   const ordParams = [req.user.business_id];   // $1 = tenant
-  let ordFilter   = ` AND business_id = $1::integer`;
+  let startIdx = null, endIdx = null;
   if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-    const offset = getEgyptOffset(startDate);
-    ordParams.push(`${startDate}T00:00:00${offset}`);
-    ordFilter += ` AND "createdAt" >= $${ordParams.length}::timestamptz`;
+    ordParams.push(`${startDate}T00:00:00${getEgyptOffset(startDate)}`); startIdx = ordParams.length;
   }
   if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
-    const offset = getEgyptOffset(endDate);
-    ordParams.push(`${endDate}T23:59:59${offset}`);
-    ordFilter += ` AND "createdAt" <= $${ordParams.length}::timestamptz`;
+    ordParams.push(`${endDate}T23:59:59${getEgyptOffset(endDate)}`); endIdx = ordParams.length;
+  }
+  /* Range predicate for a timestamp column → 'TRUE' when no bounds set. */
+  const rangePred = (col) => {
+    const parts = [];
+    if (startIdx) parts.push(`${col} >= $${startIdx}::timestamptz`);
+    if (endIdx)   parts.push(`${col} <= $${endIdx}::timestamptz`);
+    return parts.length ? `(${parts.join(' AND ')})` : 'TRUE';
+  };
+  const CR = rangePred('"createdAt"');                                   // placement-date predicate
+  const DR = `(delivered_at IS NOT NULL AND ${rangePred('delivered_at')})`; // delivery-date predicate
+
+  /* ── Scope filter (tenant + role + product) — NO date; dates are per-metric. */
+  let ordFilter = ` AND business_id = $1::integer`;
+
+  /* Product filter (admin dropdown): resolve the selected product NAME → its SKU
+     so we can match by SKU (preferred) with a ProductName fallback for legacy
+     orders. Applied to every orders query below. 'كل المنتجات'/'' = no filter. */
+  const productSel = typeof req.query.product === 'string' ? req.query.product.trim() : '';
+  const hasProduct = productSel && productSel !== 'كل المنتجات';
+  let prodSku = null;
+  if (hasProduct) {
+    const pr = await pool.query(
+      `SELECT sku FROM products WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) AND business_id = $2::integer LIMIT 1`,
+      [productSel, req.user.business_id]);
+    prodSku = pr.rows[0]?.sku ? String(pr.rows[0].sku).toUpperCase() : null;
   }
 
   /* ── Expense date boundaries — plain string params ($1 / $2) ────────────────
@@ -720,10 +743,22 @@ router.get('/dashboard', authenticate, async (req, res) => {
     }
   }
 
+  /* Product filter clause (admin dropdown) — composes (AND) with any role scope. */
+  if (hasProduct) {
+    ordParams.push(prodSku ?? '');  const pSkuIdx  = ordParams.length;
+    ordParams.push(productSel);     const pNameIdx = ordParams.length;
+    ordFilter += ` AND ( ($${pSkuIdx} <> '' AND UPPER(COALESCE(sku,'')) = $${pSkuIdx})
+                         OR (UPPER(COALESCE("ProductName",'')) = UPPER($${pNameIdx})) )`;
+  }
+
   /* Expense scope param is ALWAYS $3 (null for admin → no-op via IS NULL OR). */
   expParams.push(expAccountIds);
   /* TENANT ISOLATION: business_id is ALWAYS $4 for both expense queries. */
   expParams.push(req.user.business_id);
+  /* Product filter for ad-spend ($5): the selected product's SKU, so meta_spend
+     + Meta order count also reflect the dropdown. NULL when "all" (or the product
+     has no SKU to attribute spend to) → IS NULL OR leaves spend unfiltered. */
+  expParams.push(hasProduct && prodSku ? prodSku : null);
 
   /* Inline ProductPrice parser (same as other endpoints) */
   const P = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
@@ -731,15 +766,15 @@ router.get('/dashboard', authenticate, async (req, res) => {
   /* ── 1. Overview: order counts + delivered revenue ── */
   const overviewSql = `
     SELECT
-      COUNT(id)                                                                       AS total_orders,
-      COUNT(id) FILTER (WHERE "Status" IN (
+      COUNT(id) FILTER (WHERE ${CR})                                                  AS total_orders,
+      COUNT(id) FILTER (WHERE ${CR} AND "Status" IN (
         'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
       ))                                                                              AS total_confirmed,
-      COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل')                              AS total_delivered,
-      COUNT(id) FILTER (WHERE "Status" = 'تم الرفض')                                AS total_rejected,
-      COUNT(id) FILTER (WHERE "Status" IN ('جاري الإعادة','تم الإرجاع'))            AS total_returned,
-      COUNT(id) FILTER (WHERE "Status" IN ('جديد','لا يرد'))                       AS total_pending,
-      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0)       AS total_revenue
+      COUNT(id) FILTER (WHERE ${DR} AND "Status" = 'تم التوصيل')                     AS total_delivered,
+      COUNT(id) FILTER (WHERE ${CR} AND "Status" = 'تم الرفض')                       AS total_rejected,
+      COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جاري الإعادة','تم الإرجاع'))   AS total_returned,
+      COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جديد','لا يرد'))              AS total_pending,
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${DR} THEN ${P} ELSE 0 END), 0) AS total_revenue
     FROM orders
     WHERE 1=1${ordFilter}
   `;
@@ -766,6 +801,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       AND ($1::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') >= $1)
       AND ($2::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') <= $2)
       AND ($3::int[] IS NULL OR meta_account_id = ANY($3))
+      AND ($5::text IS NULL OR UPPER(sku) = $5)
   `;
 
   /* ── 3. Daily orders grouped by Egypt-local creation date ── */
@@ -780,18 +816,29 @@ router.get('/dashboard', authenticate, async (req, res) => {
      Without it the pg driver may return a JavaScript Date object (midnight UTC),
      and serialising that with toISOString() in certain server timezones produces
      the previous calendar day — causing the chart to shift one day to the left.  */
-  const dailySql = `
+  /* Placement series — orders + confirmed by createdAt day (range-bounded). */
+  const dailyCreatedSql = `
     SELECT
       TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD') AS stat_date,
       COUNT(id)                                                        AS orders,
       COUNT(id) FILTER (WHERE "Status" IN (
         'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
-      ))                                                               AS confirmed,
+      ))                                                               AS confirmed
+    FROM orders
+    WHERE 1=1${ordFilter} AND ${CR}
+    GROUP BY TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
+    ORDER BY stat_date ASC
+  `;
+
+  /* Delivery series — delivered + revenue by ACTUAL delivery day (delivered_at). */
+  const dailyDeliveredSql = `
+    SELECT
+      TO_CHAR((delivered_at + INTERVAL '3 hours')::date, 'YYYY-MM-DD') AS stat_date,
       COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل')               AS delivered,
       COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0) AS revenue
     FROM orders
-    WHERE 1=1${ordFilter}
-    GROUP BY TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
+    WHERE 1=1${ordFilter} AND ${DR}
+    GROUP BY TO_CHAR((delivered_at + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
     ORDER BY stat_date ASC
   `;
 
@@ -812,6 +859,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       AND ($1::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') >= $1)
       AND ($2::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') <= $2)
       AND ($3::int[] IS NULL OR meta_account_id = ANY($3))
+      AND ($5::text IS NULL OR UPPER(sku) = $5)
     GROUP BY TO_CHAR(expense_date, 'YYYY-MM-DD')
     ORDER BY stat_date ASC
   `;
@@ -828,7 +876,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       COUNT(*) FILTER (WHERE "Status" IN ('جاري الإعادة','تم الإرجاع'))           AS returned,
       COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0)     AS revenue
     FROM orders
-    WHERE 1=1${ordFilter}
+    WHERE 1=1${ordFilter} AND ${CR}
     GROUP BY COALESCE(NULLIF(TRIM("City"),''), 'غير محدد')
     ORDER BY delivered DESC, total_orders DESC
     LIMIT 50
@@ -840,7 +888,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       COALESCE(NULLIF(TRIM("rejectionReason"),''), 'غير محدد')   AS reason,
       COUNT(*)                                                      AS count
     FROM orders
-    WHERE "Status" = 'تم الرفض'${ordFilter}
+    WHERE "Status" = 'تم الرفض'${ordFilter} AND ${CR}
     GROUP BY COALESCE(NULLIF(TRIM("rejectionReason"),''), 'غير محدد')
     ORDER BY count DESC
     LIMIT 10
@@ -850,7 +898,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
      broken query (e.g. a missing column) returns an empty result set instead
      of crashing the entire payload.  The exact failure is logged to the
      backend terminal so you can identify which query went wrong.           */
-  const [ovRes, exRes, dayRes, dayExpRes, govRes, rejRes] = await Promise.all([
+  const [ovRes, exRes, dayRes, dayDelRes, dayExpRes, govRes, rejRes] = await Promise.all([
     pool.query(overviewSql, ordParams).catch(err => {
       console.error('[dashboard/overview]   QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [{ total_orders: 0, total_confirmed: 0, total_delivered: 0,
@@ -861,8 +909,12 @@ router.get('/dashboard', authenticate, async (req, res) => {
       console.error('[dashboard/expenses]   QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [{ total_expenses: 0, meta_spend: 0, meta_total_orders: 0 }] };
     }),
-    pool.query(dailySql, ordParams).catch(err => {
-      console.error('[dashboard/daily]      QUERY FAILED:', err.message, err.detail ?? '');
+    pool.query(dailyCreatedSql, ordParams).catch(err => {
+      console.error('[dashboard/daily-created] QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [] };
+    }),
+    pool.query(dailyDeliveredSql, ordParams).catch(err => {
+      console.error('[dashboard/daily-delivered] QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [] };
     }),
     pool.query(dailyExpSql, expParams).catch(err => {
@@ -927,6 +979,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       });
     }
 
+    /* Placement series (orders/confirmed), keyed by createdAt day. */
     const erpByDate = new Map();
     for (const row of dayRes.rows) {
       const key = row.stat_date instanceof Date
@@ -935,27 +988,40 @@ router.get('/dashboard', authenticate, async (req, res) => {
       erpByDate.set(key, {
         erp_orders: parseInt(row.orders,    10) || 0,
         confirmed:  parseInt(row.confirmed, 10) || 0,
-        delivered:  parseInt(row.delivered, 10) || 0,
-        revenue:    parseFloat(row.revenue)     || 0,
       });
     }
 
-    /* Union of all dates from Meta expenses AND ERP orders, sorted ascending */
-    const allDates = Array.from(new Set([...expByDate.keys(), ...erpByDate.keys()])).sort();
+    /* Delivery series (delivered/revenue), keyed by ACTUAL delivery day (delivered_at). */
+    const deliveredByDate = new Map();
+    for (const row of dayDelRes.rows) {
+      const key = row.stat_date instanceof Date
+        ? row.stat_date.toISOString().split('T')[0]
+        : String(row.stat_date);
+      deliveredByDate.set(key, {
+        delivered: parseInt(row.delivered, 10) || 0,
+        revenue:   parseFloat(row.revenue)     || 0,
+      });
+    }
+
+    /* Union of all dates from Meta expenses, ERP placement, AND delivery days. */
+    const allDates = Array.from(new Set([
+      ...expByDate.keys(), ...erpByDate.keys(), ...deliveredByDate.keys(),
+    ])).sort();
     const daily_chart_stats = allDates.map((dateKey) => {
       /* IMPORTANT: when a date exists only in ERP (no Meta expense row), the
          default object supplies meta_orders = 0, NOT erp_orders.  This is
          intentional — we never substitute ERP orders for Meta orders, so the
          "Total Orders" line on the chart stays strictly Meta-sourced.          */
-      const exp = expByDate.get(dateKey) ?? { ads_spend: 0, meta_orders: 0 };
-      const erp = erpByDate.get(dateKey) ?? { erp_orders: 0, confirmed: 0, delivered: 0, revenue: 0 };
+      const exp = expByDate.get(dateKey)       ?? { ads_spend: 0, meta_orders: 0 };
+      const erp = erpByDate.get(dateKey)       ?? { erp_orders: 0, confirmed: 0 };
+      const del = deliveredByDate.get(dateKey) ?? { delivered: 0, revenue: 0 };
       return {
         date:       dateKey,
         orders:     exp.meta_orders,    // ← strictly Meta purchases; NEVER falls back to erp_orders
         erp_orders: erp.erp_orders,     // ← ERP count kept separately for pixel-efficiency only
         confirmed:  erp.confirmed,
-        delivered:  erp.delivered,
-        revenue:    parseFloat(erp.revenue.toFixed(2)),
+        delivered:  del.delivered,      // ← keyed by delivered_at (true delivery day)
+        revenue:    parseFloat(del.revenue.toFixed(2)),
         ads_spend:  parseFloat(exp.ads_spend.toFixed(2)),
       };
     });
@@ -991,6 +1057,86 @@ router.get('/dashboard', authenticate, async (req, res) => {
       error:   'Failed to fetch dashboard data',
       details: error.message,
     });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GET /api/analytics/delivered-orders  — Admin + Media Buyer
+   ─────────────────────────────────────────────────────────────────────────
+   Detailed list of DELIVERED orders, filtered by the TRUE delivery date
+   (delivered_at) + optional product, grouped by Egypt-local day (newest first).
+   Each row: customer name, phone, product, delivery datetime, order value.
+   ══════════════════════════════════════════════════════════════════════════ */
+router.get('/delivered-orders', authenticate, async (req, res) => {
+  const role = req.user?.role;
+  if (role !== 'admin' && role !== 'media_buyer') {
+    return res.status(403).json({ error: 'غير مصرح لك بعرض هذه البيانات' });
+  }
+
+  const { startDate, endDate } = req.query;
+  const params = [req.user.business_id];
+  let where = ` AND business_id = $1::integer`;
+  if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+    params.push(`${startDate}T00:00:00${getEgyptOffset(startDate)}`);
+    where += ` AND delivered_at >= $${params.length}::timestamptz`;
+  }
+  if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    params.push(`${endDate}T23:59:59${getEgyptOffset(endDate)}`);
+    where += ` AND delivered_at <= $${params.length}::timestamptz`;
+  }
+
+  /* Optional product filter (name → sku, ProductName fallback). */
+  const productSel = typeof req.query.product === 'string' ? req.query.product.trim() : '';
+  if (productSel && productSel !== 'كل المنتجات') {
+    const pr = await pool.query(
+      `SELECT sku FROM products WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) AND business_id = $2::integer LIMIT 1`,
+      [productSel, req.user.business_id]);
+    const sku = pr.rows[0]?.sku ? String(pr.rows[0].sku).toUpperCase() : '';
+    params.push(sku);        const ps = params.length;
+    params.push(productSel); const pn = params.length;
+    where += ` AND ( ($${ps} <> '' AND UPPER(COALESCE(sku,'')) = $${ps})
+                     OR (UPPER(COALESCE("ProductName",'')) = UPPER($${pn})) )`;
+  }
+
+  const P = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
+
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        id,
+        "FullName"     AS name,
+        "Phone"        AS phone,
+        "ProductName"  AS product,
+        TO_CHAR((delivered_at + INTERVAL '3 hours')::date, 'YYYY-MM-DD')      AS day,
+        TO_CHAR(delivered_at + INTERVAL '3 hours', 'YYYY-MM-DD HH24:MI')      AS delivered_at,
+        ${P}::float                                                          AS value
+      FROM orders
+      WHERE "Status" = 'تم التوصيل' AND delivered_at IS NOT NULL${where}
+      ORDER BY delivered_at DESC
+      LIMIT 2000
+    `, params);
+
+    /* Group by Egypt-local day, newest first. */
+    const map = new Map();
+    for (const r of rows) {
+      if (!map.has(r.day)) map.set(r.day, { date: r.day, count: 0, day_revenue: 0, orders: [] });
+      const g = map.get(r.day);
+      const v = parseFloat(r.value) || 0;
+      g.count += 1;
+      g.day_revenue += v;
+      g.orders.push({
+        id: r.id, name: r.name || '—', phone: r.phone || '—',
+        product: r.product || '—', delivered_at: r.delivered_at, value: parseFloat(v.toFixed(2)),
+      });
+    }
+    const days = [...map.values()]
+      .map((d) => ({ ...d, day_revenue: parseFloat(d.day_revenue.toFixed(2)) }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    res.json({ total: rows.length, days });
+  } catch (err) {
+    console.error('[delivered-orders] Error:', err.message, err.detail ?? '');
+    res.status(500).json({ error: 'خطأ في الخادم', details: err.message });
   }
 });
 
