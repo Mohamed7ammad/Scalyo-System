@@ -21,6 +21,7 @@ export interface Order {
   Address: string;
   Status: string;
   Note: string | null;
+  ShippingNotes?: string | null;   // courier note — printed on the Bosta AWB
   createdAt: string;
   ProductName?: string;
   ProductPrice?: string;
@@ -278,6 +279,24 @@ export interface ManualReturnResult {
 export const postManualReturn = (data: ManualReturnPayload) =>
   api.post<ManualReturnResult>('/api/returns/manual', data);
 
+/* ── Bosta returns sync (backfill physically-returned orders) ─────── */
+export interface SyncReturnsResult {
+  message:      string;
+  mode:         'explicit' | 'auto' | 'date';
+  date:         string | null;
+  scanned:      number;
+  matchedLocal: number;
+  processed:    number;   // orders newly status→returned + logged
+  restocked:    number;   // of those, how many incremented product stock
+  notFound:     string[]; // Bosta tracking numbers with no local order
+  details:      unknown[];
+}
+
+/** Sync physically-returned Bosta orders. Pass { date:'YYYY-MM-DD' } to sync one
+    day, { trackingNumbers:[…] } for specific ones, or {} for a full sweep. Admin only. */
+export const syncBostaReturns = (payload: { date?: string; trackingNumbers?: string[] } = {}) =>
+  api.post<SyncReturnsResult>('/api/bosta/sync-returns', payload);
+
 /* ── Purchase Batches (Supply / WAC) ─────────────────────────────── */
 export interface PurchasePayload {
   productId:    string;    // products.id (UUID)
@@ -313,6 +332,8 @@ export interface StaffMember {
   comm_delivered:  number;       // bonus per delivered order
   comm_rejected:   number;       // payout per rejected order
   comm_no_answer:  number;       // payout per no-answer / postponed order
+  distribution_percentage?: number;  // saved auto-distribution weight (%)
+  last_active_at?: string | null;    // presence heartbeat timestamp (ISO)
   created_at:      string;
 }
 
@@ -360,6 +381,19 @@ export const updateStaff = (id: number, data: UpdateStaffPayload) =>
 
 export const toggleAttendance = (id: number, isAbsent: boolean) =>
   api.post<ToggleAttendanceResult>(`/api/staff/${id}/toggle-attendance`, { isAbsent });
+
+/** Presence heartbeat — stamps the current user's last_active_at = NOW().
+    Pinged on an interval while logged in. Any role. */
+export const sendHeartbeat = () =>
+  api.post<{ ok: boolean; at: string }>('/api/staff/heartbeat');
+
+/** Persist per-agent auto-distribution weights (%). Drives weighted round-robin
+    assignment of incoming EasyOrder webhook orders. Admin only. */
+export const saveDistributionConfig = (allocations: DistributionAllocation[]) =>
+  api.post<{ message: string; agents: StaffMember[] }>(
+    '/api/staff/distribution',
+    { allocations },
+  );
 
 /** Delete a staff member. Admin only. Server protects self + founding admin. */
 export const deleteStaff = (id: number) =>

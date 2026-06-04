@@ -87,6 +87,15 @@ const STATUS_ALIASES = {
   'delivered to merchant':        'delivered_to_merchant',
   'delivered to business':        'delivered_to_merchant',
   'package received at warehouse':'returned',
+  'returned to origin':           'returned',
+  'returned to sender':           'returned',
+  // ── Arabic state names (Bosta nameAr) — used by the backfill sync ──
+  'تم الاسترجاع':                 'returned',   // ← Bosta "Unsuccessful → Returned"
+  'تم الإرجاع':                   'returned',
+  'تم الارجاع':                   'returned',
+  'مرتجع':                        'returned',
+  'مرتجع للتاجر':                 'returned',
+  'تم الاسترداد':                 'returned',
 };
 
 function canonicalizeStatus(statusStr) {
@@ -173,6 +182,62 @@ function calcOrderCod(order) {
   const price   = parseFloat(String(order.ProductPrice || '0').replace(/[^\d.]/g, '')) || 0;
   const deposit = Math.max(0, parseFloat(order.depositAmount) || 0);
   return parseFloat(Math.max(0, price - deposit).toFixed(2));
+}
+
+/* ── Shared physical-return processor ─────────────────────────────────────────
+   The SINGLE source of truth for applying a PHYSICAL return — used by BOTH the
+   live Bosta webhook and the backfill sync (routes/bosta.js). Idempotent:
+     1. Status → 'تم الإرجاع'  (idempotent UPDATE)
+     2. Stock replenished by `quantity` — SKU-first, name fallback
+     3. Logged ONCE in product_returns (order_id partial-unique → no double-count)
+
+   `order` must carry: id, ProductName, sku, quantity, business_id.
+   Returns { statusUpdated, alreadyLogged, restocked, qty }. Throws only on a
+   genuine DB error (caller decides how to surface it).                        */
+async function applyPhysicalReturn(order) {
+  const businessId  = order.business_id ?? null;
+  const productName = (order.ProductName || '').trim();
+  const orderSku    = order.sku ? String(order.sku).trim() : null;
+  const orderQty    = Math.max(1, parseInt(order.quantity, 10) || 1);
+
+  // 1. Status → returned (idempotent).
+  await pool.query(
+    `UPDATE orders SET "Status" = 'تم الإرجاع', "updatedAt" = NOW()
+      WHERE id = $1 AND business_id = $2`,
+    [order.id, businessId]
+  );
+
+  // 2. Idempotency gate — already logged as a physical return?
+  const dup = await pool.query(
+    'SELECT 1 FROM product_returns WHERE order_id = $1 AND business_id = $2 LIMIT 1',
+    [order.id, businessId]
+  );
+  if (dup.rowCount > 0) {
+    return { statusUpdated: true, alreadyLogged: true, restocked: false, qty: orderQty };
+  }
+
+  // 3. Stock replenishment (SKU-first, name fallback).
+  let restocked = false;
+  if (productName || orderSku) {
+    const hasSku   = Boolean(orderSku);
+    const stockSql = hasSku
+      ? `UPDATE products SET stock_quantity = stock_quantity + $2
+          WHERE sku = $1 AND business_id = $3 RETURNING name, stock_quantity`
+      : `UPDATE products SET stock_quantity = stock_quantity + $2
+          WHERE TRIM(name) = TRIM($1) AND business_id = $3 RETURNING name, stock_quantity`;
+    const r = await pool.query(stockSql, [hasSku ? orderSku : productName, orderQty, businessId]);
+    restocked = r.rowCount > 0;
+  }
+
+  // 4. Log the return (one row per order; guaranteed order_id partial index).
+  await pool.query(
+    `INSERT INTO product_returns (product_name, sku, order_id, return_date, quantity, business_id)
+     VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
+     ON CONFLICT (order_id) WHERE order_id IS NOT NULL DO NOTHING`,
+    [productName, orderSku, order.id, orderQty, businessId]
+  );
+
+  return { statusUpdated: true, alreadyLogged: false, restocked, qty: orderQty };
 }
 
 /* ── Idempotent schema migrations ─────────────────────────────────────────
@@ -455,95 +520,18 @@ router.post('/bosta', async (req, res) => {
       return;
     }
 
-    if (!productName) {
-      console.warn(
-        `[Bosta Webhook] ⚠️  Order #${order.id} has no ProductName` +
-        ` — cannot identify product for stock replenishment. Return skipped.`
-      );
-      return;
-    }
-
-    /* ── Step 4a: Idempotency gate ────────────────────────────────────────
-       Has this exact order already been logged as a physical return?
-       Handles Bosta webhook retries: the 200 is already sent, but this
-       guard prevents a double stock increment on any re-delivery.         */
-    const dupCheck = await pool.query(
-      'SELECT 1 FROM product_returns WHERE order_id = $1 AND business_id = $2 LIMIT 1',
-      [order.id, businessId]
-    );
-    if (dupCheck.rowCount > 0) {
-      console.warn(
-        `[Bosta Webhook] ⚠️  Duplicate event: return for order #${order.id}` +
-        ` already logged — skipping stock update and returns log.`
-      );
-      return;
-    }
-
-    console.log(
-      `[Bosta Webhook] ✅ Physical return confirmed for order #${order.id}.` +
-      ` Processing stock replenishment...`
-    );
-
-    /* ── Step 4b: SKU-first stock replenishment ────────────────────────────
-       If the order carries a SKU we match exactly on products.sku.
-       For legacy orders with no SKU we fall back to a trimmed name match —
-       same dual-dispatch pattern used by orders.js.                        */
-    const hasSku    = Boolean(orderSku);
-    const stockSql  = hasSku
-      ? `UPDATE products
-         SET    stock_quantity = stock_quantity + $2
-         WHERE  sku = $1 AND business_id = $3
-         RETURNING name, sku, stock_quantity`
-      : `UPDATE products
-         SET    stock_quantity = stock_quantity + $2
-         WHERE  TRIM(name) = TRIM($1) AND business_id = $3
-         RETURNING name, sku, stock_quantity`;
-    const stockParam = hasSku ? orderSku : productName;
-
-    console.log(
-      `[Bosta Webhook] Replenishing stock +${orderQty}` +
-      ` (match by ${hasSku ? `SKU "${orderSku}"` : `name "${productName}"`})`
-    );
-
-    const stockResult = await pool.query(stockSql, [stockParam, orderQty, businessId]);
-
-    if (stockResult.rowCount === 0) {
-      console.warn(
-        `⚠️  Inventory Update Failed: no product matched` +
-        ` (${hasSku ? `SKU: "${orderSku}"` : `name: "${productName}"`}).` +
-        ` Return will still be logged.`
-      );
+    /* ── Step 4: process the physical return through the SHARED, idempotent
+       processor — the EXACT same path the backfill sync uses (status →
+       تم الإرجاع, stock +qty, log once). */
+    const result = await applyPhysicalReturn(order);
+    if (result.alreadyLogged) {
+      console.warn(`[Bosta Webhook] ⚠️  Return for order #${order.id} already logged — skipped (idempotent).`);
     } else {
-      const p = stockResult.rows[0];
       console.log(
-        `✅  Stock replenished: "${p.name}" +${orderQty}` +
-        ` (SKU: ${p.sku ?? 'none'}) → stock now ${p.stock_quantity}`
+        `✅  [Bosta Webhook] Physical return processed for order #${order.id}: ` +
+        `status→تم الإرجاع | ${result.restocked ? `stock +${result.qty}` : 'no product matched (logged anyway)'} | logged.`
       );
     }
-
-    /* ── Step 4c: Log the return in product_returns ───────────────────────
-       The (product_name, return_date) unique constraint is kept for backward
-       compatibility with the manual returns route (returns.js).
-       Two returns of the same product on the same day correctly aggregate.
-
-       sku      — pulled directly from the order, no JOIN required
-       order_id — used by the idempotency check (Step 4a) and the partial
-                  unique index that prevents exact duplicate rows           */
-    const today = new Date().toISOString().slice(0, 10);
-
-    await pool.query(
-      `INSERT INTO product_returns (product_name, sku, order_id, return_date, quantity, business_id)
-       VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
-       ON CONFLICT (product_name, return_date, business_id) DO UPDATE SET
-         quantity = product_returns.quantity + $4,
-         sku      = COALESCE(EXCLUDED.sku, product_returns.sku)`,
-      [productName, orderSku, order.id, orderQty, businessId]
-    );
-
-    console.log(
-      `✅  product_returns logged: "${productName}" x${orderQty}` +
-      ` (SKU: ${orderSku ?? 'none'}, order #${order.id}) on ${today}`
-    );
 
   } catch (err) {
     /* Post-response catch — never calls res.status() again.
@@ -552,5 +540,11 @@ router.post('/bosta', async (req, res) => {
     console.error('[Bosta Webhook] Unhandled error:', err.message, err.stack);
   }
 });
+
+/* Shared exports for the backfill sync (routes/bosta.js) — so missed returns
+   are processed through the EXACT same logic as the live webhook. */
+router.applyPhysicalReturn   = applyPhysicalReturn;
+router.canonicalizeStatus    = canonicalizeStatus;
+router.FINAL_RETURN_STATUSES = FINAL_RETURN_STATUSES;
 
 module.exports = router;

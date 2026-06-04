@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   getOrders, updateOrder, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
-  getStaff, distributeOrders, transferOrders, bulkDeleteOrders, getBulkAwb,
+  getStaff, distributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
@@ -14,6 +14,11 @@ import {
 import OrdersTable from '@/components/OrdersTable';
 
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
+
+/* Every status that means the order successfully PASSED confirmation — used for
+   a cumulative confirmation rate so the % doesn't collapse as orders move on to
+   shipped/delivered. Mirrors the backend analytics `status_confirmed` set. */
+const PASSED_CONFIRMATION = ['تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
 
 /* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
 const EGYPT_GOVERNORATES = [
@@ -101,6 +106,7 @@ export default function DashboardPage() {
   /* ── Staff / routing state ───────────────────────────────────── */
   const [staff,         setStaff]         = useState<StaffMember[]>([]);
   const [distributing,  setDistributing]  = useState(false);
+  const [savingDist,    setSavingDist]    = useState(false);
   /* Distribution modal */
   const [showDistModal, setShowDistModal] = useState(false);
   const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
@@ -320,6 +326,28 @@ export default function DashboardPage() {
       showToast(msg, 'error');
     } finally {
       setDistributing(false);
+    }
+  };
+
+  /* ── Save custom percentages for AUTO-distribution (EasyOrder webhook) ──
+     Persists the weights so new incoming orders are auto-assigned by them. */
+  const handleSaveDistribution = async () => {
+    setSavingDist(true);
+    try {
+      const allocations: DistributionAllocation[] = activeAgentsForDist.map((a) => ({
+        agentId:    a.id,
+        percentage: Number(distPercents[a.id] ?? 0) || 0,
+      }));
+      await saveDistributionConfig(allocations);
+      showToast('تم حفظ نسب التوزيع التلقائي ✓', 'success');
+      await fetchStaff();   // refresh saved percentages
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل حفظ النسب';
+      showToast(msg, 'error');
+    } finally {
+      setSavingDist(false);
     }
   };
 
@@ -578,17 +606,27 @@ export default function DashboardPage() {
     (s, a) => s + (Number(distPercents[a.id] ?? 0) || 0), 0
   );
 
-  /* Open the distribution modal — seed an equal split as a sensible default. */
+  /* Open the distribution modal. If saved auto-distribution percentages exist,
+     seed from them (so the admin sees/edits the persisted split); otherwise seed
+     an equal split as a sensible default. */
   const openDistModal = () => {
-    setDistMode('equal');
-    const n = activeAgentsForDist.length;
+    const hasSaved = activeAgentsForDist.some((a) => Number(a.distribution_percentage ?? 0) > 0);
     const seed: Record<number, string> = {};
-    if (n > 0) {
-      const base = Math.floor(100 / n);
-      let rem = 100 - base * n;
+    if (hasSaved) {
       activeAgentsForDist.forEach((a) => {
-        seed[a.id] = String(base + (rem-- > 0 ? 1 : 0));
+        seed[a.id] = String(Number(a.distribution_percentage ?? 0) || 0);
       });
+      setDistMode('custom');
+    } else {
+      setDistMode('equal');
+      const n = activeAgentsForDist.length;
+      if (n > 0) {
+        const base = Math.floor(100 / n);
+        let rem = 100 - base * n;
+        activeAgentsForDist.forEach((a) => {
+          seed[a.id] = String(base + (rem-- > 0 ? 1 : 0));
+        });
+      }
     }
     setDistPercents(seed);
     setShowDistModal(true);
@@ -737,6 +775,11 @@ export default function DashboardPage() {
     postponed: dateScoped.filter((o) => normStatus(o.Status) === 'مؤجل').length,
     noAnswer:  dateScoped.filter((o) => normStatus(o.Status) === 'لا يرد').length,
     shipped:   dateScoped.filter((o) => normStatus(o.Status) === 'تم الشحن').length,
+    /* Cumulative: every order that ever passed confirmation (confirmed + shipped
+       + delivered + returning/returned). This is the numerator for the
+       confirmation rate so it reflects daily performance, not the shrinking
+       count of orders still sitting in 'تم التأكيد'. */
+    confirmedCumulative: dateScoped.filter((o) => PASSED_CONFIRMATION.includes(normStatus(o.Status))).length,
   };
   const pct = (n: number) =>
     stats.total ? Math.round((n / stats.total) * 100) : 0;
@@ -1254,6 +1297,23 @@ export default function DashboardPage() {
                         : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800/50'}`}>
                       <span>إجمالي النسب</span>
                       <span>{distSum}% {distSum === 100 ? '✓' : `(يجب أن يساوي 100%)`}</span>
+                    </div>
+
+                    {/* Save for auto-distribution (EasyOrder webhook) */}
+                    <div className="mt-3 rounded-xl border border-indigo-100 dark:border-indigo-900/40
+                      bg-indigo-50/50 dark:bg-indigo-950/20 px-3 py-3">
+                      <p className="text-xs text-indigo-700/90 dark:text-indigo-300/80 leading-relaxed mb-2">
+                        احفظ هذه النسب ليتم توزيع الطلبات الواردة من إيزي أوردر تلقائياً عليها (Weighted Round-Robin).
+                      </p>
+                      <button
+                        onClick={handleSaveDistribution}
+                        disabled={savingDist || activeAgentsForDist.length === 0}
+                        className="w-full inline-flex items-center justify-center gap-2 py-2 px-4 rounded-lg
+                          text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white
+                          disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-[0.98]"
+                      >
+                        {savingDist ? 'جارٍ الحفظ…' : '💾 حفظ نسب التوزيع التلقائي'}
+                      </button>
                     </div>
                   </div>
                 )}
@@ -2031,14 +2091,14 @@ export default function DashboardPage() {
             valueColor="text-blue-600 dark:text-blue-400"
             active={activeFilter === 'جديد'}
             onClick={() => setActiveFilter('جديد')} />
-          <StatCard label="تم التأكيد" value={stats.confirmed}
+          <StatCard label="تم التأكيد" value={stats.confirmedCumulative}
             valueColor="text-emerald-600 dark:text-emerald-400"
-            pct={pct(stats.confirmed)} pctLabel="نسبة التأكيد"
+            pct={pct(stats.confirmedCumulative)} pctLabel="نسبة التأكيد" pctPrimary
             active={activeFilter === 'تم التأكيد'}
             onClick={() => setActiveFilter('تم التأكيد')} />
           <StatCard label="تم الرفض"   value={stats.rejected}
             valueColor="text-red-500 dark:text-red-400"
-            pct={pct(stats.rejected)} pctLabel="نسبة الرفض"
+            pct={pct(stats.rejected)} pctLabel="نسبة الرفض" pctPrimary
             active={activeFilter === 'تم الرفض'}
             onClick={() => setActiveFilter('تم الرفض')} />
           <StatCard label="مؤجل"       value={stats.postponed}
@@ -2047,7 +2107,7 @@ export default function DashboardPage() {
             onClick={() => setActiveFilter('مؤجل')} />
           <StatCard label="لا يرد"     value={stats.noAnswer}
             valueColor="text-slate-500 dark:text-slate-400"
-            pct={pct(stats.noAnswer)} pctLabel="نسبة عدم الرد"
+            pct={pct(stats.noAnswer)} pctLabel="نسبة عدم الرد" pctPrimary
             active={activeFilter === 'لا يرد'}
             onClick={() => setActiveFilter('لا يرد')} />
           <StatCard label="تم الشحن"  value={stats.shipped}
@@ -2266,8 +2326,8 @@ export default function DashboardPage() {
               </button>
             )}
 
-            {/* ── Bosta follow-ups button — admin only ────────────── */}
-            {isAdmin && (
+            {/* ── Bosta follow-ups button — admin OR shipping-followups permission ── */}
+            {(isAdmin || user?.permissions?.includes('shipping_followups')) && (
               <button
                 onClick={openFollowUps}
                 title="متابعة الشحنات التي تحتاج إجراء أو المرتجعات العائدة من شركة الشحن"
@@ -2422,16 +2482,22 @@ export default function DashboardPage() {
 
 /* ── StatCard ─────────────────────────────────────────────────── */
 function StatCard({
-  label, value, valueColor, pct, pctLabel, onClick, active,
+  label, value, valueColor, pct, pctLabel, pctPrimary, onClick, active,
 }: {
   label:       string;
   value:       number;
   valueColor?: string;        // semantic text color for the number only
   pct?:        number;
   pctLabel?:   string;
+  pctPrimary?: boolean;       // when true: % is the big number, count is secondary
   onClick?:    () => void;
   active?:     boolean;
 }) {
+  /* When a percentage is the headline metric (e.g. Confirmation Rate), show it
+     big and demote the absolute count to secondary text — so a card whose count
+     naturally drains to 0 during the day still reflects real performance. */
+  const primaryIsPct = pctPrimary && pct !== undefined;
+
   return (
     <div
       onClick={onClick}
@@ -2447,20 +2513,36 @@ function StatCard({
           : 'border-slate-200 dark:border-slate-800'}
       `}
     >
-      {/* Main number */}
-      <div className={`text-3xl font-bold tracking-tight leading-none
-        ${valueColor ?? 'text-slate-800 dark:text-white'}`}>
-        {value}
-      </div>
-
-      {/* Percentage row */}
-      {pct !== undefined && (
-        <div className="flex items-baseline gap-1.5 mt-1.5">
-          <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">{pct}%</span>
-          {pctLabel && (
-            <span className="text-xs text-slate-400 dark:text-slate-500 leading-tight">{pctLabel}</span>
+      {primaryIsPct ? (
+        <>
+          {/* Primary: the percentage */}
+          <div className={`text-3xl font-bold tracking-tight leading-none
+            ${valueColor ?? 'text-slate-800 dark:text-white'}`}>
+            {pct}%
+          </div>
+          {/* Secondary: the absolute count */}
+          <div className="flex items-baseline gap-1.5 mt-1.5">
+            <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">{value}</span>
+            <span className="text-xs text-slate-400 dark:text-slate-500 leading-tight">طلب</span>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Primary: the absolute count */}
+          <div className={`text-3xl font-bold tracking-tight leading-none
+            ${valueColor ?? 'text-slate-800 dark:text-white'}`}>
+            {value}
+          </div>
+          {/* Secondary: the percentage (if any) */}
+          {pct !== undefined && (
+            <div className="flex items-baseline gap-1.5 mt-1.5">
+              <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">{pct}%</span>
+              {pctLabel && (
+                <span className="text-xs text-slate-400 dark:text-slate-500 leading-tight">{pctLabel}</span>
+              )}
+            </div>
           )}
-        </div>
+        </>
       )}
 
       {/* Label */}

@@ -66,9 +66,10 @@ interface FormState {
   comm_no_answer:  number;
 }
 const ALL_PERMISSIONS = [
-  { key:'orders',    label:'تأكيد الطلبات',           description:'عرض وتعديل الطلبات',             alwaysOn:true },
-  { key:'analytics', label:'لوحة التحكم والتحليلات', description:'عرض الإحصاءات والتقارير' },
-  { key:'inventory', label:'إدارة المخزون',           description:'عرض المنتجات ومستويات المخزون' },
+  { key:'orders',             label:'تأكيد الطلبات',           description:'عرض وتعديل الطلبات',             alwaysOn:true },
+  { key:'analytics',          label:'لوحة التحكم والتحليلات', description:'عرض الإحصاءات والتقارير' },
+  { key:'inventory',          label:'إدارة المخزون',           description:'عرض المنتجات ومستويات المخزون' },
+  { key:'shipping_followups', label:'متابعات شركة الشحن',     description:'متابعة وتحديث حالات الشحن المتقدمة' },
 ];
 const EMPTY_FORM: FormState = {
   name:'', email:'', password:'', role:'agent', is_active:true, permissions:['orders'],
@@ -130,6 +131,14 @@ function KpiCard({ label, value, sub, icon, accent='slate' }: {
   );
 }
 
+/* A user is "online" if their heartbeat landed within this window. */
+const ONLINE_WINDOW_MS = 4 * 60 * 1000; // 4 minutes
+function isOnline(lastActiveAt?: string | null): boolean {
+  if (!lastActiveAt) return false;
+  const t = new Date(lastActiveAt).getTime();
+  return Number.isFinite(t) && Date.now() - t <= ONLINE_WINDOW_MS;
+}
+
 /* ════════════════════════════════════════════════════════════════════
    Main Page
    ════════════════════════════════════════════════════════════════════ */
@@ -181,6 +190,15 @@ export default function StaffPage() {
   }, []);
   useEffect(() => { loadStaff(); }, [loadStaff]);
 
+  /* Silent presence refresh — re-fetch the staff list every 60s (no spinner)
+     so the Online/Offline badges stay current without a manual reload. */
+  useEffect(() => {
+    const id = setInterval(() => {
+      getStaff().then((r) => setStaff(r.data)).catch(() => { /* silent */ });
+    }, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   const [search, setSearch] = useState('');
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -190,7 +208,9 @@ export default function StaffPage() {
 
   const stats = useMemo(() => ({
     total:  staff.length,
-    active: staff.filter(m => m.is_active).length,
+    // "Online now" — counts members whose heartbeat is within the live window,
+    // not just enabled accounts.
+    active: staff.filter(m => isOnline(m.last_active_at)).length,
     absent: staff.filter(m => m.is_absent && m.is_active).length,
     agents: staff.filter(m => m.role === 'agent').length,
   }), [staff]);
@@ -428,20 +448,32 @@ export default function StaffPage() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-7">
             {[
               { label:'إجمالي الفريق',      value:stats.total,  color:'indigo',  icon:<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg> },
-              { label:'الموظفون النشطون',   value:stats.active, color:'emerald', icon:<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> },
+              { label:'الموظفون النشطون الآن', value:stats.active, color:'emerald', live:true, icon:<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> },
               { label:'الغائبون اليوم',     value:stats.absent, color:'amber',   icon:<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg> },
               { label:'وكلاء التأكيد',      value:stats.agents, color:'violet',  icon:<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg> },
-            ].map(({ label, value, color, icon }) => (
+            ].map(({ label, value, color, icon, live }) => (
               <div key={label} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700/60 shadow-sm p-5 flex items-center gap-4">
-                <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0
+                <div className={`relative w-11 h-11 rounded-xl flex items-center justify-center shrink-0
                   ${color==='indigo'  ? 'bg-indigo-50  text-indigo-600  dark:bg-indigo-900/30  dark:text-indigo-400'  : ''}
                   ${color==='emerald' ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' : ''}
                   ${color==='amber'   ? 'bg-amber-50   text-amber-600   dark:bg-amber-900/30   dark:text-amber-400'   : ''}
                   ${color==='violet'  ? 'bg-violet-50  text-violet-600  dark:bg-violet-900/30  dark:text-violet-400'  : ''}`}>
                   {icon}
+                  {/* Live "online now" indicator on the icon */}
+                  {live && (
+                    <span className="absolute -top-0.5 -right-0.5 flex h-3 w-3">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500 ring-2 ring-white dark:ring-slate-900" />
+                    </span>
+                  )}
                 </div>
                 <div>
-                  <p className="text-2xl font-bold text-slate-900 dark:text-white leading-none">{value}</p>
+                  <p className="text-2xl font-bold text-slate-900 dark:text-white leading-none flex items-center gap-2">
+                    {value}
+                    {live && (
+                      <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" title="مباشر الآن" />
+                    )}
+                  </p>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{label}</p>
                 </div>
               </div>
@@ -511,11 +543,23 @@ export default function StaffPage() {
                           </span>
                         </td>
                         <td className="px-5 py-4">
-                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
-                            ${m.is_active?'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300':'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-500'}`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${m.is_active?'bg-emerald-500':'bg-slate-400'}`}/>
-                            {m.is_active?'نشط':'غير نشط'}
-                          </span>
+                          {(() => {
+                            const online = isOnline(m.last_active_at);
+                            const title = m.last_active_at
+                              ? `آخر نشاط: ${new Date(m.last_active_at).toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' })}`
+                              : 'لم يسجّل دخوله بعد';
+                            return (
+                              <span
+                                title={title}
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
+                                  ${online
+                                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                                    : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'}`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${online ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'}`}/>
+                                {online ? 'نشط' : 'غير نشط'}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td className="px-5 py-4">
                           {m.role==='agent' ? (

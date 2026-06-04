@@ -2,8 +2,10 @@
 const AGENT_ALLOWED_FIELDS = new Set([
   'Status',
   'Note',
+  'ShippingNotes',    // inline shipping-notes column (printed on the Bosta AWB)
   'DeliveryRate',
   'ProductName',
+  'quantity',         // agents can correct the order quantity from the edit modal
   'PostponedDate',
   'rejectionReason',  // sent alongside Status='تم الرفض' from the rejection picker modal
   // Quick-edit customer / shipping details — agents fix customer typos
@@ -25,6 +27,21 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+/**
+ * Allow admins through unconditionally; otherwise require the caller's JWT
+ * `permissions` array to include the given granular permission key. Mirrors the
+ * frontend gate (isAdmin || permissions.includes(key)). Permissions are baked
+ * into the JWT at login (see routes/auth.js), so this needs no DB round-trip.
+ */
+function requireAdminOrPermission(permission) {
+  return function (req, res, next) {
+    if (req.user.role === 'admin') return next();
+    const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
+    if (perms.includes(permission)) return next();
+    return res.status(403).json({ error: 'مطلوب صلاحيات المدير' });
+  };
+}
+
 function filterAgentFields(req, res, next) {
   if (req.user.role === 'agent') {
     const forbidden = Object.keys(req.body).filter(f => !AGENT_ALLOWED_FIELDS.has(f));
@@ -37,4 +54,4 @@ function filterAgentFields(req, res, next) {
   next();
 }
 
-module.exports = { requireAdmin, filterAgentFields };
+module.exports = { requireAdmin, filterAgentFields, requireAdminOrPermission };

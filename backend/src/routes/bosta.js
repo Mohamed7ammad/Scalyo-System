@@ -28,7 +28,10 @@ const express          = require('express');
 const axios            = require('axios');
 const pool             = require('../config/db');
 const authenticate     = require('../middleware/auth');
-const { requireAdmin } = require('../middleware/roleGuard');
+const { requireAdmin, requireAdminOrPermission } = require('../middleware/roleGuard');
+/* Shared physical-return processor + status helpers (defined in the Bosta
+   webhook) so the backfill sync below uses the EXACT same logic. */
+const { applyPhysicalReturn, canonicalizeStatus, FINAL_RETURN_STATUSES } = require('./shippingWebhook');
 
 const router = express.Router();
 
@@ -580,7 +583,7 @@ function mapDelivery(d) {
   };
 }
 
-router.get('/follow-ups', authenticate, requireAdmin, async (req, res) => {
+router.get('/follow-ups', authenticate, requireAdminOrPermission('shipping_followups'), async (req, res) => {
   const creds = await readBostaCreds(req.user.business_id);
 
   if (!creds.bearerToken && !(creds.email && creds.password)) {
@@ -751,7 +754,7 @@ async function enrichWithLocalOrder(rows, businessId) {
 
    Body: { return_note?: string, return_shipping_fee?: number }
    ════════════════════════════════════════════════════════════════════════════ */
-router.patch('/follow-ups/:trackingNumber', authenticate, requireAdmin, async (req, res) => {
+router.patch('/follow-ups/:trackingNumber', authenticate, requireAdminOrPermission('shipping_followups'), async (req, res) => {
   const trackingNumber = String(req.params.trackingNumber || '').trim();
   if (!trackingNumber) {
     return res.status(400).json({ error: 'رقم التتبع مطلوب' });
@@ -840,6 +843,182 @@ router.patch('/follow-ups/:trackingNumber', authenticate, requireAdmin, async (r
   } catch (err) {
     console.error('[bosta/follow-ups PATCH]', err.message);
     return res.status(500).json({ error: 'خطأ في الخادم أثناء حفظ المتابعة' });
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════════════
+   POST /api/bosta/sync-returns  — backfill missed physical returns
+   ════════════════════════════════════════════════════════════════════════════
+   Recovers returns that Bosta marks as received-back ("تم الاسترجاع") but that
+   never landed locally (e.g. the 13 missed yesterday due to the old DB-index
+   bug). Each match is processed through applyPhysicalReturn — the SAME path as
+   the live webhook: Status → تم الإرجاع, stock +qty, logged once. Idempotent.
+
+   Two modes (admin only, tenant-scoped):
+     • body.trackingNumbers: ["EG-123", …]  → process EXACTLY these (the reliable
+       path when the user already knows the missed tracking numbers).
+     • no body  → auto-fetch Bosta's "returning" bucket, keep only deliveries
+       whose state means RECEIVED-BACK (canonical FINAL return), and process.
+   ──────────────────────────────────────────────────────────────────────────── */
+router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  const explicit = Array.isArray(req.body?.trackingNumbers)
+    ? [...new Set(req.body.trackingNumbers.map((t) => String(t).trim()).filter(Boolean))]
+    : null;
+
+  // Optional date filter (YYYY-MM-DD) — only returns from THAT Egypt-local day.
+  const dateFilter = typeof req.body?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.date.trim())
+    ? req.body.date.trim()
+    : null;
+
+  const summary = {
+    mode: explicit ? 'explicit' : (dateFilter ? 'date' : 'auto'),
+    date: dateFilter,
+    scanned: 0, matchedLocal: 0, processed: 0, restocked: 0,
+    notFound: [], details: [],
+  };
+
+  /* Egypt-local YYYY-MM-DD for a timestamp (Bosta returns UTC ISO strings). */
+  const egyptDate = (ts) => {
+    if (!ts) return null;
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return null;
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo' }).format(d); // YYYY-MM-DD
+  };
+
+  try {
+    let trackingNumbers = explicit;
+
+    /* ── AUTO / DATE mode: pull returns from Bosta ───────────────────────── */
+    if (!explicit) {
+      const creds = await readBostaCreds(businessId);
+      if (!creds.bearerToken && !(creds.email && creds.password)) {
+        return res.status(400).json({
+          error: 'Bosta غير مهيأ (التوكن/البريد). أو مرّر trackingNumbers يدوياً في الـ body.',
+        });
+      }
+
+      const headersFor  = (auth) => ({ ...BOSTA_APP_HEADERS, Authorization: auth });
+      const extractList = (data) =>
+        data?.data?.deliveries ?? data?.deliveries ?? data?.data?.list ??
+        data?.data ?? (Array.isArray(data) ? data : null);
+      const runSearch = async (body) => {
+        const r = await withAuthRetry(creds, (auth) =>
+          axios.post(`${BOSTA_APP_BASE}/deliveries/search`, body, { headers: headersFor(auth), timeout: 15_000 })
+        );
+        return extractList(r.data);
+      };
+
+      /* EXACT stateCodes Bosta's dashboard POSTs for the "غير ناجح / Returned"
+         tab (reverse-engineered from the browser Network tab). This is the
+         AUTHORITATIVE source for fully-returned (تم الاسترجاع) parcels — every
+         delivery it returns IS a received-back return.                          */
+      const RETURNED_TAB_CODES = ['46:R', '104', '100&16', '101', '50', '48', '60'];
+
+      const PAGE = 50;
+      const seen     = new Set();
+      const received = [];
+
+      /* Paginate one stateCodes bucket WITHOUT early-exit on dates.
+         We do NOT assume the API is strictly -updatedAt sorted, so we scan every
+         page up to the cap and filter each row in memory by its updatedAt day.
+
+         `trusted` = the stateCodes payload itself defines a returns tab, so every
+         row is a return → skip the status-string re-validation (those weird codes
+         may not surface a recognisable status string). For the untrusted catch-all
+         sweep we still gate on canonicalizeStatus ∈ FINAL_RETURN_STATUSES.        */
+      const collectBucket = async (stateCodes, label, { maxPages = 40, trusted = false } = {}) => {
+        for (let page = 1; page <= maxPages; page++) {
+          let list;
+          const body = stateCodes
+            ? { limit: PAGE, page, sortBy: '-updatedAt', stateCodes }
+            : { limit: PAGE, page, sortBy: '-updatedAt' };
+          try {
+            list = await runSearch(body);
+          } catch (err) {
+            console.warn(`[bosta/sync-returns] ${label} page ${page} failed: ` +
+              `HTTP ${err.response?.status ?? 'ERR'} ${err.response?.data?.message ?? err.message}`);
+            return;   // skip this bucket on error; other buckets still run
+          }
+          if (!Array.isArray(list) || list.length === 0) break;
+
+          let kept = 0;
+          for (const d of list) {
+            summary.scanned++;
+            const tn = pickName(d.trackingNumber ?? d.tracking_number ?? d._id);
+            if (!tn || seen.has(tn)) continue;
+
+            if (!trusted) {
+              const stateStr = pickName(
+                d.state?.nameAr ?? d.state?.value ?? d.masterStatus?.nameAr ??
+                d.masterStatus?.value ?? d.masterStatus ?? d.status
+              );
+              if (!FINAL_RETURN_STATUSES.has(canonicalizeStatus(stateStr))) continue; // received-back only
+            }
+
+            // Filter by the day the parcel was last updated (when it was returned).
+            // NEVER filter on createdAt — these orders can be weeks old.
+            if (dateFilter) {
+              const dDate = egyptDate(d.updatedAt ?? d.lastUpdateDate ?? d.updateDate ?? d.state?.updatedAt ?? d.returnedAt);
+              if (dDate !== dateFilter) continue;   // no early-exit — keep scanning
+            }
+            seen.add(tn);
+            received.push(tn);
+            kept++;
+          }
+          console.log(`[bosta/sync-returns] ${label} page ${page}: ${list.length} rows, +${kept} kept (total ${received.length})`);
+          if (list.length < PAGE) break;   // genuine last page
+        }
+      };
+
+      // 1) AUTHORITATIVE returned-tab codes (the user's exact dashboard payload).
+      //    Every row IS a received-back return → trusted.
+      await collectBucket(RETURNED_TAB_CODES, 'returned-tab', { maxPages: 40, trusted: true });
+      // 2) Active returning-leg codes — status-gated so only rows that already
+      //    canonicalise to a RECEIVED return pass (in-transit ones are skipped,
+      //    avoiding premature restock).
+      await collectBucket(RETURNING_STATE_CODES, 'returning', { maxPages: 40, trusted: false });
+      // 3) Catch-all: most-recently-updated deliveries (any bucket), status-gated.
+      //    Today's returns sort to the top, so 12 pages (600 rows) covers the day.
+      await collectBucket(null, 'all-recent', { maxPages: 12, trusted: false });
+
+      trackingNumbers = received;
+    }
+
+    /* ── Process each tracking number against the local DB ───────────────── */
+    for (const tn of trackingNumbers) {
+      const { rows } = await pool.query(
+        `SELECT id, "ProductName", "sku", COALESCE("quantity", 1) AS quantity, "Status", business_id
+           FROM orders WHERE "BostaTrackingCode" = $1 AND business_id = $2 LIMIT 1`,
+        [tn, businessId]
+      );
+      if (!rows.length) { summary.notFound.push(tn); continue; }
+
+      summary.matchedLocal++;
+      const order = rows[0];
+      /* applyPhysicalReturn is idempotent: it (re)sets status, and only
+         restocks + logs if this order wasn't already logged as returned —
+         so a missed return whose status WAS set but never logged/restocked is
+         fully recovered here. */
+      const r = await applyPhysicalReturn(order);
+      if (!r.alreadyLogged) {
+        summary.processed++;
+        if (r.restocked) summary.restocked++;
+        summary.details.push({ tn, orderId: order.id, restocked: r.restocked, qty: r.qty });
+      } else {
+        summary.details.push({ tn, orderId: order.id, action: 'already-logged' });
+      }
+    }
+
+    console.log(
+      `[bosta/sync-returns] tenant ${businessId} (${summary.mode}): ` +
+      `scanned=${summary.scanned} matched=${summary.matchedLocal} ` +
+      `processed=${summary.processed} restocked=${summary.restocked} notFound=${summary.notFound.length}`
+    );
+    return res.json({ message: 'تمت مزامنة المرتجعات', ...summary });
+  } catch (err) {
+    console.error('[bosta/sync-returns]', err.response?.status ?? 'ERR', err.message);
+    return res.status(502).json({ error: 'تعذّر مزامنة المرتجعات من Bosta', detail: err.message });
   }
 });
 

@@ -12,6 +12,11 @@ const NO_ANSWER_REQUIRED = 5;
    for ALL orders regardless of source — and therefore for admins too. */
 const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
 
+/* Normalise any date value to YYYY-MM-DD for <input type="date"> and badges.
+   A DATE column comes back from pg as an ISO timestamp ("2026-06-02T00:00:00Z");
+   a plain "2026-06-02" passes through unchanged. */
+const toDateInput = (v?: string | null) => (v ? String(v).slice(0, 10) : '');
+
 // All possible statuses — used in the admin full-edit modal only
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل'];
 
@@ -90,7 +95,7 @@ interface Props {
 export default function OrdersTable({
   orders, role, onUpdate, onDelete,
   selectedIds = [], onToggleSelect, onSelectAll,
-  agents = [], showProduct = false,
+  agents = [],
   emptyMessage = 'لا توجد طلبات لعرضها',
   onToast,
 }: Props) {
@@ -99,13 +104,14 @@ export default function OrdersTable({
   const [editForm,        setEditForm]        = useState<Partial<Order>>({});
   const [deleteConfirm,   setDeleteConfirm]   = useState<number | null>(null);
   const [pendingRejection, setPendingRejection] = useState<{ id: number; reason: string } | null>(null);
+  const [pendingPostpone,  setPendingPostpone]  = useState<{ id: number; date: string } | null>(null);
 
   /* ─── Quick-edit (customer/shipping details) modal ─────────── */
   const [quickEdit, setQuickEdit] = useState<Order | null>(null);
   const [quickForm, setQuickForm] = useState<{
     FullName: string; Phone: string; City: string; Address: string;
-    hasDeposit: boolean; depositAmount: string;
-  }>({ FullName: '', Phone: '', City: '', Address: '', hasDeposit: false, depositAmount: '' });
+    quantity: string; hasDeposit: boolean; depositAmount: string;
+  }>({ FullName: '', Phone: '', City: '', Address: '', quantity: '1', hasDeposit: false, depositAmount: '' });
   const [quickSaving, setQuickSaving] = useState(false);
   /* No-answer call-attempt log (shown in quick-edit when status is 'لا يرد') */
   const [noAnswerLogs,  setNoAnswerLogs]  = useState<string[]>([]);
@@ -122,6 +128,7 @@ export default function OrdersTable({
       Phone:    order.Phone    ?? '',
       City:     order.City     ?? '',
       Address:  order.Address  ?? '',
+      quantity: String(order.quantity ?? 1),
       hasDeposit:    order.hasDeposit ?? false,
       depositAmount: order.depositAmount != null && order.depositAmount !== 0
         ? String(order.depositAmount) : '',
@@ -188,6 +195,7 @@ export default function OrdersTable({
         Phone:    quickForm.Phone.trim(),
         City:     quickForm.City.trim(),
         Address:  quickForm.Address.trim(),
+        quantity: Math.max(1, parseInt(quickForm.quantity, 10) || 1),
         hasDeposit:    depositOn,
         depositAmount: depositAmt,
       });
@@ -203,6 +211,12 @@ export default function OrdersTable({
     // Intercept "تم الرفض" to collect a rejection reason before saving
     if (Status === 'تم الرفض') {
       setPendingRejection({ id, reason: '' });
+      return;
+    }
+    // Intercept "مؤجل" to collect the follow-up date before saving
+    if (Status === 'مؤجل') {
+      const existing = orders.find((o) => o.id === id)?.PostponedDate;
+      setPendingPostpone({ id, date: toDateInput(existing) });
       return;
     }
     setSavingId(id);
@@ -229,6 +243,22 @@ export default function OrdersTable({
     if (Note === (order.Note ?? '')) return;
     setSavingId(order.id);
     await onUpdate(order.id, { Note });
+    setSavingId(null);
+  };
+
+  /* ─── Address inline edit (save on blur) — all roles ──────── */
+  const handleAddressBlur = async (order: Order, Address: string) => {
+    if (Address === (order.Address ?? '')) return;
+    setSavingId(order.id);
+    await onUpdate(order.id, { Address });
+    setSavingId(null);
+  };
+
+  /* ─── Shipping-notes inline edit (save on blur) — all roles ── */
+  const handleShippingNotesBlur = async (order: Order, ShippingNotes: string) => {
+    if (ShippingNotes === (order.ShippingNotes ?? '')) return;
+    setSavingId(order.id);
+    await onUpdate(order.id, { ShippingNotes });
     setSavingId(null);
   };
 
@@ -332,7 +362,7 @@ export default function OrdersTable({
                 <Th>العنوان</Th>
                 <Th>الحالة</Th>
                 <Th>الدفع</Th>
-                <Th>تاريخ التأجيل</Th>
+                <Th>ملاحظات شركة الشحن</Th>
                 <Th>الملاحظة</Th>
                 <Th>إجراءات</Th>
               </tr>
@@ -389,13 +419,21 @@ export default function OrdersTable({
                     )}
 
                     <td className="px-4 py-3">
-                      {/* Customer name */}
-                      <p className="font-semibold text-gray-800 dark:text-slate-200 whitespace-nowrap leading-snug">
+                      {/* Customer name — truncated so a long value (e.g. an
+                          address typed into the name field) can't stretch the
+                          column; full text on hover via title. */}
+                      <p
+                        title={order.FullName}
+                        className="font-semibold text-gray-800 dark:text-slate-200
+                          max-w-[200px] truncate leading-snug"
+                      >
                         {order.FullName}
                       </p>
 
-                      {/* Product badge — only in "كل المنتجات" view */}
-                      {showProduct && order.ProductName && (
+                      {/* Product badge — always shown (all roles) so employees
+                          see the product for their assigned orders, not only
+                          admins in the "كل المنتجات" view. */}
+                      {order.ProductName && (
                         <span
                           title={order.ProductName}
                           className="mt-1 inline-flex items-center gap-1 max-w-[200px]
@@ -468,8 +506,24 @@ export default function OrdersTable({
                       {order.City}
                     </td>
 
-                    <td className="px-4 py-3 text-gray-600 dark:text-slate-400 max-w-[180px] truncate" title={order.Address}>
-                      {order.Address}
+                    {/* Address — inline editable (all roles) */}
+                    <td className="px-4 py-3">
+                      <input
+                        key={`${order.id}-addr-${order.Address}`}
+                        type="text"
+                        defaultValue={order.Address ?? ''}
+                        onBlur={(e) => handleAddressBlur(order, e.target.value)}
+                        title={order.Address}
+                        placeholder="أضف العنوان..."
+                        className="w-full min-w-[160px] max-w-[220px] px-2 py-1 text-sm rounded-lg
+                          border border-transparent outline-none bg-transparent
+                          hover:border-gray-300 dark:hover:border-slate-700
+                          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+                          focus:bg-white dark:focus:bg-slate-800
+                          text-gray-600 dark:text-slate-400
+                          placeholder-gray-300 dark:placeholder-slate-600
+                          transition"
+                      />
                     </td>
 
                     {/* Status cell — all roles
@@ -520,6 +574,24 @@ export default function OrdersTable({
                             rounded max-w-[180px] mx-auto leading-snug"
                         >
                           {order.rejectionReason}
+                        </div>
+                      )}
+
+                      {/* Postponed follow-up date — badge under the status for مؤجل */}
+                      {normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate) && (
+                        <div
+                          title="تاريخ المتابعة"
+                          className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs
+                            text-amber-700 dark:text-amber-300
+                            bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40
+                            rounded-md mx-auto leading-snug"
+                          dir="ltr"
+                        >
+                          <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                          </svg>
+                          {toDateInput(order.PostponedDate)}
                         </div>
                       )}
 
@@ -587,22 +659,24 @@ export default function OrdersTable({
                       </div>
                     </td>
 
-                    {/* Postponed date — only shown for مؤجل */}
+                    {/* Shipping notes — inline editable (all roles); printed on the Bosta AWB */}
                     <td className="px-4 py-3">
-                      {order.Status === 'مؤجل' ? (
-                        <input
-                          type="date"
-                          dir="ltr"
-                          value={order.PostponedDate ?? ''}
-                          onChange={(e) => onUpdate(order.id, { PostponedDate: e.target.value })}
-                          className="px-2 py-1 text-xs rounded-lg outline-none
-                            focus:ring-2 focus:ring-amber-400 cursor-pointer
-                            border border-amber-300 bg-amber-50 text-amber-800
-                            dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-300"
-                        />
-                      ) : (
-                        <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
-                      )}
+                      <input
+                        key={`${order.id}-ship-${order.ShippingNotes}`}
+                        type="text"
+                        defaultValue={order.ShippingNotes ?? ''}
+                        onBlur={(e) => handleShippingNotesBlur(order, e.target.value)}
+                        placeholder="ملاحظة للشحن..."
+                        title="تُطبع على بوليصة الشحن"
+                        className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
+                          border border-transparent outline-none bg-transparent
+                          hover:border-gray-300 dark:hover:border-slate-700
+                          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+                          focus:bg-white dark:focus:bg-slate-800
+                          text-gray-700 dark:text-slate-300
+                          placeholder-gray-300 dark:placeholder-slate-600
+                          transition"
+                      />
                     </td>
 
                     {/* Note inline edit — all roles */}
@@ -732,6 +806,20 @@ export default function OrdersTable({
                 rows={3}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm
                   bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none resize-none
+                  focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">الكمية</label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={quickForm.quantity}
+                onChange={(e) => setQuickForm((p) => ({ ...p, quantity: e.target.value }))}
+                dir="ltr"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm text-left
+                  bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none
                   focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
               />
             </div>
@@ -1066,7 +1154,7 @@ export default function OrdersTable({
                 <input
                   type="date"
                   dir="ltr"
-                  value={editForm.PostponedDate ?? ''}
+                  value={toDateInput(editForm.PostponedDate)}
                   onChange={(e) => setEditForm((p) => ({ ...p, PostponedDate: e.target.value }))}
                   className="w-full px-3 py-2 rounded-xl text-sm outline-none
                     border border-amber-300 dark:border-amber-700/50
@@ -1268,6 +1356,74 @@ export default function OrdersTable({
             </button>
             <button
               onClick={() => setPendingRejection(null)}
+              className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition
+                bg-gray-100 hover:bg-gray-200 text-gray-700
+                dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300"
+            >
+              إلغاء
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Postpone Date Picker ────────────────────────────────── */}
+      {pendingPostpone !== null && (
+        <Modal onClose={() => setPendingPostpone(null)}>
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-10 h-10 rounded-xl shrink-0 flex items-center justify-center
+              bg-amber-100 dark:bg-amber-900/30">
+              <svg className="w-5 h-5 text-amber-600 dark:text-amber-400"
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="font-bold text-gray-800 dark:text-slate-100 leading-tight">
+                تأجيل الطلب
+              </h2>
+              <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                اختر التاريخ الذي طلب العميل التواصل فيه
+              </p>
+            </div>
+          </div>
+
+          <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1.5">
+            تاريخ المتابعة
+          </label>
+          <input
+            type="date"
+            dir="ltr"
+            value={pendingPostpone.date}
+            min={new Date().toISOString().slice(0, 10)}
+            onChange={(e) => setPendingPostpone((p) => p ? { ...p, date: e.target.value } : null)}
+            className="w-full px-3 py-2.5 rounded-xl text-sm outline-none mb-5
+              border border-amber-300 dark:border-amber-700/50
+              bg-amber-50 dark:bg-amber-900/20
+              text-amber-800 dark:text-amber-300
+              focus:ring-2 focus:ring-amber-400"
+          />
+
+          <div className="flex gap-3">
+            <button
+              onClick={async () => {
+                if (!pendingPostpone || !pendingPostpone.date) return;
+                setSavingId(pendingPostpone.id);
+                await onUpdate(pendingPostpone.id, {
+                  Status: 'مؤجل',
+                  PostponedDate: pendingPostpone.date,
+                });
+                setSavingId(null);
+                setPendingPostpone(null);
+              }}
+              disabled={savingId !== null || !pendingPostpone.date}
+              className="flex-1 bg-amber-600 hover:bg-amber-700 text-white py-2.5 rounded-xl
+                text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              تأكيد التأجيل
+            </button>
+            <button
+              onClick={() => setPendingPostpone(null)}
               className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition
                 bg-gray-100 hover:bg-gray-200 text-gray-700
                 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300"
