@@ -537,53 +537,19 @@ router.post('/bosta', async (req, res) => {
       console.log(`[Bosta Webhook] Status "${statusStr}" is unmapped — order row left unchanged`);
     }
 
-    /* ── Step 3: Treasury — record COD on successful delivery ─────────────
-       Fires only for 'delivered'.  The partial unique index on
-       treasury_transactions (order_id) WHERE source = 'bosta_cod' is the
-       idempotency backstop: if the same event arrives twice the second
-       INSERT hits ON CONFLICT DO NOTHING and produces no side-effects.
-
-       COD priority:
-         1. specs.cod from the Bosta webhook payload  (actual collected)
-         2. Calculated from order: ProductPrice − depositAmount  (fallback)  */
+    /* ── Step 3: Stamp delivered_at on a successful delivery ──────────────
+       We DELIBERATELY do NOT record COD as treasury revenue here. Delivery is
+       NOT cash-in-hand: revenue is recognised MANUALLY only when the courier
+       actually wires the collected money to the bank. We just record WHEN the
+       order was delivered so analytics can date it accurately. Idempotent —
+       delivered_at is set only once (the first delivered event wins).         */
     if (canonical === 'delivered') {
-      /* Stamp the true delivery timestamp (idempotent — only when not yet set),
-         so analytics can date this delivery by when it actually happened.     */
       await pool.query(
         `UPDATE orders SET delivered_at = COALESCE($1::timestamptz, NOW())
          WHERE id = $2 AND business_id = $3 AND delivered_at IS NULL`,
         [deliveredAt, order.id, businessId]
       );
-
-      const codAmount = webhookCod !== null
-        ? webhookCod
-        : calcOrderCod(order);
-
-      const description =
-        `COD وصل من Bosta — طلب #${order.id}` +
-        (productName ? ` | ${productName}` : '') +
-        (webhookCod !== null ? ' | المبلغ من الـ Webhook' : ' | المبلغ محسوب من الطلب');
-
-      const { rowCount: inserted } = await pool.query(
-        `INSERT INTO treasury_transactions
-           (order_id, amount, type, source, description, transaction_date, business_id)
-         VALUES ($1, $2, 'revenue', 'bosta_cod', $3, CURRENT_DATE, $4)
-         ON CONFLICT (order_id) WHERE source = 'bosta_cod'
-         DO NOTHING`,
-        [order.id, codAmount.toFixed(2), description, businessId]
-      );
-
-      if (inserted > 0) {
-        console.log(
-          `✅  Treasury: +${codAmount.toFixed(2)} EGP recorded` +
-          ` for order #${order.id} (source: bosta_cod)`
-        );
-      } else {
-        console.warn(
-          `[Bosta Webhook] ⚠️  Treasury: bosta_cod entry for order #${order.id}` +
-          ` already exists — skipped (idempotent).`
-        );
-      }
+      console.log(`✅  Order #${order.id} delivered_at stamped (no auto-revenue — recorded manually on bank settlement).`);
     }
 
     /* ── Step 4: Physical-return gate ────────────────────────────────────
