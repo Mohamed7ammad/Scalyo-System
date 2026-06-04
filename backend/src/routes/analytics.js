@@ -468,11 +468,12 @@ router.get('/products-profitability', authenticate, async (req, res) => {
                COALESCE(o.unit_cost_price, p.cost_price) × COALESCE(o.quantity, 1)
            • unit_cost_price = the WAC SNAPSHOTTED on the order at confirmation —
              the true cost at sale time; falls back to the product's live cost_price
-             only when the snapshot is missing (older orders).
+             when the snapshot is missing OR zero (NULLIF guards a 0 snapshot from
+             being wrongly accepted as a real 0 cost).
            • × quantity so multi-unit orders cost the full units delivered, not 1. */
         COALESCE(SUM(
           CASE WHEN o."Status" = 'تم التوصيل'
-            THEN COALESCE(o."unit_cost_price"::numeric, p.cost_price::numeric, 0)
+            THEN COALESCE(NULLIF(o."unit_cost_price"::numeric, 0), p.cost_price::numeric, 0)
                  * COALESCE(o."quantity", 1)
             ELSE 0 END
         ), 0)                                                               AS cogs
@@ -480,11 +481,22 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       JOIN   orders   o ON (
         o.business_id = ${bizIdx}::integer
         AND (
-          /* SKU match — preferred when the sku column is populated */
+          /* SKU match — preferred when the order's SKU matches THIS product. */
           ( COALESCE(o.sku, '') <> '' AND UPPER(o.sku) = UPPER(p.sku) )
           OR
-          /* ProductName fallback — for older orders where sku is NULL */
-          ( COALESCE(o.sku, '') = '' AND UPPER(COALESCE(o."ProductName", '')) = UPPER(p.name) )
+          /* ProductName fallback — fires when the order's SKU is missing OR is a
+             junk/legacy SKU that matches NO product at all (NOT EXISTS guard).
+             Previously this only fired when sku WAS EMPTY, so orders tagged with a
+             non-matching SKU (e.g. 'ipl' instead of 'IPL-PRO-01') were dropped from
+             COGS/profitability entirely — undercounting cost. The NOT EXISTS guard
+             also stops an order from matching two products (one by SKU, one by name). */
+          ( UPPER(TRIM(COALESCE(o."ProductName", ''))) = UPPER(TRIM(p.name))
+            AND NOT EXISTS (
+              SELECT 1 FROM products px
+              WHERE px.business_id = ${bizIdx}::integer
+                AND COALESCE(o.sku, '') <> ''
+                AND UPPER(px.sku) = UPPER(o.sku)
+            ) )
         )
       )
       WHERE  p.business_id = ${bizIdx}::integer${ordFilter}
