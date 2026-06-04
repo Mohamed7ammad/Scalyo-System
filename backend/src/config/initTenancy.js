@@ -343,8 +343,17 @@ async function phase3Enforce() {
       THEN
         ALTER TABLE product_returns DROP CONSTRAINT IF EXISTS product_returns_product_name_return_date_key;
         DROP INDEX  IF EXISTS product_returns_name_date_uidx;
-        CREATE UNIQUE INDEX IF NOT EXISTS product_returns_name_date_tenant_uidx
-          ON product_returns (product_name, return_date, business_id);
+        /* The (product_name, return_date, business_id) uniqueness must apply ONLY to
+           MANUAL daily-aggregate returns (order_id IS NULL, written by returns.js).
+           Webhook returns store one row PER ORDER (order_id NOT NULL) kept unique by
+           product_returns_order_id_uidx — they MUST be excluded here, else a 2nd
+           same-product return on the same day violates this index and crashes the
+           webhook. So drop the old NON-partial index and recreate it PARTIAL. */
+        ALTER TABLE product_returns ADD COLUMN IF NOT EXISTS order_id INTEGER;
+        DROP INDEX  IF EXISTS product_returns_name_date_tenant_uidx;
+        CREATE UNIQUE INDEX IF NOT EXISTS product_returns_manual_name_date_uidx
+          ON product_returns (product_name, return_date, business_id)
+          WHERE order_id IS NULL;
       END IF;
     END $$;
   `).catch((err) =>

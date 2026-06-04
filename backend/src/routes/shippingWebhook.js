@@ -290,8 +290,10 @@ pool.query(`
     product_name  VARCHAR(255)  NOT NULL,
     return_date   DATE          NOT NULL DEFAULT CURRENT_DATE,
     quantity      INTEGER       NOT NULL DEFAULT 0,
-    created_at    TIMESTAMPTZ   DEFAULT NOW(),
-    UNIQUE (product_name, return_date)
+    created_at    TIMESTAMPTZ   DEFAULT NOW()
+    /* No (product_name, return_date) UNIQUE here: manual returns are kept unique
+       per day via the PARTIAL index product_returns_manual_name_date_uidx
+       (WHERE order_id IS NULL); webhook per-order rows use the order_id index. */
   )
 `)
   .then(() =>
