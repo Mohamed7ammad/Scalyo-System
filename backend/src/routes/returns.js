@@ -92,7 +92,7 @@ router.post('/manual', authenticate, requireAdmin, async (req, res) => {
     await client.query(
       `INSERT INTO product_returns (product_name, return_date, quantity, business_id)
        VALUES ($1, $2, $3, $4)
-       ON CONFLICT (product_name, return_date, business_id)
+       ON CONFLICT (product_name, return_date, business_id) WHERE order_id IS NULL
        DO UPDATE SET quantity = product_returns.quantity + $3`,
       [productName, returnDate, qty, businessId]
     );
