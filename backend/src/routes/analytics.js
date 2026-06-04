@@ -450,6 +450,12 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       SELECT
         p.id                                                                AS product_id,
         COUNT(DISTINCT o.id) FILTER (WHERE o."Status" = 'تم التوصيل')     AS units_delivered,
+        /* DR denominator — orders that actually LEFT the warehouse to the courier.
+           Deliberately EXCLUDES 'تم التأكيد' (confirmed but not yet shipped) and
+           'جديد'/'لا يرد' (never sent), so Product DR = delivered ÷ shipped.      */
+        COUNT(DISTINCT o.id) FILTER (WHERE o."Status" IN (
+          'تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
+        ))                                                                  AS units_shipped,
         COUNT(DISTINCT o.id) FILTER (WHERE o."Status" IN (
           'تم التأكيد','تم الشحن','تم التوصيل',
           'جاري الإعادة','تم الإرجاع'
@@ -495,6 +501,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       p.sku,
       COALESCE(p.cost_price::numeric,   0)     AS cost_price,
       COALESCE(os.units_delivered,      0)     AS units_delivered,
+      COALESCE(os.units_shipped,        0)     AS units_shipped,
       COALESCE(os.total_confirmed,      0)     AS erp_order_count,
       COALESCE(os.delivered_revenue,    0)     AS delivered_revenue,
       COALESCE(es.attributed_spend,     0)     AS attributed_ad_spend,
@@ -525,6 +532,13 @@ router.get('/products-profitability', authenticate, async (req, res) => {
     const result = rows.map((r) => {
       const costPrice        = parseFloat(r.cost_price)          || 0;
       const unitsDelivered   = parseInt(r.units_delivered,  10)  || 0;
+      /* Units actually shipped to the courier — the DR denominator. */
+      const unitsShipped     = parseInt(r.units_shipped,    10)  || 0;
+      /* Product Delivery Rate = delivered ÷ shipped × 100 (0 when none shipped,
+         so a product with only confirmed/new orders shows 0% rather than NaN). */
+      const deliveryRate     = unitsShipped > 0
+        ? parseFloat(((unitsDelivered / unitsShipped) * 100).toFixed(1))
+        : 0;
       /* erp_order_count — ERP-internal confirmed count (kept for pixel efficiency).
          Column was renamed from total_orders → erp_order_count in the SQL above
          to prevent confusion with the authoritative Meta-sourced total_orders.    */
@@ -548,6 +562,8 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         sku:                 r.sku ?? '',             // never null — used in .toUpperCase() joins
         cost_price:          costPrice,
         units_delivered:     unitsDelivered,
+        units_shipped:       unitsShipped,        // DR denominator (orders sent to courier)
+        delivery_rate:       deliveryRate,        // delivered ÷ shipped × 100
         total_orders:        metaOrders,          // Meta-reported (authoritative) — from meta_orders_total
         erp_orders:          erpOrderCount,       // ERP internal count — for pixel efficiency calculation
         delivered_revenue:   deliveredRevenue,
