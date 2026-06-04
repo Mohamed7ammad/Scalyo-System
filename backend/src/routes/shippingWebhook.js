@@ -329,6 +329,16 @@ pool.query(`
 /* ── POST /api/webhooks/bosta ──────────────────────────────────────────── */
 router.post('/bosta', async (req, res) => {
 
+  /* ── Inbound diagnostics — log EVERY hit BEFORE the secret guard ─────────
+     So prod logs unambiguously show whether Bosta is reaching us at all (and
+     whether it sent a signature header) even when a request is later rejected.
+     We log header PRESENCE only — never the secret value itself.            */
+  console.log(
+    '📥 [Bosta Webhook] INBOUND hit — sigHeaderPresent=' +
+    `${!!(req.headers['x-bosta-signature'] || req.headers['x-webhook-secret'])}`
+  );
+  console.log('📥 [Bosta Webhook] INBOUND payload:', JSON.stringify(req.body));
+
   /* ── Security: shared-secret guard ──────────────────────────────────────
      Reads webhook_secret from shipping_settings DB first (Phase 1 SaaS store),
      then falls back to BOSTA_WEBHOOK_SECRET env var.

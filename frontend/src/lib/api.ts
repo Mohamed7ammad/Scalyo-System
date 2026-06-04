@@ -582,6 +582,11 @@ export interface ProductProfitability {
   cost_price:          number;
   /** Delivered orders count matched via orders.sku = products.sku. */
   units_delivered:     number;
+  /** Orders actually shipped to the courier (تم الشحن/تم التوصيل/جاري الإعادة/تم الإرجاع).
+   *  The Delivery-Rate denominator — excludes confirmed-not-shipped & new orders. */
+  units_shipped:       number;
+  /** Product Delivery Rate = units_delivered ÷ units_shipped × 100 (0 when none shipped). */
+  delivery_rate:       number;
   /** Meta-reported purchases for this product (authoritative order count, CPA denominator).
    *  Sourced from SUM(meta_purchases) in expenses where sku matches. */
   total_orders:        number;

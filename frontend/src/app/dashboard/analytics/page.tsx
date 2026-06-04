@@ -683,7 +683,9 @@ export default function AnalyticsDashboard() {
         adsSpend:        safe(item.attributed_ad_spend),
         cogs:            safe(item.cogs),
         cr:              null,
-        dr:              null,
+        /* Product Delivery Rate = delivered ÷ shipped (from the backend).
+           null (→ "—") only when nothing was shipped yet, so the rate is N/A. */
+        dr:              item.units_shipped > 0 ? safe(item.delivery_rate) : null,
         ndr:             safe(itemNdr),
         netProfit:       safe(item.net_profit),
         metaOrders:      safe(metaOrders),
