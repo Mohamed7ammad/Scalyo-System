@@ -561,12 +561,19 @@ export default function AnalyticsDashboard() {
   const metaSpend      = ov?.meta_spend      ?? 0;
 
   /* COGS summed from per-product profitability (most accurate source).
+     RESPECTS the product dropdown: when a specific product is selected we sum
+     only that product's row, so the COGS / Net-Profit KPIs change with the
+     filter. (profitability is always fetched for the full catalogue — it feeds
+     the dropdown options — so the scoping is done here on the client.)
+     The dropdown value === product_name, so the match is exact.
      Guard each row's cogs with isFinite() so a single malformed product row
      cannot poison the whole sum with NaN.                                   */
-  const totalCogs = useMemo(
-    () => profitability.reduce((s, p) => s + (Number.isFinite(p.cogs) ? p.cogs : 0), 0),
-    [profitability]
-  );
+  const totalCogs = useMemo(() => {
+    const rows = (product && product !== 'كل المنتجات')
+      ? profitability.filter((p) => p.product_name === product)
+      : profitability;
+    return rows.reduce((s, p) => s + (Number.isFinite(p.cogs) ? p.cogs : 0), 0);
+  }, [profitability, product]);
 
   /* Affiliate marketers hold no stock → no Cost of Goods Sold. Local plans use
      the real per-product COGS sum. */
