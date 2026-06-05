@@ -33,6 +33,18 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "quantity" INTEGER NOT N
    double-restocked across status changes.                                     */
 pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "stock_deducted" BOOLEAN NOT NULL DEFAULT false`)
   .then(() => console.log('✅  Orders: "stock_deducted" column ready'))
+  /* One-time catch-up: orders confirmed BEFORE this flag existed were already
+     deducted by the previous logic but still carry stock_deducted=false, so a
+     move to مؤجل/ملغي wouldn't restock. Flag every order currently IN a committed
+     state as deducted so the lifecycle is consistent. Idempotent — after the
+     first run there are no committed+unflagged rows left (the PATCH hook keeps
+     the flag in sync going forward).                                           */
+  .then(() => pool.query(`
+    UPDATE orders SET "stock_deducted" = true
+     WHERE "stock_deducted" = false
+       AND TRIM("Status") IN ('تم التأكيد', 'تم الشحن', 'تم التوصيل')
+  `))
+  .then((r) => { if (r.rowCount) console.log(`✅  Orders: back-filled stock_deducted=true for ${r.rowCount} committed order(s)`); })
   .catch((err) => console.warn('⚠️   Orders stock_deducted column check:', err.message));
 
 /* ── Postponed follow-up date ───────────────────────────────────────────────
@@ -697,15 +709,20 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
      Deduction/restock are by the order's `quantity`, matched SKU-first.
      NOTE: physical returns from the Bosta webhook restock via applyPhysicalReturn,
      which also clears stock_deducted, so the two paths never double-count.     */
-  const RESERVED = new Set(['تم التأكيد', 'تم الشحن', 'تم التوصيل']);
+  /* Stock is held ONLY while the order is actively in the fulfilment pipeline.
+     ANY other state (مؤجل / ملغي / مرفوض / لا يرد / جديد / …) must release it.
+     Normalise (NFC + trim) before the inclusion test so trailing spaces or
+     Unicode-form differences can never cause a mismatch / missed restock.      */
+  const COMMITTED_STATES = ['تم التأكيد', 'تم الشحن', 'تم التوصيل'];
+  const normState = (s) => (s ?? '').normalize('NFC').trim();
 
   if (updates.Status && updates.Status !== currentStatus) {
-    const isReservedNew = RESERVED.has(updates.Status);
+    const isCommitted = COMMITTED_STATES.includes(normState(updates.Status));
     const hasSku   = Boolean(currentSku);
     const matchCol = hasSku ? 'sku = $1' : 'TRIM(name) = TRIM($1)';
     const matchVal = hasSku ? currentSku : currentProductName;
 
-    if (isReservedNew && !currentStockDeducted) {
+    if (isCommitted && !currentStockDeducted) {
       /* ── Deduct on confirmation (entering committed, not yet deducted) ── */
       if (!currentProductName && !currentSku) {
         console.warn(`[Inventory] Order ${id} has no product — cannot deduct.`);
@@ -741,8 +758,8 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
         }
       }
 
-    } else if (!isReservedNew && currentStockDeducted) {
-      /* ── Restock on leaving committed (cancel / reject / revert) ── */
+    } else if (!isCommitted && currentStockDeducted) {
+      /* ── Restock on leaving committed (postpone / cancel / reject / revert) ── */
       try {
         const r = await pool.query(
           `UPDATE products SET stock_quantity = stock_quantity + $2
@@ -766,7 +783,7 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
       }
 
     } else {
-      console.log(`[Inventory] No stock move for order ${id} (reservedNew=${isReservedNew}, alreadyDeducted=${currentStockDeducted}).`);
+      console.log(`[Inventory] No stock move for order ${id} (committed=${isCommitted}, alreadyDeducted=${currentStockDeducted}).`);
     }
   }
 
