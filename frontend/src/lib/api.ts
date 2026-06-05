@@ -614,7 +614,10 @@ export interface ProductProfitability {
   attributed_ad_spend: number;
   /** cost_price × units_delivered */
   cogs:                number;
-  /** delivered_revenue − cogs − attributed_ad_spend */
+  /** Exact per-AWB Bosta shipping (Σ orders.actual_shipping_fee) for delivered
+   *  orders — the real shipping cost folded into this product's margin. */
+  shipping_cost?:      number;
+  /** delivered_revenue − cogs − attributed_ad_spend − shipping_cost */
   net_profit:          number;
   /** attributed_ad_spend / total_orders  (null when no Meta orders) */
   cpa:                 number | null;
