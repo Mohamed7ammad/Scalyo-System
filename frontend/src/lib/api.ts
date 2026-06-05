@@ -219,6 +219,7 @@ export interface Product {
   selling_price:  number | string;
   stock_quantity: number;
   image_url:      string | null;
+  aliases:        string[];        // external campaign codes that map to this product
   created_at:     string;
 }
 

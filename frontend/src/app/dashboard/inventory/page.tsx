@@ -59,9 +59,10 @@ type FormState = {
   name: string; sku: string;
   cost_price: string; selling_price: string;
   stock_quantity: string; image_url: string;
+  aliases: string;   // comma-separated in the UI; parsed to string[] on save
 };
 const EMPTY_FORM: FormState = {
-  name: '', sku: '', cost_price: '', selling_price: '', stock_quantity: '', image_url: '',
+  name: '', sku: '', cost_price: '', selling_price: '', stock_quantity: '', image_url: '', aliases: '',
 };
 
 type PurchaseFormState = {
@@ -249,6 +250,7 @@ export default function InventoryPage() {
       selling_price:  String(parseN(p.selling_price)),
       stock_quantity: String(p.stock_quantity),
       image_url:      p.image_url ?? '',
+      aliases:        Array.isArray(p.aliases) ? p.aliases.join(', ') : '',
     });
     setFormError('');
     setShowModal(true);
@@ -308,6 +310,10 @@ export default function InventoryPage() {
       selling_price:  parseN(form.selling_price),
       stock_quantity: Math.max(0, Math.round(parseN(form.stock_quantity))),
       image_url:      form.image_url.trim() || null,
+      // Parse the comma-separated aliases textbox → trimmed, de-duped array.
+      aliases:        [...new Set(
+        form.aliases.split(',').map((a) => a.trim()).filter(Boolean)
+      )],
     };
 
     setSaving(true);
@@ -833,6 +839,21 @@ export default function InventoryPage() {
                 placeholder="https://example.com/image.jpg"
                 className={inputCls}
               />
+            </Field>
+
+            {/* Campaign aliases (SKU mapping) */}
+            <Field label="أكواد الحملات (Aliases)">
+              <input
+                type="text" dir="ltr"
+                value={form.aliases}
+                onChange={(e) => setForm((p) => ({ ...p, aliases: e.target.value }))}
+                placeholder="ipl, laser-ad, heating-Pad"
+                className={inputCls}
+              />
+              <p className="mt-1 text-xs text-gray-400 dark:text-slate-500" dir="rtl">
+                أكواد بديلة (مفصولة بفاصلة) يستخدمها الميديا باير في إعلانات Meta / إيزي أوردر.
+                أي طلب يصل بأحد هذه الأكواد سيُطابق هذا المنتج لخصم/إرجاع المخزون تلقائياً.
+              </p>
             </Field>
 
             {/* Error */}

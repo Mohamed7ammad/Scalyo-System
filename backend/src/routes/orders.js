@@ -573,6 +573,41 @@ const PATCH_WHITELIST = new Set([
 ]);
 
 // PATCH /api/orders/:id — agents restricted to Status + Note only
+/* ── Alias-aware product resolver ─────────────────────────────────────────────
+   Resolve the product an order maps to. Matches the order's sku OR product name
+   against a product's main `sku`, `name`, OR any entry in its `aliases` array —
+   all case-insensitive + trimmed. Returns the product row (or null). Preference
+   order: exact SKU → exact name → alias match.                                 */
+async function resolveProductForOrder(businessId, sku, name) {
+  const skuKey  = (sku  ?? '').trim();
+  const nameKey = (name ?? '').trim();
+  if (!skuKey && !nameKey) return null;
+
+  const { rows } = await pool.query(
+    `SELECT id, name, sku, stock_quantity, cost_price,
+            CASE
+              WHEN LOWER(TRIM(sku))  = LOWER(NULLIF($1, '')) THEN 1
+              WHEN LOWER(TRIM(name)) = LOWER(NULLIF($2, '')) THEN 2
+              ELSE 3
+            END AS match_rank
+       FROM products
+      WHERE business_id = $3
+        AND (
+              LOWER(TRIM(sku))  = LOWER(NULLIF($1, ''))
+           OR LOWER(TRIM(name)) = LOWER(NULLIF($2, ''))
+           OR EXISTS (
+                SELECT 1 FROM unnest(COALESCE(aliases, '{}'::text[])) AS a
+                 WHERE LOWER(TRIM(a)) = LOWER(NULLIF($1, ''))
+                    OR LOWER(TRIM(a)) = LOWER(NULLIF($2, ''))
+              )
+            )
+      ORDER BY match_rank ASC
+      LIMIT 1`,
+    [skuKey, nameKey, businessId]
+  );
+  return rows[0] || null;
+}
+
 /* Accept either `Status` or lowercase `status` from the client (defensive —
    canonicalise to `Status` before the agent-field guard + whitelist run). */
 function canonicalizeStatusKey(req, _res, next) {
@@ -738,9 +773,6 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
   if (updates.Status && updates.Status !== currentStatus) {
     const isCommitted = COMMITTED_STATES.includes(normState(updates.Status));
     console.log(`[DEBUG Inventory] Raw incoming status: "${updates.Status}" | normalized: "${normState(updates.Status)}" | isCommitted: ${isCommitted} | stock_deducted: ${currentStockDeducted} | order ${id}`);
-    const hasSku   = Boolean(currentSku);
-    const matchCol = hasSku ? 'sku = $1' : 'TRIM(name) = TRIM($1)';
-    const matchVal = hasSku ? currentSku : currentProductName;
 
     if (isCommitted && !currentStockDeducted) {
       /* ── Deduct on confirmation (entering committed, not yet deducted) ── */
@@ -748,21 +780,22 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
         console.warn(`[Inventory] Order ${id} has no product — cannot deduct.`);
       } else {
         try {
-          const r = await pool.query(
-            `UPDATE products SET stock_quantity = stock_quantity - $2
-              WHERE ${matchCol} AND business_id = $3
-              RETURNING name, sku, stock_quantity, cost_price`,
-            [matchVal, currentQty, businessId]
-          );
-          if (r.rowCount === 0) {
-            console.warn(`⚠️ Inventory deduct: no product matched (${hasSku ? 'SKU' : 'name'} "${matchVal}") — order ${id} left undeducted.`);
-            console.log(`[DEBUG Inventory] Product MATCH FAILED (deduct) for order ${id} | matched by ${hasSku ? 'SKU' : 'name'} | sku="${currentSku}" | product_name="${currentProductName}" — check products table for an exact ${hasSku ? 'sku' : 'name'} match (business ${businessId}).`);
+          const prod = await resolveProductForOrder(businessId, currentSku, currentProductName);
+          if (!prod) {
+            console.warn(`⚠️ Inventory deduct: no product matched — order ${id} left undeducted.`);
+            console.log(`[DEBUG Inventory] Product MATCH FAILED (deduct) for order ${id} | sku="${currentSku}" | product_name="${currentProductName}" — no products row whose sku/name/aliases match (business ${businessId}). Add an alias on the product.`);
           } else {
+            const r = await pool.query(
+              `UPDATE products SET stock_quantity = stock_quantity - $1
+                WHERE id = $2 AND business_id = $3
+                RETURNING name, sku, stock_quantity, cost_price`,
+              [currentQty, prod.id, businessId]
+            );
             await pool.query(
               'UPDATE orders SET "stock_deducted" = true WHERE id = $1 AND business_id = $2',
               [id, businessId]
             );
-            console.log(`✅ Inventory: -${currentQty} → "${r.rows[0].name}" now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
+            console.log(`✅ Inventory: -${currentQty} → "${r.rows[0].name}" (SKU ${r.rows[0].sku}) now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
 
             /* WAC cost lock — freeze the product's current cost on the order so
                historical profitability stays accurate after future supply batches. */
@@ -782,17 +815,18 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     } else if (!isCommitted && currentStockDeducted) {
       /* ── Restock on leaving committed (postpone / cancel / reject / revert) ── */
       try {
-        const r = await pool.query(
-          `UPDATE products SET stock_quantity = stock_quantity + $2
-            WHERE ${matchCol} AND business_id = $3
-            RETURNING name, sku, stock_quantity`,
-          [matchVal, currentQty, businessId]
-        );
-        if (r.rowCount === 0) {
-          console.warn(`⚠️ Inventory restock: no product matched (${hasSku ? 'SKU' : 'name'} "${matchVal}") — order ${id}.`);
-          console.log(`[DEBUG Inventory] Product MATCH FAILED (restock) for order ${id} | matched by ${hasSku ? 'SKU' : 'name'} | sku="${currentSku}" | product_name="${currentProductName}" — check products table for an exact ${hasSku ? 'sku' : 'name'} match (business ${businessId}).`);
+        const prod = await resolveProductForOrder(businessId, currentSku, currentProductName);
+        if (!prod) {
+          console.warn(`⚠️ Inventory restock: no product matched — order ${id}.`);
+          console.log(`[DEBUG Inventory] Product MATCH FAILED (restock) for order ${id} | sku="${currentSku}" | product_name="${currentProductName}" — no products row whose sku/name/aliases match (business ${businessId}).`);
         } else {
-          console.log(`✅ Inventory: +${currentQty} → "${r.rows[0].name}" now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
+          const r = await pool.query(
+            `UPDATE products SET stock_quantity = stock_quantity + $1
+              WHERE id = $2 AND business_id = $3
+              RETURNING name, sku, stock_quantity`,
+            [currentQty, prod.id, businessId]
+          );
+          console.log(`✅ Inventory: +${currentQty} → "${r.rows[0].name}" (SKU ${r.rows[0].sku}) now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
         }
         // Order no longer committed → clear the flag (even if no product matched,
         // so the lifecycle state stays consistent).

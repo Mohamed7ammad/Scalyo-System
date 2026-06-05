@@ -26,10 +26,29 @@ pool.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS purchase_date D
   .then(() => console.log('✅  purchase_orders: "purchase_date" column ready'))
   .catch((err) => console.warn('⚠️   purchase_orders purchase_date check:', err.message));
 
+/* ── Product aliases (SKU mapping) ──────────────────────────────────────────
+   External campaign codes that map onto this product. Media buyers can put any
+   of these in a Meta ad / EasyOrder form; the inventory hook matches the order's
+   sku OR product name against the product's main sku OR any alias.            */
+pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS aliases TEXT[] NOT NULL DEFAULT '{}'`)
+  .then(() => console.log('✅  products: "aliases" column ready'))
+  .catch((err) => console.warn('⚠️   products aliases column check:', err.message));
+
 // ── Allowed fields for PATCH (explicit allowlist — never dynamic) ──────────
 const MUTABLE_FIELDS = new Set([
-  'name', 'sku', 'cost_price', 'selling_price', 'stock_quantity', 'image_url',
+  'name', 'sku', 'cost_price', 'selling_price', 'stock_quantity', 'image_url', 'aliases',
 ]);
+
+/* Normalise an aliases payload (array OR comma-separated string) → trimmed,
+   de-duplicated, non-empty string array. */
+function normalizeAliases(raw) {
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (typeof raw === 'string') arr = raw.split(',');
+  return [...new Set(
+    arr.map((a) => String(a).trim()).filter(Boolean)
+  )];
+}
 
 // GET /api/products — all authenticated roles (agents need it for the manual
 // order modal). SECURITY: non-admins never receive cost_price (COGS); they get
@@ -39,7 +58,7 @@ router.get('/', authenticate, async (req, res) => {
     const isAdmin = req.user.role === 'admin';
     const cols = isAdmin
       ? '*'
-      : 'id, name, sku, selling_price, stock_quantity, image_url, created_at, business_id';
+      : 'id, name, sku, aliases, selling_price, stock_quantity, image_url, created_at, business_id';
     const result = await pool.query(
       `SELECT ${cols} FROM products WHERE business_id = $1 ORDER BY name ASC`,
       [req.user.business_id]
@@ -59,6 +78,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     selling_price = 0,
     stock_quantity = 0,
     image_url     = null,
+    aliases       = [],
   } = req.body;
 
   if (!name || !sku) {
@@ -67,8 +87,8 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO products (name, sku, cost_price, selling_price, stock_quantity, image_url, business_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO products (name, sku, cost_price, selling_price, stock_quantity, image_url, aliases, business_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
       [
         name.trim(),
@@ -77,6 +97,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
         Number(selling_price)  || 0,
         Number(stock_quantity) || 0,
         image_url || null,
+        normalizeAliases(aliases),
         req.user.business_id,
       ]
     );
@@ -107,6 +128,7 @@ router.patch('/:id', authenticate, requireAdmin, async (req, res) => {
   // Normalise string fields
   if (updates.name) updates.name = String(updates.name).trim();
   if (updates.sku)  updates.sku  = String(updates.sku).trim().toUpperCase();
+  if (updates.aliases !== undefined) updates.aliases = normalizeAliases(updates.aliases);
 
   // Coerce numeric fields so accidental string values don't slip through
   for (const numField of ['cost_price', 'selling_price', 'stock_quantity']) {
