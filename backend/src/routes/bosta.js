@@ -46,7 +46,8 @@ const router = express.Router();
 pool.query(`
   ALTER TABLE orders
     ADD COLUMN IF NOT EXISTS return_note         TEXT,
-    ADD COLUMN IF NOT EXISTS return_shipping_fee NUMERIC(10,2) DEFAULT 0
+    ADD COLUMN IF NOT EXISTS return_shipping_fee NUMERIC(10,2) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS actual_shipping_fee NUMERIC(10,2)
 `)
   .then(() =>
     pool.query(`

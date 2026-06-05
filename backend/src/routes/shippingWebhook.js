@@ -2,6 +2,7 @@
 
 const express = require('express');
 const pool    = require('../config/db');
+const { captureActualShippingFee } = require('../services/bostaShippingFee');
 
 const router = express.Router();
 
@@ -552,6 +553,23 @@ router.post('/bosta', async (req, res) => {
         [deliveredAt, order.id, businessId]
       );
       console.log(`✅  Order #${order.id} delivered_at stamped (no auto-revenue — recorded manually on bank settlement).`);
+
+      /* ── Phase B1: capture the EXACT per-AWB shipping fee ─────────────────
+         Pull priceAfterVat from Bosta's integrations API and store it on the
+         order (idempotent — only when not already set). Fully isolated in its
+         own try/catch + runs AFTER the 200 ack, so a Bosta API hiccup can never
+         affect the delivery status write or the webhook response. Any miss is
+         backfilled later by src/scripts/backfillShippingFees.js.            */
+      try {
+        const fee = await captureActualShippingFee(trackingNumber, businessId);
+        if (fee != null) {
+          console.log(`✅  Order #${order.id} actual_shipping_fee = ${fee} EGP (Bosta priceAfterVat).`);
+        } else {
+          console.log(`[Bosta Webhook] actual_shipping_fee not captured for #${order.id} (already set or fee unavailable) — backfill will retry.`);
+        }
+      } catch (feeErr) {
+        console.warn(`[Bosta Webhook] actual_shipping_fee capture error for #${order.id}:`, feeErr.message);
+      }
     }
 
     /* ── Step 4: Physical-return gate ────────────────────────────────────
