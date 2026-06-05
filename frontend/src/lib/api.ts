@@ -496,6 +496,12 @@ export interface DashboardOverviewStats {
   total_expenses:  number;
   /** Sum of Meta-synced expense rows only. */
   meta_spend:      number;
+  /** TRUE-net-profit operating expenses from the treasury ledger (commissions,
+   *  shipping, packaging, fixed/SaaS) — ad spend excluded to avoid double count.
+   *  Business-wide; scale by the product's delivered-revenue share when filtered. */
+  operating_expenses?: number;
+  /** Per-source OPEX breakdown for the cost-stack tooltip. */
+  opex_breakdown?:     { source: string; label: string; amount: number }[];
 }
 
 export interface DailyChartStat {
