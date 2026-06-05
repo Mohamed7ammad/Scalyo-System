@@ -917,11 +917,44 @@ router.get('/dashboard', authenticate, async (req, res) => {
     LIMIT 10
   `;
 
-  /* Run all 6 queries concurrently.  Each has its own .catch() so a single
+  /* ── 7. Operating expenses (OPEX) from the treasury ledger ───────────────────
+     The TRUE-net-profit costs that live OUTSIDE the ad-spend `expenses` table:
+     confirmation commissions, courier/shipping settlements, packaging, and fixed
+     operational / SaaS costs. Source of truth = treasury_transactions.
+       • type = 'expense'      → only costs (never revenue / opening-balance rows).
+       • source <> 'AD_SPEND'  → ad spend is owned authoritatively by the Meta-
+                                 synced `expenses` table (drives total_expenses /
+                                 meta_spend). The manual treasury AD_SPEND entry is
+                                 a cash-flow duplicate of that, so it MUST be
+                                 excluded here to avoid double-counting ad spend.
+       • transaction_date window → calendar-dated, the SAME basis as ad spend.
+     Business-wide (OPEX has no product dimension); when the dashboard is filtered
+     to one product the FRONTEND applies a proportional delivered-revenue split.
+     Source-agnostic: any NEW expense category added in Treasury (other than
+     AD_SPEND) flows into Net Profit automatically. Grouped by source so the UI
+     can render a transparent cost stack. $1=tenant, $2=start, $3=end.          */
+  const opexParams = [
+    req.user.business_id,
+    (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,
+    (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,
+  ];
+  const opexSql = `
+    SELECT source,
+           COALESCE(SUM(amount), 0) AS amount
+    FROM   treasury_transactions
+    WHERE  business_id = $1::integer
+      AND  type   = 'expense'
+      AND  source <> 'AD_SPEND'
+      AND  ($2::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') >= $2)
+      AND  ($3::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') <= $3)
+    GROUP  BY source
+  `;
+
+  /* Run all 7 queries concurrently.  Each has its own .catch() so a single
      broken query (e.g. a missing column) returns an empty result set instead
      of crashing the entire payload.  The exact failure is logged to the
      backend terminal so you can identify which query went wrong.           */
-  const [ovRes, exRes, dayRes, dayExpRes, govRes, rejRes] = await Promise.all([
+  const [ovRes, exRes, dayRes, dayExpRes, govRes, rejRes, opexRes] = await Promise.all([
     pool.query(overviewSql, ordParams).catch(err => {
       console.error('[dashboard/overview]   QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [{ total_orders: 0, total_confirmed: 0, total_delivered: 0,
@@ -948,6 +981,10 @@ router.get('/dashboard', authenticate, async (req, res) => {
       console.error('[dashboard/rejection]  QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [] };
     }),
+    pool.query(opexSql, opexParams).catch(err => {
+      console.error('[dashboard/opex]       QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [] };
+    }),
   ]);
 
     /* ── Build overview ──
@@ -960,6 +997,35 @@ router.get('/dashboard', authenticate, async (req, res) => {
       total_rejected: 0, total_returned: 0, total_pending: 0, total_revenue: 0,
     };
     const ex = exRes.rows[0] ?? { total_expenses: 0, meta_spend: 0, meta_total_orders: 0 };
+
+    /* ── Operating expenses (OPEX) breakdown ──
+       Map each treasury source code to an Arabic label and sum the total. The
+       map is source-agnostic: an unknown/custom source falls back to its raw
+       code so a new Treasury category still shows (and still counts) without a
+       code change here. operating_expenses = the full business-wide OPEX in the
+       window (ad spend already excluded by the query). */
+    const OPEX_LABELS = {
+      comm_confirmed:                'عمولات تأكيد',
+      comm_delivered:                'عمولات توصيل',
+      comm_rejected:                 'عمولات رفض',
+      comm_no_answer:                'عمولات عدم رد',
+      PACKAGING_COST:                'تغليف',
+      SHIPPING_PACKAGE_SUBSCRIPTION: 'شحن',
+      OPERATIONAL_EXPENSE:           'مصروفات تشغيلية',
+    };
+    let operating_expenses = 0;
+    const opex_breakdown = (opexRes.rows ?? [])
+      .map((r) => {
+        const amount = parseFloat(r.amount) || 0;
+        operating_expenses += amount;
+        return {
+          source: r.source,
+          label:  OPEX_LABELS[r.source] || r.source,
+          amount: parseFloat(amount.toFixed(2)),
+        };
+      })
+      .sort((a, b) => b.amount - a.amount);
+    operating_expenses = parseFloat(operating_expenses.toFixed(2));
 
     const overview = {
       /* total_orders = Meta-reported purchases (authoritative) — NOT the ERP row count.
@@ -977,6 +1043,11 @@ router.get('/dashboard', authenticate, async (req, res) => {
       total_revenue:   parseFloat(parseFloat(ov.total_revenue  || 0).toFixed(2)),
       total_expenses:  parseFloat(parseFloat(ex.total_expenses || 0).toFixed(2)),
       meta_spend:      parseFloat(parseFloat(ex.meta_spend     || 0).toFixed(2)),
+      /* TRUE-net-profit OPEX from the treasury ledger (ad spend excluded).
+         Business-wide; the frontend scales it by the product's delivered-revenue
+         share when a single product is selected. */
+      operating_expenses,
+      opex_breakdown,
     };
 
     /* ── Build daily chart stats ──

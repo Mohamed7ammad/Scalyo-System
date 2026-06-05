@@ -579,13 +579,37 @@ export default function AnalyticsDashboard() {
      the real per-product COGS sum. */
   const effectiveCogs = isAffiliate ? 0 : totalCogs;
 
+  /* ── True OPEX (operating expenses) from the treasury ledger ──
+     Business-wide total from the backend (commissions + shipping + packaging +
+     fixed/SaaS; ad spend excluded to avoid double-counting Meta). When a single
+     product is selected we attribute a PROPORTIONAL share weighted by that
+     product's delivered-revenue (Product Delivered Revenue ÷ Total Delivered
+     Revenue) — the split key the business chose. profitability always holds the
+     FULL catalogue, so it supplies the all-products denominator. */
+  const totalOpex = ov?.operating_expenses ?? 0;
+
+  const opexRatio = useMemo(() => {
+    if (!product || product === 'كل المنتجات') return 1;
+    const totalDeliveredRev = profitability.reduce(
+      (s, p) => s + (Number.isFinite(p.delivered_revenue) ? p.delivered_revenue : 0), 0);
+    if (totalDeliveredRev <= 0) return 0;
+    const prodDeliveredRev = profitability
+      .filter((p) => p.product_name === product)
+      .reduce((s, p) => s + (Number.isFinite(p.delivered_revenue) ? p.delivered_revenue : 0), 0);
+    return prodDeliveredRev / totalDeliveredRev;
+  }, [profitability, product]);
+
+  /* Affiliates don't use the product split → carry the OPEX they logged as-is. */
+  const effectiveOpex = isAffiliate ? totalOpex : totalOpex * opexRatio;
+
   /* For historical date ranges Revenue and COGS may both be 0; in that case
      netProfit = 0 − 0 − expenses = −expenses (correct negative profit).
      For affiliate plans: netProfit = externalRevenue − 0 − expenses(incl. ad spend).
      All three operands are already guarded to finite numbers above / via ?? 0. */
   const netProfit = (Number.isFinite(totalRevenue)   ? totalRevenue   : 0)
                   - (Number.isFinite(effectiveCogs)  ? effectiveCogs  : 0)
-                  - (Number.isFinite(totalExpenses)  ? totalExpenses  : 0);
+                  - (Number.isFinite(totalExpenses)  ? totalExpenses  : 0)
+                  - (Number.isFinite(effectiveOpex)  ? effectiveOpex  : 0);
 
   /* Rates (percentages) — guard against division by zero */
   const cr    = totalOrders    > 0 ? totalConfirmed / totalOrders    * 100 : 0;
@@ -606,11 +630,15 @@ export default function AnalyticsDashboard() {
     if (!dashStats?.daily_chart_stats?.length) return [];
     /* Estimate per-day COGS using average COGS/delivery across all products */
     const avgCogsPer = totalDelivered > 0 ? totalCogs / totalDelivered : 0;
+    /* Distribute OPEX across the period's deliveries so the daily Net-Profit line
+       reconciles with the headline KPI (which now subtracts OPEX). */
+    const avgOpexPer = totalDelivered > 0 ? effectiveOpex / totalDelivered : 0;
     return dashStats.daily_chart_stats.map((s) => {
       const dayRevenue    = s.revenue;
       const dayCogsEst    = Math.round(s.delivered * avgCogsPer);
+      const dayOpexEst    = Math.round(s.delivered * avgOpexPer);
       const grossMargin   = Math.round(dayRevenue - dayCogsEst);
-      const dayNetProfit  = Math.round(grossMargin - s.ads_spend);
+      const dayNetProfit  = Math.round(grossMargin - s.ads_spend - dayOpexEst);
       return {
         date:        fmtDateArabic(s.date),
         iso:         s.date,
@@ -622,7 +650,7 @@ export default function AnalyticsDashboard() {
         netProfit:   dayNetProfit,
       };
     });
-  }, [dashStats, totalCogs, totalDelivered]);
+  }, [dashStats, totalCogs, totalDelivered, effectiveOpex]);
 
   /* ── Rejection donut chart data ───────────────────────────────── */
   const rejectionData = useMemo(() => {
@@ -958,7 +986,7 @@ export default function AnalyticsDashboard() {
               label="صافي الربح النهائي"
               value={loadingDash ? '...' : fmtEGP(Math.round(netProfit))}
               subValue={dashStats
-                ? (isAffiliate ? 'إيرادات الأفليت − المصروفات والإعلانات ✓' : 'إيرادات − تكلفة البضاعة − المصروفات ✓')
+                ? (isAffiliate ? 'إيرادات الأفليت − المصروفات والإعلانات ✓' : 'إيرادات − تكلفة البضاعة − الإعلانات − المصاريف التشغيلية ✓')
                 : 'في انتظار البيانات...'}
               trend={18}
               highlight
@@ -1081,6 +1109,21 @@ export default function AnalyticsDashboard() {
                 trend={14.2}
                 trendGood={false}
                 accent="text-slate-600 dark:text-slate-400"
+              />
+            )}
+            {/* Operating expenses (OPEX) from the treasury ledger — commissions,
+                shipping, packaging, fixed/SaaS. Ad spend excluded (counted via
+                Meta). Scaled to the selected product's delivered-revenue share. */}
+            {!isAffiliate && (
+              <KPICard
+                label="المصاريف التشغيلية (OPEX)"
+                value={loadingDash ? '...' : fmtEGP(Math.round(effectiveOpex))}
+                subValue={(ov?.opex_breakdown && ov.opex_breakdown.length > 0)
+                  ? ov.opex_breakdown.map((o) => `${o.label}: ${fmtEGP(Math.round(o.amount * opexRatio))}`).join(' · ')
+                  : 'عمولات + شحن + تغليف + تشغيل'}
+                trend={6.5}
+                trendGood={false}
+                accent="text-rose-600 dark:text-rose-400"
               />
             )}
             <KPICard
