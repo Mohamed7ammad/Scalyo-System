@@ -498,10 +498,16 @@ export interface DashboardOverviewStats {
   meta_spend:      number;
   /** TRUE-net-profit operating expenses from the treasury ledger (commissions,
    *  shipping, packaging, fixed/SaaS) — ad spend excluded to avoid double count.
-   *  Business-wide; scale by the product's delivered-revenue share when filtered. */
+   *  Business-wide total. */
   operating_expenses?: number;
   /** Per-source OPEX breakdown for the cost-stack tooltip. */
   opex_breakdown?:     { source: string; label: string; amount: number }[];
+  /** Path A+ split inputs. commissions_total is attributed EXACTLY per product
+   *  via opex_commission_by_product; shared_total is split by delivered-order
+   *  count on the client. */
+  opex_commissions_total?:     number;
+  opex_shared_total?:          number;
+  opex_commission_by_product?: Record<string, number>;
 }
 
 export interface DailyChartStat {

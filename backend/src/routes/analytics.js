@@ -928,11 +928,19 @@ router.get('/dashboard', authenticate, async (req, res) => {
                                  a cash-flow duplicate of that, so it MUST be
                                  excluded here to avoid double-counting ad spend.
        • transaction_date window → calendar-dated, the SAME basis as ad spend.
-     Business-wide (OPEX has no product dimension); when the dashboard is filtered
-     to one product the FRONTEND applies a proportional delivered-revenue split.
-     Source-agnostic: any NEW expense category added in Treasury (other than
-     AD_SPEND) flows into Net Profit automatically. Grouped by source so the UI
-     can render a transparent cost stack. $1=tenant, $2=start, $3=end.          */
+     Business-wide; the frontend attributes OPEX to a selected product using the
+     Path A+ model:
+       · COMMISSIONS (source LIKE 'comm_%') are EXACT per product — each treasury
+         commission row carries an order_id, so we join it to its order's product
+         (same SKU/name-fallback logic as profitability) and sum per product.
+       · SHARED costs (shipping / packaging / operational / SaaS / any other
+         non-AD_SPEND, non-commission source) have no product link, so the
+         frontend splits them by DELIVERED-ORDER COUNT — not revenue — because a
+         cheap and an expensive product cost roughly the same to ship/pack.
+     Source-agnostic on the shared side: any NEW expense category added in
+     Treasury (other than AD_SPEND/commissions) flows into the count-split
+     automatically. Grouped by source so the UI can render a cost stack.
+     $1=tenant, $2=start, $3=end.                                             */
   const opexParams = [
     req.user.business_id,
     (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,
@@ -950,11 +958,44 @@ router.get('/dashboard', authenticate, async (req, res) => {
     GROUP  BY source
   `;
 
+  /* ── 7b. EXACT per-product commissions (Path A+) ─────────────────────────────
+     Commission treasury rows carry order_id → join to the order, then to its
+     product via the SAME SKU-then-ProductName-fallback used by profitability so
+     legacy/junk-SKU orders are not dropped. Summed per product, calendar-dated by
+     transaction_date (consistent with the OPEX window). Orders whose product
+     cannot be resolved stay in the business-wide commission total but are simply
+     not attributed to any single product (acceptable, small residual). Same
+     params as opexSql ($1 tenant, $2 start, $3 end).                          */
+  const opexCommByProductSql = `
+    SELECT p.name                         AS product_name,
+           COALESCE(SUM(tt.amount), 0)    AS commission
+    FROM   treasury_transactions tt
+    JOIN   orders   o ON o.id = tt.order_id AND o.business_id = $1::integer
+    JOIN   products p ON p.business_id = $1::integer
+      AND (
+        ( COALESCE(o.sku, '') <> '' AND UPPER(o.sku) = UPPER(p.sku) )
+        OR
+        ( UPPER(TRIM(COALESCE(o."ProductName", ''))) = UPPER(TRIM(p.name))
+          AND NOT EXISTS (
+            SELECT 1 FROM products px
+            WHERE px.business_id = $1::integer
+              AND COALESCE(o.sku, '') <> ''
+              AND UPPER(px.sku) = UPPER(o.sku)
+          ) )
+      )
+    WHERE  tt.business_id = $1::integer
+      AND  tt.type = 'expense'
+      AND  tt.source LIKE 'comm\\_%'
+      AND  ($2::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') >= $2)
+      AND  ($3::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') <= $3)
+    GROUP  BY p.id, p.name
+  `;
+
   /* Run all 7 queries concurrently.  Each has its own .catch() so a single
      broken query (e.g. a missing column) returns an empty result set instead
      of crashing the entire payload.  The exact failure is logged to the
      backend terminal so you can identify which query went wrong.           */
-  const [ovRes, exRes, dayRes, dayExpRes, govRes, rejRes, opexRes] = await Promise.all([
+  const [ovRes, exRes, dayRes, dayExpRes, govRes, rejRes, opexRes, opexCommRes] = await Promise.all([
     pool.query(overviewSql, ordParams).catch(err => {
       console.error('[dashboard/overview]   QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [{ total_orders: 0, total_confirmed: 0, total_delivered: 0,
@@ -983,6 +1024,10 @@ router.get('/dashboard', authenticate, async (req, res) => {
     }),
     pool.query(opexSql, opexParams).catch(err => {
       console.error('[dashboard/opex]       QUERY FAILED:', err.message, err.detail ?? '');
+      return { rows: [] };
+    }),
+    pool.query(opexCommByProductSql, opexParams).catch(err => {
+      console.error('[dashboard/opex-comm]  QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [] };
     }),
   ]);
@@ -1027,6 +1072,27 @@ router.get('/dashboard', authenticate, async (req, res) => {
       .sort((a, b) => b.amount - a.amount);
     operating_expenses = parseFloat(operating_expenses.toFixed(2));
 
+    /* ── Path A+ OPEX split inputs ──
+       commissions_total = the comm_* slice of OPEX (attributed EXACTLY per product
+                           on the frontend via opex_commission_by_product).
+       shared_total      = everything else (shipping/packaging/ops/…) → the frontend
+                           splits this by DELIVERED-ORDER COUNT.
+       opex_commission_by_product = { [product_name]: exact commission in window }. */
+    const opex_commissions_total = parseFloat(
+      opex_breakdown
+        .filter((o) => String(o.source).startsWith('comm_'))
+        .reduce((s, o) => s + o.amount, 0)
+        .toFixed(2)
+    );
+    const opex_shared_total = parseFloat(
+      (operating_expenses - opex_commissions_total).toFixed(2)
+    );
+    const opex_commission_by_product = {};
+    for (const r of (opexCommRes.rows ?? [])) {
+      opex_commission_by_product[r.product_name] =
+        parseFloat((parseFloat(r.commission) || 0).toFixed(2));
+    }
+
     const overview = {
       /* total_orders = Meta-reported purchases (authoritative) — NOT the ERP row count.
          Source: SUM(meta_purchases) FILTER (WHERE meta_sync = true) from expenses,
@@ -1044,10 +1110,14 @@ router.get('/dashboard', authenticate, async (req, res) => {
       total_expenses:  parseFloat(parseFloat(ex.total_expenses || 0).toFixed(2)),
       meta_spend:      parseFloat(parseFloat(ex.meta_spend     || 0).toFixed(2)),
       /* TRUE-net-profit OPEX from the treasury ledger (ad spend excluded).
-         Business-wide; the frontend scales it by the product's delivered-revenue
-         share when a single product is selected. */
+         Business-wide total + Path A+ split inputs: commissions are attributed
+         EXACTLY per product (opex_commission_by_product); shared costs are split
+         by delivered-order count on the frontend. */
       operating_expenses,
       opex_breakdown,
+      opex_commissions_total,
+      opex_shared_total,
+      opex_commission_by_product,
     };
 
     /* ── Build daily chart stats ──
