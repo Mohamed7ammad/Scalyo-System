@@ -579,28 +579,57 @@ export default function AnalyticsDashboard() {
      the real per-product COGS sum. */
   const effectiveCogs = isAffiliate ? 0 : totalCogs;
 
-  /* ── True OPEX (operating expenses) from the treasury ledger ──
-     Business-wide total from the backend (commissions + shipping + packaging +
-     fixed/SaaS; ad spend excluded to avoid double-counting Meta). When a single
-     product is selected we attribute a PROPORTIONAL share weighted by that
-     product's delivered-revenue (Product Delivered Revenue ÷ Total Delivered
-     Revenue) — the split key the business chose. profitability always holds the
-     FULL catalogue, so it supplies the all-products denominator. */
-  const totalOpex = ov?.operating_expenses ?? 0;
+  /* ── True OPEX (operating expenses) from the treasury ledger — Path A+ model ──
+     The backend splits OPEX into two buckets:
+       • commissions  → attributed EXACTLY per product (opex_commission_by_product),
+                        since every commission row links to a specific order/product.
+       • shared costs → shipping / packaging / operational / SaaS — no product link,
+                        so we split them by DELIVERED-ORDER COUNT (not revenue): a
+                        cheap and an expensive product cost ~the same to ship & pack.
+     When a product is selected:  effectiveOpex = exactCommission(product)
+                                                + sharedTotal × (productUnits ÷ totalUnits)
+     For "all products":          ratio = 1, exactCommission = commissions_total
+                                   → effectiveOpex = full business OPEX. */
+  const totalOpex            = ov?.operating_expenses     ?? 0;
+  const opexCommissionsTotal = ov?.opex_commissions_total ?? 0;
+  const opexSharedTotal      = ov?.opex_shared_total      ?? 0;
+  const commissionByProduct  = ov?.opex_commission_by_product ?? {};
 
-  const opexRatio = useMemo(() => {
+  /* Delivered-order-count weight for the SHARED-cost split. */
+  const opexCountRatio = useMemo(() => {
     if (!product || product === 'كل المنتجات') return 1;
-    const totalDeliveredRev = profitability.reduce(
-      (s, p) => s + (Number.isFinite(p.delivered_revenue) ? p.delivered_revenue : 0), 0);
-    if (totalDeliveredRev <= 0) return 0;
-    const prodDeliveredRev = profitability
+    const totalUnits = profitability.reduce(
+      (s, p) => s + (Number.isFinite(p.units_delivered) ? p.units_delivered : 0), 0);
+    if (totalUnits <= 0) return 0;
+    const prodUnits = profitability
       .filter((p) => p.product_name === product)
-      .reduce((s, p) => s + (Number.isFinite(p.delivered_revenue) ? p.delivered_revenue : 0), 0);
-    return prodDeliveredRev / totalDeliveredRev;
+      .reduce((s, p) => s + (Number.isFinite(p.units_delivered) ? p.units_delivered : 0), 0);
+    return prodUnits / totalUnits;
   }, [profitability, product]);
 
+  /* Exact commission for the current scope (per product, or the full total). */
+  const effectiveCommission = useMemo(() => {
+    if (!product || product === 'كل المنتجات') return opexCommissionsTotal;
+    return commissionByProduct[product] ?? 0;
+  }, [product, opexCommissionsTotal, commissionByProduct]);
+
   /* Affiliates don't use the product split → carry the OPEX they logged as-is. */
-  const effectiveOpex = isAffiliate ? totalOpex : totalOpex * opexRatio;
+  const effectiveOpex = isAffiliate
+    ? totalOpex
+    : effectiveCommission + opexSharedTotal * opexCountRatio;
+
+  /* OPEX card cost-stack label: one EXACT commission line + each shared (non-comm)
+     source scaled by the delivered-order-count ratio. Reflects the Path A+ split
+     the headline uses, so the lines reconcile with effectiveOpex. */
+  const opexCardSub = useMemo(() => {
+    const parts: string[] = [];
+    if (effectiveCommission > 0) parts.push(`عمولات: ${fmtEGP(Math.round(effectiveCommission))}`);
+    for (const o of (ov?.opex_breakdown ?? [])) {
+      if (String(o.source).startsWith('comm_')) continue;   // commissions shown exact above
+      parts.push(`${o.label}: ${fmtEGP(Math.round(o.amount * opexCountRatio))}`);
+    }
+    return parts.length ? parts.join(' · ') : 'عمولات + شحن + تغليف + تشغيل';
+  }, [ov, effectiveCommission, opexCountRatio]);
 
   /* For historical date ranges Revenue and COGS may both be 0; in that case
      netProfit = 0 − 0 − expenses = −expenses (correct negative profit).
@@ -1111,16 +1140,15 @@ export default function AnalyticsDashboard() {
                 accent="text-slate-600 dark:text-slate-400"
               />
             )}
-            {/* Operating expenses (OPEX) from the treasury ledger — commissions,
-                shipping, packaging, fixed/SaaS. Ad spend excluded (counted via
-                Meta). Scaled to the selected product's delivered-revenue share. */}
+            {/* Operating expenses (OPEX) from the treasury ledger — commissions
+                (exact per product), shipping, packaging, fixed/SaaS. Ad spend
+                excluded (counted via Meta). Path A+: commissions exact, shared
+                costs split by delivered-order count. */}
             {!isAffiliate && (
               <KPICard
                 label="المصاريف التشغيلية (OPEX)"
                 value={loadingDash ? '...' : fmtEGP(Math.round(effectiveOpex))}
-                subValue={(ov?.opex_breakdown && ov.opex_breakdown.length > 0)
-                  ? ov.opex_breakdown.map((o) => `${o.label}: ${fmtEGP(Math.round(o.amount * opexRatio))}`).join(' · ')
-                  : 'عمولات + شحن + تغليف + تشغيل'}
+                subValue={opexCardSub}
                 trend={6.5}
                 trendGood={false}
                 accent="text-rose-600 dark:text-rose-400"
