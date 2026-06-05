@@ -42,7 +42,7 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "stock_deducted" BOOLEAN
   .then(() => pool.query(`
     UPDATE orders SET "stock_deducted" = true
      WHERE "stock_deducted" = false
-       AND TRIM("Status") IN ('تم التأكيد', 'تم الشحن', 'تم التوصيل')
+       AND TRIM("Status") IN ('تم التأكيد', 'تم التاكيد', 'تم الشحن', 'تم التوصيل')
   `))
   .then((r) => { if (r.rowCount) console.log(`✅  Orders: back-filled stock_deducted=true for ${r.rowCount} committed order(s)`); })
   .catch((err) => console.warn('⚠️   Orders stock_deducted column check:', err.message));
@@ -573,7 +573,19 @@ const PATCH_WHITELIST = new Set([
 ]);
 
 // PATCH /api/orders/:id — agents restricted to Status + Note only
-router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
+/* Accept either `Status` or lowercase `status` from the client (defensive —
+   canonicalise to `Status` before the agent-field guard + whitelist run). */
+function canonicalizeStatusKey(req, _res, next) {
+  if (req.body && typeof req.body === 'object') {
+    if (req.body.status !== undefined && req.body.Status === undefined) {
+      req.body.Status = req.body.status;
+      delete req.body.status;
+    }
+  }
+  next();
+}
+
+router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, async (req, res) => {
   const { id } = req.params;
   const businessId = req.user.business_id;
 
@@ -711,13 +723,21 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
      which also clears stock_deducted, so the two paths never double-count.     */
   /* Stock is held ONLY while the order is actively in the fulfilment pipeline.
      ANY other state (مؤجل / ملغي / مرفوض / لا يرد / جديد / …) must release it.
-     Normalise (NFC + trim) before the inclusion test so trailing spaces or
-     Unicode-form differences can never cause a mismatch / missed restock.      */
-  const COMMITTED_STATES = ['تم التأكيد', 'تم الشحن', 'تم التوصيل'];
-  const normState = (s) => (s ?? '').normalize('NFC').trim();
+     Hamza/diacritic-resilient normalisation: unify أإآ→ا, ى→ي, ة→ه, strip
+     harakat + tatweel + spaces — so 'تم التاكيد' (no hamza) == 'تم التأكيد'.    */
+  const normState = (s) => (s ?? '')
+    .normalize('NFC')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/[ً-ْـ]/g, '')   // harakat + tatweel
+    .replace(/\s+/g, ' ')
+    .trim();
+  const COMMITTED_STATES = ['تم التأكيد', 'تم الشحن', 'تم التوصيل'].map(normState);
 
   if (updates.Status && updates.Status !== currentStatus) {
     const isCommitted = COMMITTED_STATES.includes(normState(updates.Status));
+    console.log(`[DEBUG Inventory] Raw incoming status: "${updates.Status}" | normalized: "${normState(updates.Status)}" | isCommitted: ${isCommitted} | stock_deducted: ${currentStockDeducted} | order ${id}`);
     const hasSku   = Boolean(currentSku);
     const matchCol = hasSku ? 'sku = $1' : 'TRIM(name) = TRIM($1)';
     const matchVal = hasSku ? currentSku : currentProductName;
@@ -736,6 +756,7 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
           );
           if (r.rowCount === 0) {
             console.warn(`⚠️ Inventory deduct: no product matched (${hasSku ? 'SKU' : 'name'} "${matchVal}") — order ${id} left undeducted.`);
+            console.log(`[DEBUG Inventory] Product MATCH FAILED (deduct) for order ${id} | matched by ${hasSku ? 'SKU' : 'name'} | sku="${currentSku}" | product_name="${currentProductName}" — check products table for an exact ${hasSku ? 'sku' : 'name'} match (business ${businessId}).`);
           } else {
             await pool.query(
               'UPDATE orders SET "stock_deducted" = true WHERE id = $1 AND business_id = $2',
@@ -769,6 +790,7 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
         );
         if (r.rowCount === 0) {
           console.warn(`⚠️ Inventory restock: no product matched (${hasSku ? 'SKU' : 'name'} "${matchVal}") — order ${id}.`);
+          console.log(`[DEBUG Inventory] Product MATCH FAILED (restock) for order ${id} | matched by ${hasSku ? 'SKU' : 'name'} | sku="${currentSku}" | product_name="${currentProductName}" — check products table for an exact ${hasSku ? 'sku' : 'name'} match (business ${businessId}).`);
         } else {
           console.log(`✅ Inventory: +${currentQty} → "${r.rows[0].name}" now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
         }
