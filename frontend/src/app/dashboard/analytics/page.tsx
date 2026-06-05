@@ -579,6 +579,21 @@ export default function AnalyticsDashboard() {
      the real per-product COGS sum. */
   const effectiveCogs = isAffiliate ? 0 : totalCogs;
 
+  /* ── EXACT per-product shipping (Phase B1 / Option C) ──
+     Σ of orders.actual_shipping_fee (real Bosta priceAfterVat) for the product's
+     delivered orders, summed from profitability exactly like COGS and scoped to
+     the dropdown. This hits the per-product MARGIN; the prepaid shipping bundle
+     stays separately inside the OPEX shared bucket (additive cash-basis). */
+  const totalShipping = useMemo(() => {
+    const rows = (product && product !== 'كل المنتجات')
+      ? profitability.filter((p) => p.product_name === product)
+      : profitability;
+    return rows.reduce((s, p) => s + (Number.isFinite(p.shipping_cost) ? (p.shipping_cost as number) : 0), 0);
+  }, [profitability, product]);
+
+  /* Affiliates don't ship physical stock → no per-AWB shipping cost. */
+  const effectiveShipping = isAffiliate ? 0 : totalShipping;
+
   /* ── True OPEX (operating expenses) from the treasury ledger — Path A+ model ──
      The backend splits OPEX into two buckets:
        • commissions  → attributed EXACTLY per product (opex_commission_by_product),
@@ -631,14 +646,17 @@ export default function AnalyticsDashboard() {
     return parts.length ? parts.join(' · ') : 'عمولات + شحن + تغليف + تشغيل';
   }, [ov, effectiveCommission, opexCountRatio]);
 
-  /* For historical date ranges Revenue and COGS may both be 0; in that case
-     netProfit = 0 − 0 − expenses = −expenses (correct negative profit).
-     For affiliate plans: netProfit = externalRevenue − 0 − expenses(incl. ad spend).
-     All three operands are already guarded to finite numbers above / via ?? 0. */
-  const netProfit = (Number.isFinite(totalRevenue)   ? totalRevenue   : 0)
-                  - (Number.isFinite(effectiveCogs)  ? effectiveCogs  : 0)
-                  - (Number.isFinite(totalExpenses)  ? totalExpenses  : 0)
-                  - (Number.isFinite(effectiveOpex)  ? effectiveOpex  : 0);
+  /* TRUE Net Profit (Option C — additive cash-basis):
+       revenue − COGS − ad spend − OPEX(treasury, incl. prepaid shipping bundle)
+               − exact per-AWB shipping (real Bosta deduction per product).
+     Both shipping outlays are real cash: the bundle is a shared OPEX lump, the
+     per-AWB fees are the exact surcharge/post-bundle hits on each product's
+     margin. All operands guarded to finite numbers above / via ?? 0. */
+  const netProfit = (Number.isFinite(totalRevenue)     ? totalRevenue     : 0)
+                  - (Number.isFinite(effectiveCogs)    ? effectiveCogs    : 0)
+                  - (Number.isFinite(totalExpenses)    ? totalExpenses    : 0)
+                  - (Number.isFinite(effectiveOpex)    ? effectiveOpex    : 0)
+                  - (Number.isFinite(effectiveShipping)? effectiveShipping: 0);
 
   /* Rates (percentages) — guard against division by zero */
   const cr    = totalOrders    > 0 ? totalConfirmed / totalOrders    * 100 : 0;
@@ -659,15 +677,17 @@ export default function AnalyticsDashboard() {
     if (!dashStats?.daily_chart_stats?.length) return [];
     /* Estimate per-day COGS using average COGS/delivery across all products */
     const avgCogsPer = totalDelivered > 0 ? totalCogs / totalDelivered : 0;
-    /* Distribute OPEX across the period's deliveries so the daily Net-Profit line
-       reconciles with the headline KPI (which now subtracts OPEX). */
-    const avgOpexPer = totalDelivered > 0 ? effectiveOpex / totalDelivered : 0;
+    /* Distribute OPEX + exact shipping across the period's deliveries so the
+       daily Net-Profit line reconciles with the headline KPI. */
+    const avgOpexPer = totalDelivered > 0 ? effectiveOpex     / totalDelivered : 0;
+    const avgShipPer = totalDelivered > 0 ? effectiveShipping / totalDelivered : 0;
     return dashStats.daily_chart_stats.map((s) => {
       const dayRevenue    = s.revenue;
       const dayCogsEst    = Math.round(s.delivered * avgCogsPer);
       const dayOpexEst    = Math.round(s.delivered * avgOpexPer);
+      const dayShipEst    = Math.round(s.delivered * avgShipPer);
       const grossMargin   = Math.round(dayRevenue - dayCogsEst);
-      const dayNetProfit  = Math.round(grossMargin - s.ads_spend - dayOpexEst);
+      const dayNetProfit  = Math.round(grossMargin - s.ads_spend - dayOpexEst - dayShipEst);
       return {
         date:        fmtDateArabic(s.date),
         iso:         s.date,
@@ -679,7 +699,7 @@ export default function AnalyticsDashboard() {
         netProfit:   dayNetProfit,
       };
     });
-  }, [dashStats, totalCogs, totalDelivered, effectiveOpex]);
+  }, [dashStats, totalCogs, totalDelivered, effectiveOpex, effectiveShipping]);
 
   /* ── Rejection donut chart data ───────────────────────────────── */
   const rejectionData = useMemo(() => {
@@ -1015,7 +1035,7 @@ export default function AnalyticsDashboard() {
               label="صافي الربح النهائي"
               value={loadingDash ? '...' : fmtEGP(Math.round(netProfit))}
               subValue={dashStats
-                ? (isAffiliate ? 'إيرادات الأفليت − المصروفات والإعلانات ✓' : 'إيرادات − تكلفة البضاعة − الإعلانات − المصاريف التشغيلية ✓')
+                ? (isAffiliate ? 'إيرادات الأفليت − المصروفات والإعلانات ✓' : 'إيرادات − تكلفة البضاعة − الإعلانات − الشحن الفعلي − المصاريف التشغيلية ✓')
                 : 'في انتظار البيانات...'}
               trend={18}
               highlight
@@ -1138,6 +1158,21 @@ export default function AnalyticsDashboard() {
                 trend={14.2}
                 trendGood={false}
                 accent="text-slate-600 dark:text-slate-400"
+              />
+            )}
+            {/* Exact per-AWB shipping (Option C) — real Bosta deduction per
+                delivered order, summed per product. The prepaid bundle is counted
+                separately inside OPEX (additive cash-basis). */}
+            {!isAffiliate && (
+              <KPICard
+                label="الشحن الفعلي (Bosta)"
+                value={loadingProfitability ? '...' : fmtEGP(Math.round(totalShipping))}
+                subValue={totalDelivered > 0
+                  ? `رسوم Bosta الفعلية · ${fmtEGP(Math.round(totalShipping / totalDelivered))}/طلب`
+                  : 'رسوم Bosta الفعلية لكل شحنة'}
+                trend={5.2}
+                trendGood={false}
+                accent="text-amber-600 dark:text-amber-400"
               />
             )}
             {/* Operating expenses (OPEX) from the treasury ledger — commissions

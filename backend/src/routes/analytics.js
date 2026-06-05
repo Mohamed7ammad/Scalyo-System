@@ -476,7 +476,16 @@ router.get('/products-profitability', authenticate, async (req, res) => {
             THEN COALESCE(NULLIF(o."unit_cost_price"::numeric, 0), p.cost_price::numeric, 0)
                  * COALESCE(o."quantity", 1)
             ELSE 0 END
-        ), 0)                                                               AS cogs
+        ), 0)                                                               AS cogs,
+        /* Exact per-AWB shipping (Phase B1 / Option C): the true Bosta deduction
+           (orders.actual_shipping_fee = priceAfterVat) for this product's
+           DELIVERED orders, on the SAME createdAt cohort as COGS/revenue so the
+           per-product margin reconciles. NULL (uncaptured) fees count as 0. */
+        COALESCE(SUM(
+          CASE WHEN o."Status" = 'تم التوصيل'
+            THEN COALESCE(o."actual_shipping_fee"::numeric, 0)
+            ELSE 0 END
+        ), 0)                                                               AS shipping_cost
       FROM   products p
       JOIN   orders   o ON (
         o.business_id = ${bizIdx}::integer
@@ -530,6 +539,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       COALESCE(os.total_confirmed,      0)     AS erp_order_count,
       COALESCE(os.delivered_revenue,    0)     AS delivered_revenue,
       COALESCE(os.cogs,                 0)     AS cogs,
+      COALESCE(os.shipping_cost,        0)     AS shipping_cost,
       COALESCE(es.attributed_spend,     0)     AS attributed_ad_spend,
       COALESCE(es.meta_orders_total,    0)     AS meta_orders_total
     FROM   products p
@@ -580,7 +590,11 @@ router.get('/products-profitability', authenticate, async (req, res) => {
          No longer cost_price × delivered-order-count (which ignored quantity and
          the historical snapshot). costPrice above is kept only for display. */
       const cogs        = parseFloat((parseFloat(r.cogs) || 0).toFixed(2));
-      const netProfit   = parseFloat((deliveredRevenue - cogs - attributedSpend).toFixed(2));
+      /* Exact per-AWB shipping for this product's delivered orders (Option C).
+         Folded into the product margin so net_profit reflects the TRUE cost of
+         selling this product: revenue − COGS − ad spend − real shipping. */
+      const shippingCost = parseFloat((parseFloat(r.shipping_cost) || 0).toFixed(2));
+      const netProfit   = parseFloat((deliveredRevenue - cogs - attributedSpend - shippingCost).toFixed(2));
       const cpa         = metaOrders > 0
         ? parseFloat((attributedSpend / metaOrders).toFixed(2))
         : null;
@@ -598,6 +612,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         delivered_revenue:   deliveredRevenue,
         attributed_ad_spend: attributedSpend,
         cogs,
+        shipping_cost:       shippingCost,       // exact per-AWB Bosta fee (Option C)
         net_profit:          netProfit,
         cpa,
         meta_orders:         metaOrders,          // backward-compat alias (identical to total_orders)
