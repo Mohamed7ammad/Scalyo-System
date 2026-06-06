@@ -244,16 +244,17 @@ function mapToBostaCity(raw) { return resolveBostaCity(raw).name; }
 const normalizeCity = mapToBostaCity;
 
 /** Map one DB order row to a Bosta delivery payload */
-function toBosta(order, allowOpen = false) {
+function toBosta(order, allowOpen = false, payWithPoints = false) {
   const { firstName, lastName } = splitName(order.FullName);
   const gov     = resolveBostaCity(order.City || order.Governorate);
   const isAllowed = allowOpen === true;
+  const useWallet = payWithPoints === true;
 
   // Diagnostic: confirm resolved values before sending to Bosta
   console.log(
     `[toBosta] order=${order.id} | city_raw="${order.City || order.Governorate}"` +
     ` → city="${gov.name}" cityId="${gov.id ?? '(none)'}" code="${gov.code ?? '(none)'}"` +
-    ` | allowOpen=${allowOpen} → isAllowed=${isAllowed}`
+    ` | allowOpen=${allowOpen} → isAllowed=${isAllowed} | payWithPoints=${useWallet}`
   );
 
   /* Send the EXACT Bosta name AND the cityId/cityCode from Bosta's own
@@ -283,6 +284,9 @@ function toBosta(order, allowOpen = false) {
     openPackage:            isAllowed, // v2 alternate C
     allowInspection:        isAllowed, // v2 alternate D
 
+    // ── Pay shipping from the Bosta wallet / points — root-level variants ──
+    ...(useWallet ? { payByWallet: true, payWithWallet: true, useWallet: true } : {}),
+
     specs: {
       allowToOpenPackage:     isAllowed, // ✅ specs-level primary
       allowExploration:       isAllowed, // specs-level alternate A
@@ -294,6 +298,8 @@ function toBosta(order, allowOpen = false) {
         allowExploration:     isAllowed, // nested alternate
       },
       notes: shippingNotes,   // specs-level mirror (Bosta version variance)
+      // Wallet/points payment — merged into specs WITHOUT clobbering the above.
+      ...(useWallet ? { payByWallet: true, payWithWallet: true } : {}),
     },
 
     // Both casing variants — Bosta V2 inconsistently uses both across endpoints
@@ -336,7 +342,7 @@ router.get('/pending', authenticate, requireAdmin, async (req, res) => {
    Each order is processed independently — one failure won't abort
    the rest of the batch.                                            */
 router.post('/forward', authenticate, requireAdmin, async (req, res) => {
-  const { allowOpen = false, limit, orderIds } = req.body;
+  const { allowOpen = false, payWithPoints = false, limit, orderIds } = req.body;
 
   /* ── "Send What You See" — explicit order selection ────────────────
      The client may send the exact ids of the confirmed orders it wants
@@ -459,7 +465,7 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
 
     for (const order of orders) {
       try {
-        const payload  = toBosta(order, allowOpen);
+        const payload  = toBosta(order, allowOpen, payWithPoints);
         /* Funnel every shipment-creation call through the shared global Bosta
            queue: serialized with a safe gap + 429 back-off, so a bulk dispatch
            of dozens of orders (or a webhook spike) never trips the rate limit. */

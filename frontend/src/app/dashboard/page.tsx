@@ -85,6 +85,7 @@ export default function DashboardPage() {
   const [shippingLoading, setShippingLoading] = useState(false);
   const [shippingResult,  setShippingResult]  = useState<ShippingResult | null>(null);
   const [allowOpenAll,    setAllowOpenAll]    = useState(false);
+  const [payWithPoints,   setPayWithPoints]   = useState(false);
   /* Batch quota: how many confirmed orders to ship this run (string for the
      controlled <input>). Defaults to the full pending count when the modal opens. */
   const [shipLimit,       setShipLimit]       = useState('');
@@ -871,7 +872,7 @@ export default function DashboardPage() {
       const idsToShip = confirmedDisplayOrders
         .slice(0, effectiveShipCount)
         .map((o) => o.id);
-      const res = await forwardToShipping(allowOpenAll, idsToShip);
+      const res = await forwardToShipping(allowOpenAll, idsToShip, payWithPoints);
       setShippingResult(res.data);
       // Refresh orders silently so statuses update without scroll disruption
       const fresh = await import('@/lib/api').then((m) => m.getOrders());
@@ -1677,7 +1678,7 @@ export default function DashboardPage() {
                   )}
 
                   {/* Allow-open checkbox */}
-                  <label className="flex items-center gap-2.5 mb-5 cursor-pointer select-none group">
+                  <label className="flex items-center gap-2.5 mb-3 cursor-pointer select-none group">
                     <input
                       type="checkbox"
                       checked={allowOpenAll}
@@ -1686,6 +1687,19 @@ export default function DashboardPage() {
                     />
                     <span className="text-sm text-gray-600 group-hover:text-gray-800 transition">
                       السماح بفتح الشحنة لجميع الطلبات
+                    </span>
+                  </label>
+
+                  {/* Pay-with-Bosta-points checkbox */}
+                  <label className="flex items-center gap-2.5 mb-5 cursor-pointer select-none group">
+                    <input
+                      type="checkbox"
+                      checked={payWithPoints}
+                      onChange={(e) => setPayWithPoints(e.target.checked)}
+                      className="w-4 h-4 accent-teal-600 rounded cursor-pointer"
+                    />
+                    <span className="text-sm text-gray-600 group-hover:text-gray-800 transition">
+                      الدفع باستخدام نقاط بوسطة
                     </span>
                   </label>
 

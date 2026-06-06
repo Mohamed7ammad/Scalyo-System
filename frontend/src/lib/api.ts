@@ -249,8 +249,8 @@ export const getShippingPending = () =>
  *                   ships these verbatim (ignoring any stale tracking code so
  *                   reverted orders can be re-sent), guarded by status.
  */
-export const forwardToShipping = (allowOpen: boolean, orderIds: number[]) =>
-  api.post<ShippingResult>('/api/shipping/forward', { allowOpen, orderIds });
+export const forwardToShipping = (allowOpen: boolean, orderIds: number[], payWithPoints = false) =>
+  api.post<ShippingResult>('/api/shipping/forward', { allowOpen, orderIds, payWithPoints });
 
 /* ── Returns Log ─────────────────────────────────────────────────── */
 export interface DailyReturn {
