@@ -553,8 +553,11 @@ export default function AnalyticsDashboard() {
   const totalDelivered = isAffiliate ? affDelivered : (ov?.total_delivered ?? 0);
   const totalRejected  = ov?.total_rejected  ?? 0;
   const totalReturned  = ov?.total_returned  ?? 0;
-  /* Affiliate "pending" = orders that never reached confirmation. */
-  const totalPending   = isAffiliate ? Math.max(0, affOrders - affConfirmed) : (ov?.total_pending ?? 0);
+  /* ── Logistics pipeline (LIVE snapshot — independent of the date filter) ──
+     Forward-moving orders physically in Bosta toward the customer, and the COD
+     riding with them. Affiliate plans don't run the local Bosta pipeline → 0. */
+  const inTransitCount  = isAffiliate ? 0 : (ov?.in_transit_count ?? 0);
+  const outstandingCash = isAffiliate ? 0 : (ov?.outstanding_cash ?? 0);
   /* Revenue: affiliate plan uses the combined external-platform revenue. */
   const totalRevenue   = isAffiliate ? affRevenue   : (ov?.total_revenue   ?? 0);
   const totalExpenses  = ov?.total_expenses  ?? 0;
@@ -657,6 +660,11 @@ export default function AnalyticsDashboard() {
                   - (Number.isFinite(totalExpenses)    ? totalExpenses    : 0)
                   - (Number.isFinite(effectiveOpex)    ? effectiveOpex    : 0)
                   - (Number.isFinite(effectiveShipping)? effectiveShipping: 0);
+
+  /* Forecasted Net Profit — where the bottom line should land once the current
+     logistics pipeline settles. Heuristic: realised net profit + 50% of the COD
+     still on the road (a delivery-rate-discounted estimate of pipeline profit). */
+  const forecastedNetProfit = netProfit + (Number.isFinite(outstandingCash) ? outstandingCash : 0) * 0.5;
 
   /* Rates (percentages) — guard against division by zero */
   const cr    = totalOrders    > 0 ? totalConfirmed / totalOrders    * 100 : 0;
@@ -1003,7 +1011,7 @@ export default function AnalyticsDashboard() {
             SECTION 2 — KPI Cards
             ══════════════════════════════════════════════════════════ */}
 
-        {/* Row 1: The Money (4 cards) */}
+        {/* Row 1: The Money (5 cards — incl. forecasted net profit) */}
         <div className="space-y-3">
           <SectionLabel>الأرقام المالية الرئيسية</SectionLabel>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1039,6 +1047,17 @@ export default function AnalyticsDashboard() {
                 : 'في انتظار البيانات...'}
               trend={18}
               highlight
+            />
+            {/* Forecasted Net Profit — realised profit + 50% of the COD still on
+                the road. Sits next to the True Net Profit card as a forward look. */}
+            <KPICard
+              label="صافي الربح المتوقع"
+              value={loadingDash ? '...' : fmtEGP(Math.round(forecastedNetProfit))}
+              subValue={loadingDash
+                ? ''
+                : `الحالي + 50% من المستحقات (${fmtEGP(Math.round(outstandingCash))}) قيد التحصيل`}
+              trend={20}
+              accent="text-indigo-600 dark:text-indigo-400"
             />
           </div>
         </div>
@@ -1098,12 +1117,21 @@ export default function AnalyticsDashboard() {
               trendGood={false}
               accent="text-teal-600 dark:text-teal-400"
             />
+            {/* Logistics pipeline (live) — replaces the old "بانتظار التأكيد" card.
+                Forward-moving orders in Bosta + the COD riding with them. */}
             <KPICard
-              label="بانتظار التأكيد"
-              value={loadingDash ? '...' : fmt(totalPending)}
-              subValue="جديد + لا يرد"
-              trend={-5}
-              accent="text-amber-600 dark:text-amber-400"
+              label="طلبات في الطريق"
+              value={loadingDash ? '...' : fmt(inTransitCount)}
+              subValue="قيد التوصيل لدى بوسطة الآن"
+              trend={4}
+              accent="text-sky-600 dark:text-sky-400"
+            />
+            <KPICard
+              label="مستحقات لدى الشحن"
+              value={loadingDash ? '...' : fmtEGP(Math.round(outstandingCash))}
+              subValue="COD متوقع على الطريق"
+              trend={4}
+              accent="text-cyan-600 dark:text-cyan-400"
             />
             <KPICard
               label="مُرجَّع / فشل التوصيل"

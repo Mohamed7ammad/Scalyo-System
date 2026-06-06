@@ -774,6 +774,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
           total_orders: 0, total_confirmed: 0, total_delivered: 0,
           total_rejected: 0, total_returned: 0, total_pending: 0,
           total_revenue: 0, total_expenses: 0, meta_spend: 0,
+          in_transit_count: 0, outstanding_cash: 0,
         },
         daily_chart_stats: [], governorates_stats: [], rejection_reasons: [],
         externalStats: await getExternalAffiliateStats(req.user.business_id),
@@ -838,6 +839,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
 
   /* Inline ProductPrice parser (same as other endpoints) */
   const P = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
+  /* Deposit parser — same defensive numeric extraction; net COD = price − deposit. */
+  const DEP = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("depositAmount"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
 
   /* ── 1. Overview: order counts + delivered revenue ── */
   const overviewSql = `
@@ -850,7 +853,19 @@ router.get('/dashboard', authenticate, async (req, res) => {
       COUNT(id) FILTER (WHERE ${CR} AND "Status" = 'تم الرفض')                       AS total_rejected,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جاري الإعادة','تم الإرجاع'))   AS total_returned,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جديد','لا يرد'))              AS total_pending,
-      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${CR} THEN ${P} ELSE 0 END), 0) AS total_revenue
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${CR} THEN ${P} ELSE 0 END), 0) AS total_revenue,
+      /* ── Logistics pipeline (CURRENT snapshot — intentionally NOT date-bound) ──
+         Forward-moving orders physically in Bosta toward the customer. Our webhook
+         sets Status='تم الشحن' on shipment and keeps it through Bosta's forward
+         codes (10 created → 20/21 processing → 30 in-transit → 41 out-for-delivery),
+         only moving OFF it on delivered/returning/returned. Return-bound parcels are
+         split into 'جاري الإعادة' (47) / 'تم الإرجاع' (46) at ingestion, so they are
+         excluded here by construction — no raw state-code column needed.
+         These two omit ${CR} on purpose: "on the road right now" is a live snapshot,
+         not a function of the selected date range (it still respects product/tenant
+         scope via ordFilter). */
+      COUNT(id) FILTER (WHERE "Status" = 'تم الشحن')                                   AS in_transit_count,
+      COALESCE(SUM(GREATEST(${P} - ${DEP}, 0)) FILTER (WHERE "Status" = 'تم الشحن'), 0) AS outstanding_cash
     FROM orders
     WHERE 1=1${ordFilter}
   `;
@@ -1154,6 +1169,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
       total_returned:  parseInt(ov.total_returned,  10) || 0,
       total_pending:   parseInt(ov.total_pending,   10) || 0,
       total_revenue:   parseFloat(parseFloat(ov.total_revenue  || 0).toFixed(2)),
+      /* Logistics pipeline (live snapshot) — forward-moving orders + their COD. */
+      in_transit_count: parseInt(ov.in_transit_count, 10) || 0,
+      outstanding_cash: parseFloat(parseFloat(ov.outstanding_cash || 0).toFixed(2)),
       total_expenses:  parseFloat(parseFloat(ex.total_expenses || 0).toFixed(2)),
       meta_spend:      parseFloat(parseFloat(ex.meta_spend     || 0).toFixed(2)),
       /* TRUE-net-profit OPEX from the treasury ledger (ad spend excluded).

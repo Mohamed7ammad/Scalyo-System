@@ -535,6 +535,11 @@ export interface DashboardOverviewStats {
   total_pending:   number;
   /** Sum of ProductPrice for delivered orders. */
   total_revenue:   number;
+  /** Logistics pipeline (LIVE snapshot, not date-bound): forward-moving orders
+   *  physically in Bosta toward the customer (Status = 'تم الشحن'). */
+  in_transit_count?: number;
+  /** Expected COD (price − deposit) for those in-transit orders — cash on the road. */
+  outstanding_cash?: number;
   /** Sum of ALL expense rows in the date range. */
   total_expenses:  number;
   /** Sum of Meta-synced expense rows only. */
