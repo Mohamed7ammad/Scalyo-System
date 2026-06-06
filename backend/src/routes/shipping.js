@@ -284,8 +284,8 @@ function toBosta(order, allowOpen = false, payWithPoints = false) {
     openPackage:            isAllowed, // v2 alternate C
     allowInspection:        isAllowed, // v2 alternate D
 
-    // ── Pay shipping from the Bosta wallet / points — root-level variants ──
-    ...(useWallet ? { payByWallet: true, payWithWallet: true, useWallet: true } : {}),
+    // ── Pay shipping fee from Bosta points/credits (exact dashboard key) ──
+    payWithBostaCredits: useWallet,
 
     specs: {
       allowToOpenPackage:     isAllowed, // ✅ specs-level primary
@@ -298,8 +298,6 @@ function toBosta(order, allowOpen = false, payWithPoints = false) {
         allowExploration:     isAllowed, // nested alternate
       },
       notes: shippingNotes,   // specs-level mirror (Bosta version variance)
-      // Wallet/points payment — merged into specs WITHOUT clobbering the above.
-      ...(useWallet ? { payByWallet: true, payWithWallet: true } : {}),
     },
 
     // Both casing variants — Bosta V2 inconsistently uses both across endpoints
