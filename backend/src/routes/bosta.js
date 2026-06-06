@@ -1023,4 +1023,91 @@ router.post('/sync-returns', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+/* ══════════════════════════════════════════════════════════════════════════
+   reconcileInTransitOrders(businessId) — keep the forward pipeline honest
+   ─────────────────────────────────────────────────────────────────────────
+   Bosta marks the RETURN LEG with a ":R" suffix on the state code (e.g. 21:R =
+   "Processing, returning"). Our webhook parses state.code as a plain NUMBER and
+   only acts on terminal return states, so a parcel being processed for RETURN can
+   sit in our DB as 'تم الشحن' with its original price — inflating the dashboard's
+   in-transit count and Outstanding Cash (the "ghost order" bug).
+
+   This pulls Bosta's AUTHORITATIVE buckets (the exact :R / exception stateCodes the
+   follow-ups view uses) and reconciles our local 'تم الشحن' rows:
+     • returning bucket  → Status 'جاري الإعادة' + expected_cod 0  (left the forward
+                           leg; nothing to collect).
+     • action-required   → expected_cod ← Bosta's LIVE cod (status untouched: an
+                           exception may still deliver forward), so a parcel Bosta
+                           has already zeroed ("بدون تحصيل") stops counting as cash.
+
+   Idempotent + tenant-scoped (only the given tenant's 'تم الشحن' rows). Returns a
+   summary; throws only on hard failure (the cron logs it).
+   ══════════════════════════════════════════════════════════════════════════ */
+async function reconcileInTransitOrders(businessId) {
+  const creds = await readBostaCreds(businessId);
+  if (!creds.bearerToken && !(creds.email && creds.password)) {
+    return { skipped: true, reason: 'no-bosta-creds' };
+  }
+  const headersFor = (auth) => ({ ...BOSTA_APP_HEADERS, Authorization: auth });
+
+  const fetchBucket = async (stateCodes) => {
+    const map = new Map();   // trackingNumber → live cod
+    for (let page = 1; page <= 20; page++) {
+      let body;
+      try {
+        const r = await withAuthRetry(creds, (auth) =>
+          axios.post(`${BOSTA_APP_BASE}/deliveries/search`,
+            { limit: 50, page, sortBy: '-updatedAt', stateCodes },
+            { headers: headersFor(auth), timeout: 15_000 }));
+        body = r.data;
+      } catch (e) {
+        console.warn(`[bosta/reconcile] bucket fetch stopped at page ${page}: ${e.response?.status ?? 'ERR'} ${e.message}`);
+        break;
+      }
+      const list = body?.data?.deliveries ?? body?.deliveries ?? body?.data ?? [];
+      if (!Array.isArray(list) || !list.length) break;
+      for (const d of list) {
+        const tn = String(d.trackingNumber ?? d._id ?? '').trim();
+        if (tn) map.set(tn, Number(d.cod ?? d.specs?.cod ?? 0) || 0);
+      }
+      if (list.length < 50) break;
+    }
+    return map;
+  };
+
+  const returning = await fetchBucket(RETURNING_STATE_CODES);
+  const actionReq = await fetchBucket(ACTION_REQUIRED_STATE_CODES);
+
+  let reclassified = 0, codUpdated = 0;
+
+  /* 1 — definitive return leg → leave the forward pipeline. */
+  if (returning.size) {
+    const r = await pool.query(
+      `UPDATE orders SET "Status" = 'جاري الإعادة', expected_cod = 0, "updatedAt" = NOW()
+        WHERE business_id = $1 AND "Status" = 'تم الشحن'
+          AND "BostaTrackingCode" = ANY($2)`,
+      [businessId, [...returning.keys()]]
+    );
+    reclassified = r.rowCount || 0;
+  }
+
+  /* 2 — exceptions still in the field → just sync Bosta's live COD (so any parcel
+         Bosta has already zeroed stops counting as outstanding cash). */
+  for (const [tn, cod] of actionReq.entries()) {
+    const r = await pool.query(
+      `UPDATE orders SET expected_cod = $1
+        WHERE business_id = $2 AND "Status" = 'تم الشحن' AND "BostaTrackingCode" = $3`,
+      [cod, businessId, tn]
+    );
+    codUpdated += r.rowCount || 0;
+  }
+
+  console.log(
+    `[bosta/reconcile] tenant ${businessId}: ${reclassified} → 'جاري الإعادة', ` +
+    `${codUpdated} expected_cod synced (buckets: returning ${returning.size}, action ${actionReq.size})`
+  );
+  return { reclassified, codUpdated, returningBucket: returning.size, actionBucket: actionReq.size };
+}
+
 module.exports = router;
+module.exports.reconcileInTransitOrders = reconcileInTransitOrders;

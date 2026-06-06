@@ -287,6 +287,16 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ
   .then(() => console.log('✅  Orders: delivered_at column + index ready'))
   .catch((err) => console.warn('⚠️   delivered_at migration skipped:', err.message));
 
+/* ── expected_cod — Bosta's LIVE collectable COD per order ────────────────────
+   The amount Bosta currently expects to COLLECT for this parcel. Bosta zeroes it
+   ("بدون تحصيل") the instant a parcel becomes return-bound, so it's the reliable
+   signal that separates real forward cash from return-leg ghost money in the
+   forecasting pipeline. NULL = not yet reported by Bosta → analytics falls back to
+   (ProductPrice − depositAmount) for genuinely-forward, not-yet-synced orders. */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS expected_cod NUMERIC(12,2)`)
+  .then(() => console.log('✅  Orders: expected_cod column ready'))
+  .catch((err) => console.warn('⚠️   expected_cod migration skipped:', err.message));
+
 /* ── product_returns table ─────────────────────────────────────────────── */
 pool.query(`
   CREATE TABLE IF NOT EXISTS product_returns (
@@ -469,6 +479,21 @@ router.post('/bosta', async (req, res) => {
       canonical = 'returned';
     }
 
+    /* Return-LEG detector — the ghost-order fix. The structural isReturn flag means
+       the parcel is heading BACK to us. If it hasn't already resolved to a
+       physically-received return above, classify it as IN-TRANSIT return
+       ('returning_to_merchant' → 'جاري الإعادة') so it leaves the forward pipeline
+       IMMEDIATELY. This catches Bosta's ambiguous intermediate "Processing"/"In
+       Transit" states on the return leg (the :R state codes) that carry no
+       recognizable status string and previously left the order stuck at
+       'تم الشحن' — silently inflating the in-transit count and outstanding cash. */
+    if (isReturn && canonical !== 'returned' && canonical !== 'delivered_to_merchant') {
+      if (canonical !== 'returning_to_merchant') {
+        console.log(`[Bosta Webhook] isReturn=true + "${statusStr}" (state ${stateCode ?? '?'}) → forcing canonical "returning_to_merchant"`);
+      }
+      canonical = 'returning_to_merchant';
+    }
+
     console.log(
       `[Bosta Webhook] tracking="${trackingNumber}"  rawStatus="${statusStr}"  ` +
       `stateCode=${stateCode ?? '(none)'}  canonical="${canonical}"  isReturn=${isReturn}  ` +
@@ -541,6 +566,25 @@ router.post('/bosta', async (req, res) => {
       console.log(`✅  Order #${order.id} status → "${newOrderStatus}"`);
     } else {
       console.log(`[Bosta Webhook] Status "${statusStr}" is unmapped — order row left unchanged`);
+    }
+
+    /* ── Step 2b: Persist Bosta's LIVE expected COD ──────────────────────────
+       Runs on EVERY event (even unmapped intermediate states) so the forecasting
+       pipeline values each shipment by what Bosta will ACTUALLY collect, not the
+       original order price. Bosta zeroes COD ("بدون تحصيل") on return-bound parcels,
+       so this is what stops them inflating Outstanding Cash. Any return canonical
+       forces 0 (nothing left to collect). */
+    const isReturnCanonical =
+      canonical === 'returning_to_merchant' ||
+      canonical === 'returned' ||
+      canonical === 'delivered_to_merchant';
+    const codToStore = isReturnCanonical ? 0 : webhookCod;
+    if (codToStore !== null && codToStore !== undefined) {
+      await pool.query(
+        `UPDATE orders SET expected_cod = $1 WHERE id = $2 AND business_id = $3`,
+        [codToStore, order.id, businessId]
+      );
+      console.log(`[Bosta Webhook] Order #${order.id} expected_cod → ${codToStore}`);
     }
 
     /* ── Step 3: Stamp delivered_at on a successful delivery ──────────────

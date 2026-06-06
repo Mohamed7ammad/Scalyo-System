@@ -3,6 +3,7 @@ const express                 = require('express');
 const cors                    = require('cors');
 const startOrderSyncCron      = require('./services/googleSheetSync');
 const { startMetaSyncCron }   = require('./cron/metaSync');
+const { startBostaReconcileCron } = require('./cron/bostaReconcile');
 const { startTaagerSyncCron } = require('./cron/taagerSync');
 const { startStaffAlertsCron } = require('./cron/staffAlerts');
 const pool                    = require('./config/db');
@@ -99,6 +100,7 @@ app.listen(PORT, async () => {
   if (process.env.NODE_ENV !== 'development') {
     startOrderSyncCron();
     startMetaSyncCron();
+    startBostaReconcileCron();
     startTaagerSyncCron();
     startStaffAlertsCron();
   } else {

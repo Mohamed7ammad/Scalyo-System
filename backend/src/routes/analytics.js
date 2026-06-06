@@ -859,13 +859,25 @@ router.get('/dashboard', authenticate, async (req, res) => {
          sets Status='تم الشحن' on shipment and keeps it through Bosta's forward
          codes (10 created → 20/21 processing → 30 in-transit → 41 out-for-delivery),
          only moving OFF it on delivered/returning/returned. Return-bound parcels are
-         split into 'جاري الإعادة' (47) / 'تم الإرجاع' (46) at ingestion, so they are
-         excluded here by construction — no raw state-code column needed.
+         split into 'جاري الإعادة' / 'تم الإرجاع' at ingestion (webhook isReturn) and
+         by the hourly bosta reconciliation (the :R return-leg buckets).
          These two omit ${CR} on purpose: "on the road right now" is a live snapshot,
          not a function of the selected date range (it still respects product/tenant
-         scope via ordFilter). */
-      COUNT(id) FILTER (WHERE "Status" = 'تم الشحن')                                   AS in_transit_count,
-      COALESCE(SUM(GREATEST(${P} - ${DEP}, 0)) FILTER (WHERE "Status" = 'تم الشحن'), 0) AS outstanding_cash
+         scope via ordFilter).
+
+         GHOST GUARD: a parcel being processed for RETURN can linger at 'تم الشحن'
+         until reconciled, but Bosta zeroes its collectable COD ("بدون تحصيل") →
+         expected_cod = 0. So forward = Status='تم الشحن' AND Bosta hasn't zeroed the
+         COD (expected_cod NULL = not yet reported → treat as forward, fall back to
+         price). Cash uses the LIVE expected_cod when known, else (price − deposit). */
+      COUNT(id) FILTER (
+        WHERE "Status" = 'تم الشحن' AND COALESCE("expected_cod"::numeric, 1) > 0
+      )                                                                               AS in_transit_count,
+      COALESCE(SUM(
+        COALESCE("expected_cod"::numeric, GREATEST(${P} - ${DEP}, 0))
+      ) FILTER (
+        WHERE "Status" = 'تم الشحن' AND COALESCE("expected_cod"::numeric, 1) > 0
+      ), 0)                                                                           AS outstanding_cash
     FROM orders
     WHERE 1=1${ordFilter}
   `;
