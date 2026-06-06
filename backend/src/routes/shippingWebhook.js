@@ -232,9 +232,12 @@ async function applyPhysicalReturn(order) {
   const orderSku    = order.sku ? String(order.sku).trim() : null;
   const orderQty    = Math.max(1, parseInt(order.quantity, 10) || 1);
 
-  // 1. Status → returned (idempotent).
+  // 1. Status → returned (idempotent). Also clear stock_deducted: the physical
+  //    restock below returns this order's units, so it no longer holds committed
+  //    stock — this keeps the orders.js PATCH inventory hook from restocking it
+  //    a second time on any later manual status change.
   await pool.query(
-    `UPDATE orders SET "Status" = 'تم الإرجاع', "updatedAt" = NOW()
+    `UPDATE orders SET "Status" = 'تم الإرجاع', "stock_deducted" = false, "updatedAt" = NOW()
       WHERE id = $1 AND business_id = $2`,
     [order.id, businessId]
   );

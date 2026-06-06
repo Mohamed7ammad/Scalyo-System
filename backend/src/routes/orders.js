@@ -27,6 +27,26 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "quantity" INTEGER NOT N
   .then(() => console.log('✅  Orders: "quantity" column ready'))
   .catch((err) => console.warn('⚠️   Orders quantity column check:', err.message));
 
+/* ── Inventory-deduction flag ────────────────────────────────────────────────
+   TRUE once this order's stock has been deducted from products (at confirmation).
+   The single idempotency guard so stock can never be double-deducted or
+   double-restocked across status changes.                                     */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "stock_deducted" BOOLEAN NOT NULL DEFAULT false`)
+  .then(() => console.log('✅  Orders: "stock_deducted" column ready'))
+  /* One-time catch-up: orders confirmed BEFORE this flag existed were already
+     deducted by the previous logic but still carry stock_deducted=false, so a
+     move to مؤجل/ملغي wouldn't restock. Flag every order currently IN a committed
+     state as deducted so the lifecycle is consistent. Idempotent — after the
+     first run there are no committed+unflagged rows left (the PATCH hook keeps
+     the flag in sync going forward).                                           */
+  .then(() => pool.query(`
+    UPDATE orders SET "stock_deducted" = true
+     WHERE "stock_deducted" = false
+       AND TRIM("Status") IN ('تم التأكيد', 'تم التاكيد', 'تم الشحن', 'تم التوصيل')
+  `))
+  .then((r) => { if (r.rowCount) console.log(`✅  Orders: back-filled stock_deducted=true for ${r.rowCount} committed order(s)`); })
+  .catch((err) => console.warn('⚠️   Orders stock_deducted column check:', err.message));
+
 /* ── Postponed follow-up date ───────────────────────────────────────────────
    The date the customer asked to be re-contacted, captured when an agent moves
    an order to 'مؤجل'. Stored as DATE; the API returns it and the frontend
@@ -553,7 +573,54 @@ const PATCH_WHITELIST = new Set([
 ]);
 
 // PATCH /api/orders/:id — agents restricted to Status + Note only
-router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
+/* ── Alias-aware product resolver ─────────────────────────────────────────────
+   Resolve the product an order maps to. Matches the order's sku OR product name
+   against a product's main `sku`, `name`, OR any entry in its `aliases` array —
+   all case-insensitive + trimmed. Returns the product row (or null). Preference
+   order: exact SKU → exact name → alias match.                                 */
+async function resolveProductForOrder(businessId, sku, name) {
+  const skuKey  = (sku  ?? '').trim();
+  const nameKey = (name ?? '').trim();
+  if (!skuKey && !nameKey) return null;
+
+  const { rows } = await pool.query(
+    `SELECT id, name, sku, stock_quantity, cost_price,
+            CASE
+              WHEN LOWER(TRIM(sku))  = LOWER(NULLIF($1, '')) THEN 1
+              WHEN LOWER(TRIM(name)) = LOWER(NULLIF($2, '')) THEN 2
+              ELSE 3
+            END AS match_rank
+       FROM products
+      WHERE business_id = $3
+        AND (
+              LOWER(TRIM(sku))  = LOWER(NULLIF($1, ''))
+           OR LOWER(TRIM(name)) = LOWER(NULLIF($2, ''))
+           OR EXISTS (
+                SELECT 1 FROM unnest(COALESCE(aliases, '{}'::text[])) AS a
+                 WHERE LOWER(TRIM(a)) = LOWER(NULLIF($1, ''))
+                    OR LOWER(TRIM(a)) = LOWER(NULLIF($2, ''))
+              )
+            )
+      ORDER BY match_rank ASC
+      LIMIT 1`,
+    [skuKey, nameKey, businessId]
+  );
+  return rows[0] || null;
+}
+
+/* Accept either `Status` or lowercase `status` from the client (defensive —
+   canonicalise to `Status` before the agent-field guard + whitelist run). */
+function canonicalizeStatusKey(req, _res, next) {
+  if (req.body && typeof req.body === 'object') {
+    if (req.body.status !== undefined && req.body.Status === undefined) {
+      req.body.Status = req.body.status;
+      delete req.body.status;
+    }
+  }
+  next();
+}
+
+router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, async (req, res) => {
   const { id } = req.params;
   const businessId = req.user.business_id;
 
@@ -586,10 +653,14 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
   let currentSku          = null;   // null means no SKU → fall back to name match
   let currentProductPrice = '';
   let currentQty          = 1;
+  let currentStockDeducted = false;
 
   try {
     const row = await pool.query(
-      'SELECT "Status", "ProductName", "sku", "ProductPrice", COALESCE("quantity", 1) AS quantity FROM orders WHERE id = $1 AND business_id = $2',
+      `SELECT "Status", "ProductName", "sku", "ProductPrice",
+              COALESCE("quantity", 1) AS quantity,
+              COALESCE("stock_deducted", false) AS stock_deducted
+         FROM orders WHERE id = $1 AND business_id = $2`,
       [id, businessId]
     );
     if (!row.rows.length) {
@@ -601,6 +672,7 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
     currentSku          = row.rows[0].sku || null;
     currentProductPrice = row.rows[0].ProductPrice ?? '';
     currentQty          = Math.max(1, parseInt(row.rows[0].quantity, 10) || 1);
+    currentStockDeducted = row.rows[0].stock_deducted === true;
   } catch (err) {
     console.error('Step 1 – fetch order failed:', err.message);
     return res.status(500).json({ error: 'خطأ في الخادم' });
@@ -676,98 +748,99 @@ router.patch('/:id', authenticate, filterAgentFields, async (req, res) => {
   }
 
   /* ── Step 3: Inventory lifecycle (runs BEFORE res.json) ────────────
-     Stock is considered "reserved" (deducted) once an order enters ANY of
-     these terminal-flow statuses.  Moving WITHIN the group (e.g. confirmed
-     → shipped → delivered) does NOT touch stock — the item is already gone.
-
-     Deduct : oldStatus NOT in group  AND  newStatus IS  in group
-     Restore: oldStatus IS  in group  AND  newStatus NOT in group  (e.g. cancelled)
-     Skip   : both in same group, or no Status field, or status unchanged
-     ─────────────────────────────────────────────────────────────────── */
-  const RESERVED = new Set(['تم التأكيد', 'تم الشحن', 'تم التوصيل']);
+     Stock is deducted the moment an order becomes COMMITTED (confirmed / shipped
+     / delivered) and restocked when it leaves that group (cancelled / rejected /
+     reverted / no-answer / postponed). The persisted `stock_deducted` flag is the
+     SINGLE idempotency guard: stock moves exactly once per direction, no matter
+     how many times the status flips (e.g. confirm → revert → confirm again).
+     Deduction/restock are by the order's `quantity`, matched SKU-first.
+     NOTE: physical returns from the Bosta webhook restock via applyPhysicalReturn,
+     which also clears stock_deducted, so the two paths never double-count.     */
+  /* Stock is held ONLY while the order is actively in the fulfilment pipeline.
+     ANY other state (مؤجل / ملغي / مرفوض / لا يرد / جديد / …) must release it.
+     Hamza/diacritic-resilient normalisation: unify أإآ→ا, ى→ي, ة→ه, strip
+     harakat + tatweel + spaces — so 'تم التاكيد' (no hamza) == 'تم التأكيد'.    */
+  const normState = (s) => (s ?? '')
+    .normalize('NFC')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/[ً-ْـ]/g, '')   // harakat + tatweel
+    .replace(/\s+/g, ' ')
+    .trim();
+  const COMMITTED_STATES = ['تم التأكيد', 'تم الشحن', 'تم التوصيل'].map(normState);
 
   if (updates.Status && updates.Status !== currentStatus) {
-    const newStatus  = updates.Status;
-    const wasReserved = RESERVED.has(currentStatus);
-    const isReserved  = RESERVED.has(newStatus);
+    const isCommitted = COMMITTED_STATES.includes(normState(updates.Status));
+    console.log(`[DEBUG Inventory] Raw incoming status: "${updates.Status}" | normalized: "${normState(updates.Status)}" | isCommitted: ${isCommitted} | stock_deducted: ${currentStockDeducted} | order ${id}`);
 
-    console.log(`[Inventory] Status change detected`);
-    console.log(`  Old Status   : "${currentStatus}" (reserved=${wasReserved})`);
-    console.log(`  New Status   : "${newStatus}" (reserved=${isReserved})`);
-    console.log(`  Product Name : "${currentProductName}"`);
-    console.log(`  SKU          : ${currentSku ? `"${currentSku}" → matching by SKU` : 'null → matching by name'}`);
+    if (isCommitted && !currentStockDeducted) {
+      /* ── Deduct on confirmation (entering committed, not yet deducted) ── */
+      if (!currentProductName && !currentSku) {
+        console.warn(`[Inventory] Order ${id} has no product — cannot deduct.`);
+      } else {
+        try {
+          const prod = await resolveProductForOrder(businessId, currentSku, currentProductName);
+          if (!prod) {
+            console.warn(`⚠️ Inventory deduct: no product matched — order ${id} left undeducted.`);
+            console.log(`[DEBUG Inventory] Product MATCH FAILED (deduct) for order ${id} | sku="${currentSku}" | product_name="${currentProductName}" — no products row whose sku/name/aliases match (business ${businessId}). Add an alias on the product.`);
+          } else {
+            const r = await pool.query(
+              `UPDATE products SET stock_quantity = stock_quantity - $1
+                WHERE id = $2 AND business_id = $3
+                RETURNING name, sku, stock_quantity, cost_price`,
+              [currentQty, prod.id, businessId]
+            );
+            await pool.query(
+              'UPDATE orders SET "stock_deducted" = true WHERE id = $1 AND business_id = $2',
+              [id, businessId]
+            );
+            console.log(`✅ Inventory: -${currentQty} → "${r.rows[0].name}" (SKU ${r.rows[0].sku}) now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
 
-    if (wasReserved === isReserved) {
-      console.log('[Inventory] Case C — same reservation group, skipping.');
-
-    } else if (!currentProductName) {
-      console.warn('[Inventory] No ProductName on this order — skipping adjustment.');
-
-    } else if (!wasReserved && isReserved) {
-      /* ── Case A: Deduct ─────────────────────────────────────────────────
-         Build the query in JS based on whether we have a SKU.
-         This avoids passing null as a typed parameter, which can confuse
-         PostgreSQL's query planner and cause type-mismatch errors.         */
-      const hasSku = Boolean(currentSku);
-      const deductSql = hasSku
-        ? `UPDATE products SET stock_quantity = stock_quantity - 1
-           WHERE sku = $1 AND business_id = $2 AND stock_quantity > 0
-           RETURNING name, sku, stock_quantity, cost_price`
-        : `UPDATE products SET stock_quantity = stock_quantity - 1
-           WHERE TRIM(name) = TRIM($1) AND business_id = $2 AND stock_quantity > 0
-           RETURNING name, sku, stock_quantity, cost_price`;
-      const deductParam = hasSku ? currentSku : currentProductName;
-
-      console.log(`[Inventory] Case A — deducting 1 unit (${hasSku ? 'SKU' : 'name'}: "${deductParam}")`);
-      try {
-        const r = await pool.query(deductSql, [deductParam, businessId]);
-        if (r.rowCount === 0) {
-          console.warn(`⚠️ Inventory Deduct Failed: no match for ${hasSku ? 'SKU' : 'name'} "${deductParam}"`);
-        } else {
-          console.log(`✅ Inventory deducted: stock now ${r.rows[0].stock_quantity} for "${r.rows[0].name}" (SKU: ${r.rows[0].sku ?? 'none'})`);
-
-          /* ── WAC cost lock: write the product's current WAC into the order
-             so historical analytics stay accurate even after future supply
-             batches change cost_price.  Fire-and-forget — doesn't block res. */
-          const lockedCost = parseFloat(r.rows[0].cost_price) || 0;
-          if (lockedCost > 0) {
-            pool.query(
-              'UPDATE orders SET "unit_cost_price" = $1 WHERE id = $2 AND business_id = $3',
-              [lockedCost, id, businessId]
-            ).catch((e) => console.error('[Inventory] unit_cost_price lock failed:', e.message));
+            /* WAC cost lock — freeze the product's current cost on the order so
+               historical profitability stays accurate after future supply batches. */
+            const lockedCost = parseFloat(r.rows[0].cost_price) || 0;
+            if (lockedCost > 0) {
+              pool.query(
+                'UPDATE orders SET "unit_cost_price" = $1 WHERE id = $2 AND business_id = $3',
+                [lockedCost, id, businessId]
+              ).catch((e) => console.error('[Inventory] unit_cost_price lock failed:', e.message));
+            }
           }
+        } catch (err) {
+          console.error(`[Inventory] Deduct error: ${err.message}`);
         }
+      }
+
+    } else if (!isCommitted && currentStockDeducted) {
+      /* ── Restock on leaving committed (postpone / cancel / reject / revert) ── */
+      try {
+        const prod = await resolveProductForOrder(businessId, currentSku, currentProductName);
+        if (!prod) {
+          console.warn(`⚠️ Inventory restock: no product matched — order ${id}.`);
+          console.log(`[DEBUG Inventory] Product MATCH FAILED (restock) for order ${id} | sku="${currentSku}" | product_name="${currentProductName}" — no products row whose sku/name/aliases match (business ${businessId}).`);
+        } else {
+          const r = await pool.query(
+            `UPDATE products SET stock_quantity = stock_quantity + $1
+              WHERE id = $2 AND business_id = $3
+              RETURNING name, sku, stock_quantity`,
+            [currentQty, prod.id, businessId]
+          );
+          console.log(`✅ Inventory: +${currentQty} → "${r.rows[0].name}" (SKU ${r.rows[0].sku}) now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
+        }
+        // Order no longer committed → clear the flag (even if no product matched,
+        // so the lifecycle state stays consistent).
+        await pool.query(
+          'UPDATE orders SET "stock_deducted" = false WHERE id = $1 AND business_id = $2',
+          [id, businessId]
+        );
       } catch (err) {
-        console.error(`[Inventory] Deduct query error: ${err.message}`);
+        console.error(`[Inventory] Restock error: ${err.message}`);
       }
 
     } else {
-      /* ── Case B: Restore ────────────────────────────────────────────────
-         Same JS-driven dispatch — no null parameters passed to PostgreSQL. */
-      const hasSku = Boolean(currentSku);
-      const restoreSql = hasSku
-        ? `UPDATE products SET stock_quantity = stock_quantity + 1
-           WHERE sku = $1 AND business_id = $2
-           RETURNING name, sku, stock_quantity`
-        : `UPDATE products SET stock_quantity = stock_quantity + 1
-           WHERE TRIM(name) = TRIM($1) AND business_id = $2
-           RETURNING name, sku, stock_quantity`;
-      const restoreParam = hasSku ? currentSku : currentProductName;
-
-      console.log(`[Inventory] Case B — restoring 1 unit (${hasSku ? 'SKU' : 'name'}: "${restoreParam}")`);
-      try {
-        const r = await pool.query(restoreSql, [restoreParam, businessId]);
-        if (r.rowCount === 0) {
-          console.warn(`⚠️ Inventory Restore Failed: no match for ${hasSku ? 'SKU' : 'name'} "${restoreParam}"`);
-        } else {
-          console.log(`✅ Inventory restored: stock now ${r.rows[0].stock_quantity} for "${r.rows[0].name}" (SKU: ${r.rows[0].sku ?? 'none'})`);
-        }
-      } catch (err) {
-        console.error(`[Inventory] Restore query error: ${err.message}`);
-      }
+      console.log(`[Inventory] No stock move for order ${id} (committed=${isCommitted}, alreadyDeducted=${currentStockDeducted}).`);
     }
-  } else {
-    console.log(`[Inventory] No status change in this update — skipping. (updates.Status = ${JSON.stringify(updates.Status)})`);
   }
 
   /* ── Step 3.5a: Treasury — deposit hook (fire-and-forget) ───────────────

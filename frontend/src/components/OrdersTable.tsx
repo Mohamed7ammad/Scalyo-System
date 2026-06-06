@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, memo } from 'react';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
 
 const NO_ANSWER_REQUIRED = 5;
@@ -92,7 +92,7 @@ interface Props {
   onToast?:         (message: string, type?: 'success' | 'error') => void; // optional parent toast
 }
 
-export default function OrdersTable({
+function OrdersTable({
   orders, role, onUpdate, onDelete,
   selectedIds = [], onToggleSelect, onSelectAll,
   agents = [],
@@ -206,44 +206,38 @@ export default function OrdersTable({
   };
 
 
-  /* ─── Status dropdown ─────────────────────────────────────── */
-  const handleStatusChange = async (id: number, Status: string) => {
+  /* ─── Status dropdown ─────────────────────────────────────────
+     Strict optimistic: fire-and-forget — NO savingId / transparent state. The
+     parent (handleUpdate) mutates local state synchronously before awaiting the
+     API and rolls back only on failure, so the row updates instantly.          */
+  const handleStatusChange = (order: Order, Status: string) => {
     // Intercept "تم الرفض" to collect a rejection reason before saving
     if (Status === 'تم الرفض') {
-      setPendingRejection({ id, reason: '' });
+      setPendingRejection({ id: order.id, reason: '' });
       return;
     }
     // Intercept "مؤجل" to collect the follow-up date before saving
     if (Status === 'مؤجل') {
-      const existing = orders.find((o) => o.id === id)?.PostponedDate;
-      setPendingPostpone({ id, date: toDateInput(existing) });
+      setPendingPostpone({ id: order.id, date: toDateInput(order.PostponedDate) });
       return;
     }
-    setSavingId(id);
-    await onUpdate(id, { Status });
-    setSavingId(null);
+    onUpdate(order.id, { Status });   // optimistic, non-blocking
   };
 
-  /* ─── Delivery Rate dropdown ──────────────────────────────── */
-  const handleDeliveryRateChange = async (id: number, DeliveryRate: string) => {
-    setSavingId(id);
-    await onUpdate(id, { DeliveryRate });
-    setSavingId(null);
+  /* ─── Delivery Rate dropdown — optimistic, non-blocking ───── */
+  const handleDeliveryRateChange = (id: number, DeliveryRate: string) => {
+    onUpdate(id, { DeliveryRate });
   };
 
-  /* ─── AssignedTo dropdown (admin only) ───────────────────── */
-  const handleAssignedToChange = async (id: number, AssignedTo: string) => {
-    setSavingId(id);
-    await onUpdate(id, { AssignedTo });
-    setSavingId(null);
+  /* ─── AssignedTo dropdown (admin only) — optimistic ───────── */
+  const handleAssignedToChange = (id: number, AssignedTo: string) => {
+    onUpdate(id, { AssignedTo });
   };
 
-  /* ─── Note inline edit (save on blur) ─────────────────────── */
-  const handleNoteBlur = async (order: Order, Note: string) => {
+  /* ─── Note inline edit (save on blur) — optimistic ────────── */
+  const handleNoteBlur = (order: Order, Note: string) => {
     if (Note === (order.Note ?? '')) return;
-    setSavingId(order.id);
-    await onUpdate(order.id, { Note });
-    setSavingId(null);
+    onUpdate(order.id, { Note });
   };
 
   /* ─── Address inline edit (save on blur) — all roles ──────── */
@@ -368,380 +362,30 @@ export default function OrdersTable({
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
-              {orders.map((order, i) => {
-                const saving = savingId === order.id;
-                return (
-                  <tr
-                    key={order.id}
-                    className={`group hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${saving ? 'opacity-60 pointer-events-none' : ''}`}
-                  >
-                    {/* Row checkbox — admin only */}
-                    {role === 'admin' && onToggleSelect && (
-                      <td className="sticky right-0 z-10 bg-white dark:bg-slate-900
-                        group-hover:bg-gray-50 dark:group-hover:bg-slate-800
-                        border-l border-gray-100 dark:border-slate-800
-                        px-4 py-3 w-10 transition-colors" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          aria-label={`تحديد طلب ${order.id}`}
-                          checked={selectedIds.includes(order.id)}
-                          onChange={() => onToggleSelect(order.id)}
-                          className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
-                        />
-                      </td>
-                    )}
-                    <td className="px-4 py-3 text-gray-400 dark:text-slate-600 text-xs">{i + 1}</td>
-
-                    {role === 'admin' && (
-                      <td className="px-4 py-3">
-                        {agents.length > 0 ? (
-                          <select
-                            value={order.AssignedTo ?? ''}
-                            onChange={(e) => handleAssignedToChange(order.id, e.target.value)}
-                            className="px-2 py-1 rounded-lg text-xs font-medium
-                              text-violet-700 bg-violet-50 border border-violet-200
-                              dark:text-violet-300 dark:bg-violet-900/30 dark:border-violet-700/50
-                              outline-none focus:ring-2 focus:ring-violet-400 cursor-pointer"
-                          >
-                            <option value="">— غير محدد —</option>
-                            {agents.map((a) => (
-                              <option key={a} value={a}>{a.split('@')[0]}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <span className="text-xs text-violet-600 dark:text-violet-400 whitespace-nowrap font-medium">
-                            {order.AssignedTo
-                              ? order.AssignedTo.split('@')[0]
-                              : <span className="text-gray-300 dark:text-slate-700">—</span>}
-                          </span>
-                        )}
-                      </td>
-                    )}
-
-                    <td className="px-4 py-3">
-                      {/* Customer name — truncated so a long value (e.g. an
-                          address typed into the name field) can't stretch the
-                          column; full text on hover via title. */}
-                      <p
-                        title={order.FullName}
-                        className="font-semibold text-gray-800 dark:text-slate-200
-                          max-w-[200px] truncate leading-snug"
-                      >
-                        {order.FullName}
-                      </p>
-
-                      {/* Product badge — always shown (all roles) so employees
-                          see the product for their assigned orders, not only
-                          admins in the "كل المنتجات" view. */}
-                      {order.ProductName && (
-                        <span
-                          title={order.ProductName}
-                          className="mt-1 inline-flex items-center gap-1 max-w-[200px]
-                            px-2 py-0.5 rounded-md text-xs font-medium
-                            bg-indigo-50 border border-indigo-100 text-indigo-700
-                            dark:bg-indigo-900/30 dark:border-indigo-800/50 dark:text-indigo-300"
-                        >
-                          {/* box icon */}
-                          <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                              d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-                          </svg>
-                          <span className="truncate">{order.ProductName}</span>
-                        </span>
-                      )}
-
-                      {/* Quantity badge — shown whenever quantity > 1 */}
-                      {order.quantity != null && order.quantity > 1 && (
-                        <span className="mt-1 inline-flex items-center gap-1
-                          px-2 py-0.5 rounded-md text-xs
-                          bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400 mr-1">
-                          الكمية:&nbsp;<strong className="text-gray-700 dark:text-slate-300">{order.quantity}</strong>&nbsp;قطعة
-                        </span>
-                      )}
-
-                    </td>
-
-                    <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap" dir="ltr">
-                      {order.Phone}
-                    </td>
-
-                    {/* Delivery Rate dropdown — all roles */}
-                    <td className="px-4 py-3">
-                      <select
-                        value={order.DeliveryRate ?? 'بدون'}
-                        onChange={(e) => handleDeliveryRateChange(order.id, e.target.value)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer
-                          outline-none focus:ring-2 focus:ring-indigo-400 border-0
-                          [&>option]:bg-white [&>option]:text-slate-900
-                          dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
-                          ${DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400'}`}
-                      >
-                        {DELIVERY_RATE_OPTIONS.map((r) => (
-                          <option key={r} value={r}>{r}</option>
-                        ))}
-                      </select>
-
-                      {/* ضعيف warning chip */}
-                      {order.DeliveryRate === 'ضعيف' && (
-                        <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5
-                          rounded bg-red-100 border border-red-300 text-red-700 text-xs font-bold
-                          dark:bg-red-900/30 dark:border-red-700/50 dark:text-red-400
-                          whitespace-nowrap">
-                          <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                            <path fillRule="evenodd"
-                              d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213
-                                2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11
-                                13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1
-                                1 0 00-1-1z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                          طلب عربون
-                        </div>
-                      )}
-
-                    </td>
-
-                    <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap">
-                      {order.City}
-                    </td>
-
-                    {/* Address — inline editable (all roles) */}
-                    <td className="px-4 py-3">
-                      <input
-                        key={`${order.id}-addr-${order.Address}`}
-                        type="text"
-                        defaultValue={order.Address ?? ''}
-                        onBlur={(e) => handleAddressBlur(order, e.target.value)}
-                        title={order.Address}
-                        placeholder="أضف العنوان..."
-                        className="w-full min-w-[160px] max-w-[220px] px-2 py-1 text-sm rounded-lg
-                          border border-transparent outline-none bg-transparent
-                          hover:border-gray-300 dark:hover:border-slate-700
-                          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
-                          focus:bg-white dark:focus:bg-slate-800
-                          text-gray-600 dark:text-slate-400
-                          placeholder-gray-300 dark:placeholder-slate-600
-                          transition"
-                      />
-                    </td>
-
-                    {/* Status cell — all roles
-                        If the status was set by the shipping API (not in MANUAL_STATUS_OPTIONS),
-                        show a read-only badge so no one can accidentally overwrite it inline.
-                        Otherwise render the restricted manual-options dropdown.              */}
-                    <td className="px-4 py-3">
-                      {/* Admins get a FULL override: every status is editable, even
-                          system-set ones (تم الشحن / تم التوصيل). Agents keep the
-                          restricted manual list, and system statuses stay locked. */}
-                      {(role === 'admin' || MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status))) ? (
-                        <select
-                          value={order.Status}
-                          onChange={(e) => handleStatusChange(order.id, e.target.value)}
-                          className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer outline-none
-                            focus:ring-2 focus:ring-indigo-400 border-0
-                            [&>option]:bg-white [&>option]:text-slate-900
-                            dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
-                            ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
-                        >
-                          {(role === 'admin' ? STATUS_OPTIONS : MANUAL_STATUS_OPTIONS).map((s) => (
-                            <option key={s} value={s}>{s}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        /* System-set status (e.g. تم الشحن, تم التوصيل) — read-only pill */
-                        <span
-                          title="هذه الحالة تُضبط تلقائياً عبر شركة الشحن"
-                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold select-none
-                            ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
-                        >
-                          {/* lock icon */}
-                          <svg className="w-3 h-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                              d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                          </svg>
-                          {order.Status}
-                        </span>
-                      )}
-
-                      {/* Rejection reason — shown inline under the status so agents
-                          don't have to open the edit modal to read it. */}
-                      {order.Status === 'تم الرفض' && order.rejectionReason && (
-                        <div
-                          title={order.rejectionReason}
-                          className="mt-1.5 px-2 py-1 text-xs text-center text-red-600 dark:text-red-400
-                            bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800/40
-                            rounded max-w-[180px] mx-auto leading-snug"
-                        >
-                          {order.rejectionReason}
-                        </div>
-                      )}
-
-                      {/* Postponed follow-up date — badge under the status for مؤجل */}
-                      {normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate) && (
-                        <div
-                          title="تاريخ المتابعة"
-                          className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs
-                            text-amber-700 dark:text-amber-300
-                            bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40
-                            rounded-md mx-auto leading-snug"
-                          dir="ltr"
-                        >
-                          <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                          </svg>
-                          {toDateInput(order.PostponedDate)}
-                        </div>
-                      )}
-
-                      {/* Quick no-answer attempt logger — shown inline when status
-                          is 'لا يرد' so BOTH roles log a call without opening a modal.
-                          Uses normalised comparison so it works for imported/synced
-                          orders too (not just UI-set ones). */}
-                      {normStatus(order.Status) === 'لا يرد' && (() => {
-                        const logs = attemptOverrides[order.id]
-                          ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
-                        const count = logs.length;
-                        const done  = count >= NO_ANSWER_REQUIRED;
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => handleInlineAttempt(order.id)}
-                            disabled={inlineLoggingId === order.id}
-                            title="تسجيل محاولة اتصال"
-                            className={`mt-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
-                              transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
-                              ${done
-                                ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300'
-                                : 'bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300'}`}
-                          >
-                            <span>📞</span>
-                            <span>
-                              {inlineLoggingId === order.id ? 'جارٍ…' : 'تسجيل محاولة'}
-                              {' '}({count}/{NO_ANSWER_REQUIRED})
-                            </span>
-                          </button>
-                        );
-                      })()}
-                    </td>
-
-                    {/* Financials / Payment column */}
-                    <td className="px-4 py-3">
-                      <div className="flex flex-col items-center justify-center gap-1.5">
-                        {order.hasDeposit ? (
-                          <>
-                            {/* COD pill — remaining amount the courier collects */}
-                            <div className="inline-flex items-center justify-center
-                              rounded-md px-2 py-1 border
-                              border-rose-200 bg-rose-50
-                              dark:bg-rose-900/30 dark:border-rose-800/50
-                              text-rose-700 dark:text-rose-400
-                              text-xs font-bold whitespace-nowrap">
-                              COD: {fmtNum(Math.max(0, asNum(order.ProductPrice) - asNum(order.depositAmount)))} ج.م
-                            </div>
-
-                            {/* Deposit already paid — subtle emerald row */}
-                            <div className="flex items-center gap-1 text-[11px] font-medium
-                              text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
-                              <span>عربون:</span>
-                              <span dir="ltr">{fmtNum(asNum(order.depositAmount))} ج.م</span>
-                              <span>💰</span>
-                            </div>
-                          </>
-                        ) : order.ProductPrice ? (
-                          <span className="text-gray-500 dark:text-gray-400 text-sm whitespace-nowrap">
-                            {fmtNum(asNum(order.ProductPrice))} ج.م
-                          </span>
-                        ) : (
-                          <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
-                        )}
-                      </div>
-                    </td>
-
-                    {/* Shipping notes — inline editable (all roles); printed on the Bosta AWB */}
-                    <td className="px-4 py-3">
-                      <input
-                        key={`${order.id}-ship-${order.ShippingNotes}`}
-                        type="text"
-                        defaultValue={order.ShippingNotes ?? ''}
-                        onBlur={(e) => handleShippingNotesBlur(order, e.target.value)}
-                        placeholder="ملاحظة للشحن..."
-                        title="تُطبع على بوليصة الشحن"
-                        className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
-                          border border-transparent outline-none bg-transparent
-                          hover:border-gray-300 dark:hover:border-slate-700
-                          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
-                          focus:bg-white dark:focus:bg-slate-800
-                          text-gray-700 dark:text-slate-300
-                          placeholder-gray-300 dark:placeholder-slate-600
-                          transition"
-                      />
-                    </td>
-
-                    {/* Note inline edit — all roles */}
-                    <td className="px-4 py-3">
-                      <input
-                        key={`${order.id}-${order.Note}`}
-                        type="text"
-                        defaultValue={order.Note ?? ''}
-                        onBlur={(e) => handleNoteBlur(order, e.target.value)}
-                        placeholder="أضف ملاحظة..."
-                        className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
-                          border border-transparent outline-none bg-transparent
-                          hover:border-gray-300 dark:hover:border-slate-700
-                          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
-                          focus:bg-white dark:focus:bg-slate-800
-                          text-gray-700 dark:text-slate-300
-                          placeholder-gray-300 dark:placeholder-slate-600
-                          transition"
-                      />
-                    </td>
-
-                    {/* Actions — all roles */}
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1.5">
-                        {role === 'admin' ? (
-                          /* Admin: full edit modal (covers all fields) + delete */
-                          <>
-                            <button
-                              onClick={() => openEditModal(order)}
-                              className="px-2.5 py-1 text-xs rounded-lg font-medium transition
-                                bg-indigo-50 text-indigo-700 hover:bg-indigo-100
-                                dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
-                            >
-                              تعديل
-                            </button>
-                            <button
-                              onClick={() => setDeleteConfirm(order.id)}
-                              className="px-2.5 py-1 text-xs rounded-lg font-medium transition
-                                bg-red-50 text-red-700 hover:bg-red-100
-                                dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
-                            >
-                              حذف
-                            </button>
-                          </>
-                        ) : (
-                          /* Agent: quick-edit of customer / shipping details */
-                          <button
-                            onClick={() => openQuickEdit(order)}
-                            title="تعديل بيانات العميل"
-                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg font-medium transition
-                              bg-indigo-50 text-indigo-700 hover:bg-indigo-100
-                              dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                            </svg>
-                            تعديل
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+              {orders.map((order, i) => (
+                <OrderRow
+                  key={order.id}
+                  order={order}
+                  index={i}
+                  role={role}
+                  selected={selectedIds.includes(order.id)}
+                  saving={savingId === order.id}
+                  agents={agents}
+                  attemptLogs={attemptOverrides[order.id]}
+                  inlineLogging={inlineLoggingId === order.id}
+                  onToggleSelect={onToggleSelect}
+                  onStatusChange={handleStatusChange}
+                  onDeliveryRateChange={handleDeliveryRateChange}
+                  onAssignedToChange={handleAssignedToChange}
+                  onNoteBlur={handleNoteBlur}
+                  onAddressBlur={handleAddressBlur}
+                  onShippingNotesBlur={handleShippingNotesBlur}
+                  onInlineAttempt={handleInlineAttempt}
+                  onQuickEdit={openQuickEdit}
+                  onEditModal={openEditModal}
+                  onDelete={setDeleteConfirm}
+                />
+              ))}
             </tbody>
           </table>
         </div>
@@ -1472,6 +1116,424 @@ export default function OrdersTable({
     </>
   );
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   OrderRow — one table row, strictly memoised.
+   ═══════════════════════════════════════════════════════════════════════════
+   The parent OrdersTable still re-renders & re-maps the array on a status edit,
+   but React.memo here means only the ONE row whose `order` reference changed
+   actually re-renders its (heavy) cell subtree. Every other row is skipped.
+   Callback props are passed raw (page handlers use updater-form setstate + the
+   row's own `order`, so identity drift causes no stale-closure bug) and the
+   comparator ignores them — it compares only what the row DISPLAYS.            */
+interface OrderRowProps {
+  order:                Order;
+  index:                number;
+  role:                 'admin' | 'agent';
+  selected:             boolean;
+  saving:               boolean;
+  agents:               string[];
+  attemptLogs?:         string[];
+  inlineLogging:        boolean;
+  onToggleSelect?:      (id: number) => void;
+  onStatusChange:       (order: Order, status: string) => void;
+  onDeliveryRateChange: (id: number, rate: string) => void;
+  onAssignedToChange:   (id: number, email: string) => void;
+  onNoteBlur:           (order: Order, note: string) => void;
+  onAddressBlur:        (order: Order, addr: string) => void;
+  onShippingNotesBlur:  (order: Order, notes: string) => void;
+  onInlineAttempt:      (id: number) => void;
+  onQuickEdit:          (order: Order) => void;
+  onEditModal:          (order: Order) => void;
+  onDelete:             (id: number) => void;
+}
+
+function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
+  return (
+    prev.order === next.order &&          // immutable update → new ref only for the edited row
+    prev.index === next.index &&
+    prev.role === next.role &&
+    prev.selected === next.selected &&
+    prev.saving === next.saving &&
+    prev.inlineLogging === next.inlineLogging &&
+    prev.attemptLogs === next.attemptLogs &&
+    sameRefArray(prev.agents, next.agents)   // string[] → value compare
+  );
+}
+
+const OrderRow = memo(function OrderRow({
+  order, index, role, selected, saving, agents, attemptLogs, inlineLogging,
+  onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
+  onNoteBlur, onAddressBlur, onShippingNotesBlur, onInlineAttempt,
+  onQuickEdit, onEditModal, onDelete,
+}: OrderRowProps) {
+  return (
+    <tr
+      className={`hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${saving ? 'opacity-60 pointer-events-none' : ''}`}
+    >
+      {/* Row checkbox — admin only */}
+      {role === 'admin' && onToggleSelect && (
+        <td className="px-4 py-3 w-10" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            aria-label={`تحديد طلب ${order.id}`}
+            checked={selected}
+            onChange={() => onToggleSelect(order.id)}
+            className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
+          />
+        </td>
+      )}
+      <td className="px-4 py-3 text-gray-400 dark:text-slate-600 text-xs">{index + 1}</td>
+
+      {role === 'admin' && (
+        <td className="px-4 py-3">
+          {agents.length > 0 ? (
+            <select
+              value={order.AssignedTo ?? ''}
+              onChange={(e) => onAssignedToChange(order.id, e.target.value)}
+              className="px-2 py-1 rounded-lg text-xs font-medium
+                text-violet-700 bg-violet-50 border border-violet-200
+                dark:text-violet-300 dark:bg-violet-900/30 dark:border-violet-700/50
+                outline-none focus:ring-2 focus:ring-violet-400 cursor-pointer"
+            >
+              <option value="">— غير محدد —</option>
+              {agents.map((a) => (
+                <option key={a} value={a}>{a.split('@')[0]}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-xs text-violet-600 dark:text-violet-400 whitespace-nowrap font-medium">
+              {order.AssignedTo
+                ? order.AssignedTo.split('@')[0]
+                : <span className="text-gray-300 dark:text-slate-700">—</span>}
+            </span>
+          )}
+        </td>
+      )}
+
+      <td className="px-4 py-3">
+        {/* Customer name — truncated so a long value can't stretch the column. */}
+        <p
+          title={order.FullName}
+          className="font-semibold text-gray-800 dark:text-slate-200 max-w-[200px] truncate leading-snug"
+        >
+          {order.FullName}
+        </p>
+
+        {/* Product badge */}
+        {order.ProductName && (
+          <span
+            title={order.ProductName}
+            className="mt-1 inline-flex items-center gap-1 max-w-[200px]
+              px-2 py-0.5 rounded-md text-xs font-medium
+              bg-indigo-50 border border-indigo-100 text-indigo-700
+              dark:bg-indigo-900/30 dark:border-indigo-800/50 dark:text-indigo-300"
+          >
+            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+            <span className="truncate">{order.ProductName}</span>
+          </span>
+        )}
+
+        {/* Quantity badge — shown whenever quantity > 1 */}
+        {order.quantity != null && order.quantity > 1 && (
+          <span className="mt-1 inline-flex items-center gap-1
+            px-2 py-0.5 rounded-md text-xs
+            bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400 mr-1">
+            الكمية:&nbsp;<strong className="text-gray-700 dark:text-slate-300">{order.quantity}</strong>&nbsp;قطعة
+          </span>
+        )}
+      </td>
+
+      <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap" dir="ltr">
+        {order.Phone}
+      </td>
+
+      {/* Delivery Rate dropdown — all roles */}
+      <td className="px-4 py-3">
+        <select
+          value={order.DeliveryRate ?? 'بدون'}
+          onChange={(e) => onDeliveryRateChange(order.id, e.target.value)}
+          className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer
+            outline-none focus:ring-2 focus:ring-indigo-400 border-0
+            [&>option]:bg-white [&>option]:text-slate-900
+            dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
+            ${DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400'}`}
+        >
+          {DELIVERY_RATE_OPTIONS.map((r) => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+
+        {order.DeliveryRate === 'ضعيف' && (
+          <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5
+            rounded bg-red-100 border border-red-300 text-red-700 text-xs font-bold
+            dark:bg-red-900/30 dark:border-red-700/50 dark:text-red-400 whitespace-nowrap">
+            <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd"
+                d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213
+                  2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11
+                  13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1
+                  1 0 00-1-1z"
+                clipRule="evenodd"
+              />
+            </svg>
+            طلب عربون
+          </div>
+        )}
+      </td>
+
+      <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap">
+        {order.City}
+      </td>
+
+      {/* Address — inline editable (all roles) */}
+      <td className="px-4 py-3">
+        <input
+          key={`${order.id}-addr-${order.Address}`}
+          type="text"
+          defaultValue={order.Address ?? ''}
+          onBlur={(e) => onAddressBlur(order, e.target.value)}
+          title={order.Address}
+          placeholder="أضف العنوان..."
+          className="w-full min-w-[160px] max-w-[220px] px-2 py-1 text-sm rounded-lg
+            border border-transparent outline-none bg-transparent
+            hover:border-gray-300 dark:hover:border-slate-700
+            focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+            focus:bg-white dark:focus:bg-slate-800
+            text-gray-600 dark:text-slate-400
+            placeholder-gray-300 dark:placeholder-slate-600 transition"
+        />
+      </td>
+
+      {/* Status cell */}
+      <td className="px-4 py-3">
+        {(role === 'admin' || MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status))) ? (
+          <select
+            value={order.Status}
+            onChange={(e) => onStatusChange(order, e.target.value)}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer outline-none
+              focus:ring-2 focus:ring-indigo-400 border-0
+              [&>option]:bg-white [&>option]:text-slate-900
+              dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
+              ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
+          >
+            {(role === 'admin' ? STATUS_OPTIONS : MANUAL_STATUS_OPTIONS).map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        ) : (
+          <span
+            title="هذه الحالة تُضبط تلقائياً عبر شركة الشحن"
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold select-none
+              ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
+          >
+            <svg className="w-3 h-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            {order.Status}
+          </span>
+        )}
+
+        {order.Status === 'تم الرفض' && order.rejectionReason && (
+          <div
+            title={order.rejectionReason}
+            className="mt-1.5 px-2 py-1 text-xs text-center text-red-600 dark:text-red-400
+              bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800/40
+              rounded max-w-[180px] mx-auto leading-snug"
+          >
+            {order.rejectionReason}
+          </div>
+        )}
+
+        {normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate) && (
+          <div
+            title="تاريخ المتابعة"
+            className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs
+              text-amber-700 dark:text-amber-300
+              bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40
+              rounded-md mx-auto leading-snug"
+            dir="ltr"
+          >
+            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            {toDateInput(order.PostponedDate)}
+          </div>
+        )}
+
+        {normStatus(order.Status) === 'لا يرد' && (() => {
+          const logs  = attemptLogs ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+          const count = logs.length;
+          const done  = count >= NO_ANSWER_REQUIRED;
+          return (
+            <button
+              type="button"
+              onClick={() => onInlineAttempt(order.id)}
+              disabled={inlineLogging}
+              title="تسجيل محاولة اتصال"
+              className={`mt-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+                transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
+                ${done
+                  ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300'
+                  : 'bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300'}`}
+            >
+              <span>📞</span>
+              <span>
+                {inlineLogging ? 'جارٍ…' : 'تسجيل محاولة'}
+                {' '}({count}/{NO_ANSWER_REQUIRED})
+              </span>
+            </button>
+          );
+        })()}
+      </td>
+
+      {/* Financials / Payment column */}
+      <td className="px-4 py-3">
+        <div className="flex flex-col items-center justify-center gap-1.5">
+          {order.hasDeposit ? (
+            <>
+              <div className="inline-flex items-center justify-center
+                rounded-md px-2 py-1 border
+                border-rose-200 bg-rose-50
+                dark:bg-rose-900/30 dark:border-rose-800/50
+                text-rose-700 dark:text-rose-400
+                text-xs font-bold whitespace-nowrap">
+                COD: {fmtNum(Math.max(0, asNum(order.ProductPrice) - asNum(order.depositAmount)))} ج.م
+              </div>
+              <div className="flex items-center gap-1 text-[11px] font-medium
+                text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                <span>عربون:</span>
+                <span dir="ltr">{fmtNum(asNum(order.depositAmount))} ج.م</span>
+                <span>💰</span>
+              </div>
+            </>
+          ) : order.ProductPrice ? (
+            <span className="text-gray-500 dark:text-gray-400 text-sm whitespace-nowrap">
+              {fmtNum(asNum(order.ProductPrice))} ج.م
+            </span>
+          ) : (
+            <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
+          )}
+        </div>
+      </td>
+
+      {/* Shipping notes — inline editable; printed on the Bosta AWB */}
+      <td className="px-4 py-3">
+        <input
+          key={`${order.id}-ship-${order.ShippingNotes}`}
+          type="text"
+          defaultValue={order.ShippingNotes ?? ''}
+          onBlur={(e) => onShippingNotesBlur(order, e.target.value)}
+          placeholder="ملاحظة للشحن..."
+          title="تُطبع على بوليصة الشحن"
+          className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
+            border border-transparent outline-none bg-transparent
+            hover:border-gray-300 dark:hover:border-slate-700
+            focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+            focus:bg-white dark:focus:bg-slate-800
+            text-gray-700 dark:text-slate-300
+            placeholder-gray-300 dark:placeholder-slate-600 transition"
+        />
+      </td>
+
+      {/* Note inline edit — all roles */}
+      <td className="px-4 py-3">
+        <input
+          key={`${order.id}-${order.Note}`}
+          type="text"
+          defaultValue={order.Note ?? ''}
+          onBlur={(e) => onNoteBlur(order, e.target.value)}
+          placeholder="أضف ملاحظة..."
+          className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
+            border border-transparent outline-none bg-transparent
+            hover:border-gray-300 dark:hover:border-slate-700
+            focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+            focus:bg-white dark:focus:bg-slate-800
+            text-gray-700 dark:text-slate-300
+            placeholder-gray-300 dark:placeholder-slate-600 transition"
+        />
+      </td>
+
+      {/* Actions — all roles */}
+      <td className="px-4 py-3">
+        <div className="flex flex-wrap gap-1.5">
+          {role === 'admin' ? (
+            <>
+              <button
+                onClick={() => onEditModal(order)}
+                className="px-2.5 py-1 text-xs rounded-lg font-medium transition
+                  bg-indigo-50 text-indigo-700 hover:bg-indigo-100
+                  dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
+              >
+                تعديل
+              </button>
+              <button
+                onClick={() => onDelete(order.id)}
+                className="px-2.5 py-1 text-xs rounded-lg font-medium transition
+                  bg-red-50 text-red-700 hover:bg-red-100
+                  dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
+              >
+                حذف
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => onQuickEdit(order)}
+              title="تعديل بيانات العميل"
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg font-medium transition
+                bg-indigo-50 text-indigo-700 hover:bg-indigo-100
+                dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+              </svg>
+              تعديل
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}, areRowPropsEqual);
+
+/* ── Memoisation ─────────────────────────────────────────────────────────────
+   The dashboard re-renders on many unrelated state changes (background product /
+   inventory refetches, search, modals, polls). Without this, the whole 100s-row
+   table re-renders every time → the ~3s freeze after a status change.
+
+   We only re-render when the DISPLAYED data actually changes. Callback props
+   (onUpdate/onDelete/onToast/onToggleSelect/onSelectAll) are intentionally
+   ignored — they're behaviourally stable and refreshed whenever a prop we DO
+   compare (orders/selectedIds/agents/…) changes, so no stale-closure risk.    */
+/* Shallow element-by-element comparison. `displayOrders` is a fresh array each
+   render, but the page mutates orders IMMUTABLY (replaces only the changed order
+   object), so unchanged rows keep their reference. Comparing element refs lets us
+   skip re-render when nothing the table shows changed (e.g. a background product
+   refetch), while still re-rendering on a real status edit. O(n) ref checks. */
+function sameRefArray<T>(a: T[] = [], b: T[] = []) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+function arePropsEqual(prev: Props, next: Props) {
+  return (
+    sameRefArray(prev.orders, next.orders) &&    // per-row ref compare
+    prev.role === next.role &&
+    prev.showProduct === next.showProduct &&
+    prev.emptyMessage === next.emptyMessage &&
+    sameRefArray(prev.selectedIds, next.selectedIds) &&
+    sameRefArray(prev.agents, next.agents)
+  );
+}
+
+export default memo(OrdersTable, arePropsEqual);
 
 /* ── Helpers ─────────────────────────────────────────────────── */
 

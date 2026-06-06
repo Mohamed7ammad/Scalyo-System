@@ -85,6 +85,7 @@ export default function DashboardPage() {
   const [shippingLoading, setShippingLoading] = useState(false);
   const [shippingResult,  setShippingResult]  = useState<ShippingResult | null>(null);
   const [allowOpenAll,    setAllowOpenAll]    = useState(false);
+  const [payWithPoints,   setPayWithPoints]   = useState(false);
   /* Batch quota: how many confirmed orders to ship this run (string for the
      controlled <input>). Defaults to the full pending count when the modal opens. */
   const [shipLimit,       setShipLimit]       = useState('');
@@ -272,18 +273,34 @@ export default function DashboardPage() {
 
   /* ── Update / Delete ─────────────────────────────────────────── */
   const handleUpdate = async (id: number, data: Partial<Order>) => {
+    /* STRICT optimistic update — mutate the row in local state SYNCHRONOUSLY,
+       before any await, so the UI changes the instant the user picks a status
+       (no transparent/loading row). The API runs in the background; we only
+       touch state again if it FAILS (rollback). */
+    let prevOrder: Order | null = null;
+    setOrders((prev) => prev.map((o) => {
+      if (o.id !== id) return o;
+      prevOrder = o;                 // snapshot for rollback
+      return { ...o, ...data };      // instant merge
+    }));
+
     try {
-      const res = await updateOrder(id, data);
-      setOrders((prev) => prev.map((o) => (o.id === id ? res.data : o)));
-      showToast('تم الحفظ بنجاح', 'success');
-      // Refresh both stock sources so filter-pill badges update immediately
-      fetchInventory();
-      fetchProducts();
+      await updateOrder(id, data);
+      // Success: non-blocking toast + background stock-badge refresh (deferred,
+      // never awaited; OrdersTable is memoised against products so it won't
+      // re-render the table).
+      setTimeout(() => showToast('تم الحفظ بنجاح', 'success'), 0);
+      setTimeout(() => fetchProducts(), 0);
     } catch (err: unknown) {
+      // Rollback to the pre-edit row only on failure.
+      if (prevOrder) {
+        const snapshot = prevOrder;
+        setOrders((prev) => prev.map((o) => (o.id === id ? snapshot : o)));
+      }
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'فشل في الحفظ';
-      showToast(msg, 'error');
+        'فشل في الحفظ — تم التراجع';
+      setTimeout(() => showToast(msg, 'error'), 0);
     }
   };
 
@@ -871,7 +888,7 @@ export default function DashboardPage() {
       const idsToShip = confirmedDisplayOrders
         .slice(0, effectiveShipCount)
         .map((o) => o.id);
-      const res = await forwardToShipping(allowOpenAll, idsToShip);
+      const res = await forwardToShipping(allowOpenAll, idsToShip, payWithPoints);
       setShippingResult(res.data);
       // Refresh orders silently so statuses update without scroll disruption
       const fresh = await import('@/lib/api').then((m) => m.getOrders());
@@ -1677,7 +1694,7 @@ export default function DashboardPage() {
                   )}
 
                   {/* Allow-open checkbox */}
-                  <label className="flex items-center gap-2.5 mb-5 cursor-pointer select-none group">
+                  <label className="flex items-center gap-2.5 mb-3 cursor-pointer select-none group">
                     <input
                       type="checkbox"
                       checked={allowOpenAll}
@@ -1686,6 +1703,19 @@ export default function DashboardPage() {
                     />
                     <span className="text-sm text-gray-600 group-hover:text-gray-800 transition">
                       السماح بفتح الشحنة لجميع الطلبات
+                    </span>
+                  </label>
+
+                  {/* Pay-with-Bosta-points checkbox */}
+                  <label className="flex items-center gap-2.5 mb-5 cursor-pointer select-none group">
+                    <input
+                      type="checkbox"
+                      checked={payWithPoints}
+                      onChange={(e) => setPayWithPoints(e.target.checked)}
+                      className="w-4 h-4 accent-teal-600 rounded cursor-pointer"
+                    />
+                    <span className="text-sm text-gray-600 group-hover:text-gray-800 transition">
+                      الدفع باستخدام نقاط بوسطة
                     </span>
                   </label>
 

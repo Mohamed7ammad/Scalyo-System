@@ -4,6 +4,7 @@ const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
 const { checkAndSendStaffAlerts } = require('../services/alerts');
+const { EARNED_COMMISSION_SQL } = require('../utils/commission');
 
 const router = express.Router();
 
@@ -33,6 +34,25 @@ const migrations = [
   /* ── Presence heartbeat — last time the user pinged while logged in. Powers
         the Online/Offline badge in the staff table. ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ`,
+  /* ── Employee payout ledger ──────────────────────────────────────────────
+        Records cash settlements paid against an employee's EARNED commission.
+        Deliberately a STANDALONE table (not treasury_transactions): commissions
+        are already booked as accrued expenses in the treasury, so a payout is a
+        liability settlement — logging it as another treasury expense would
+        double-count it in Net Profit and the company balance. Partial payments
+        are simply multiple rows; outstanding = lifetime earned − Σ payouts. */
+  `CREATE TABLE IF NOT EXISTS employee_payouts (
+     id          SERIAL        PRIMARY KEY,
+     user_id     VARCHAR       NOT NULL,
+     business_id INTEGER       NOT NULL,
+     amount      NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+     note        TEXT,
+     paid_by     VARCHAR,
+     paid_at     DATE          NOT NULL DEFAULT CURRENT_DATE,
+     created_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE INDEX IF NOT EXISTS employee_payouts_user_idx
+     ON employee_payouts (user_id, business_id)`,
 ];
 
 migrations.forEach((sql) =>
@@ -449,6 +469,121 @@ router.post('/heartbeat', authenticate, async (req, res) => {
     res.json({ ok: true, at: new Date().toISOString() });
   } catch (err) {
     console.error('[POST /staff/heartbeat]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── Employee Ledger helper — compute one employee's GLOBAL balance ──────────
+   Returns { exists, name, lifetime_commission, total_paid, outstanding }.
+   lifetime_commission uses the SHARED earned-commission formula (all-time), so
+   it always agrees with the period column on the staff page.                  */
+async function getEmployeeBalance(userId, businessId) {
+  const commRes = await pool.query(
+    `SELECT COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '@', 1)) AS name,
+            ${EARNED_COMMISSION_SQL} AS lifetime_commission
+       FROM users u
+       LEFT JOIN orders o ON o."AssignedTo" = u.email AND o.business_id = $2::integer
+      WHERE u.id = $1 AND u.business_id = $2::integer
+      GROUP BY u.id, u.name, u.email,
+               u.comm_confirmed, u.comm_delivered, u.comm_rejected, u.comm_no_answer`,
+    [userId, businessId]
+  );
+  if (!commRes.rows.length) return { exists: false };
+
+  const paidRes = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0) AS total_paid
+       FROM employee_payouts WHERE user_id = $1 AND business_id = $2::integer`,
+    [userId, businessId]
+  );
+
+  const lifetime = parseFloat(commRes.rows[0].lifetime_commission) || 0;
+  const paid     = parseFloat(paidRes.rows[0].total_paid)          || 0;
+  return {
+    exists: true,
+    name: commRes.rows[0].name,
+    lifetime_commission: parseFloat(lifetime.toFixed(2)),
+    total_paid:          parseFloat(paid.toFixed(2)),
+    outstanding:         parseFloat((lifetime - paid).toFixed(2)),
+  };
+}
+
+/* ── GET /api/staff/:id/payouts — payout history for one employee (admin) ──── */
+router.get('/:id/payouts', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const bal = await getEmployeeBalance(req.params.id, req.user.business_id);
+    if (!bal.exists) return res.status(404).json({ error: 'الموظف غير موجود' });
+
+    const { rows } = await pool.query(
+      `SELECT id, amount::float AS amount, note, paid_by, paid_at, created_at
+         FROM employee_payouts
+        WHERE user_id = $1 AND business_id = $2::integer
+        ORDER BY paid_at DESC, id DESC`,
+      [req.params.id, req.user.business_id]
+    );
+
+    res.json({
+      employee:            bal.name,
+      lifetime_commission: bal.lifetime_commission,
+      total_paid:          bal.total_paid,
+      outstanding_balance: bal.outstanding,
+      payouts:             rows,
+    });
+  } catch (err) {
+    console.error('[GET /staff/:id/payouts]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── POST /api/staff/:id/payout — log a cash settlement (admin) ──────────────
+   Body: { amount: number, note?: string }
+   Validates 0 < amount ≤ current outstanding balance (computed server-side, so
+   it can't be gamed and never drives the balance negative). Partial payments are
+   allowed — the admin simply submits less than the defaulted full balance.     */
+router.post('/:id/payout', authenticate, requireAdmin, async (req, res) => {
+  const { amount, note } = req.body;
+  const amt = parseFloat(amount);
+
+  if (amount == null || isNaN(amt) || amt <= 0) {
+    return res.status(400).json({ error: 'قيمة التسديد يجب أن تكون رقماً موجباً' });
+  }
+
+  try {
+    const bal = await getEmployeeBalance(req.params.id, req.user.business_id);
+    if (!bal.exists) return res.status(404).json({ error: 'الموظف غير موجود' });
+
+    /* 0.01 epsilon so a full settlement of the exact balance isn't rejected by
+       floating-point noise. */
+    if (amt > bal.outstanding + 0.01) {
+      return res.status(400).json({
+        error: `المبلغ يتجاوز الرصيد المتبقي (${bal.outstanding.toFixed(2)} ج.م)`,
+        outstanding_balance: bal.outstanding,
+      });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO employee_payouts (user_id, business_id, amount, note, paid_by)
+       VALUES ($1, $2::integer, $3, $4, $5)
+       RETURNING id, amount::float AS amount, note, paid_at, created_at`,
+      [req.params.id, req.user.business_id, amt, (note || '').trim() || null, String(req.user.id)]
+    );
+
+    const newPaid        = parseFloat((bal.total_paid + amt).toFixed(2));
+    const newOutstanding = parseFloat((bal.lifetime_commission - newPaid).toFixed(2));
+
+    console.log(
+      `[Payout] ${bal.name}: +${amt.toFixed(2)} | paid ${newPaid} / earned ` +
+      `${bal.lifetime_commission} | outstanding ${newOutstanding}`
+    );
+
+    res.status(201).json({
+      message:             `تم تسجيل تسديد ${amt.toFixed(2)} ج.م لـ ${bal.name}`,
+      payout:              rows[0],
+      lifetime_commission: bal.lifetime_commission,
+      total_paid:          newPaid,
+      outstanding_balance: newOutstanding,
+    });
+  } catch (err) {
+    console.error('[POST /staff/:id/payout]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
