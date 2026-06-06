@@ -206,8 +206,11 @@ function OrdersTable({
   };
 
 
-  /* ─── Status dropdown ─────────────────────────────────────── */
-  const handleStatusChange = async (id: number, Status: string) => {
+  /* ─── Status dropdown ─────────────────────────────────────────
+     Strict optimistic: fire-and-forget — NO savingId / transparent state. The
+     parent (handleUpdate) mutates local state synchronously before awaiting the
+     API and rolls back only on failure, so the row updates instantly.          */
+  const handleStatusChange = (id: number, Status: string) => {
     // Intercept "تم الرفض" to collect a rejection reason before saving
     if (Status === 'تم الرفض') {
       setPendingRejection({ id, reason: '' });
@@ -219,31 +222,23 @@ function OrdersTable({
       setPendingPostpone({ id, date: toDateInput(existing) });
       return;
     }
-    setSavingId(id);
-    await onUpdate(id, { Status });
-    setSavingId(null);
+    onUpdate(id, { Status });   // optimistic, non-blocking
   };
 
-  /* ─── Delivery Rate dropdown ──────────────────────────────── */
-  const handleDeliveryRateChange = async (id: number, DeliveryRate: string) => {
-    setSavingId(id);
-    await onUpdate(id, { DeliveryRate });
-    setSavingId(null);
+  /* ─── Delivery Rate dropdown — optimistic, non-blocking ───── */
+  const handleDeliveryRateChange = (id: number, DeliveryRate: string) => {
+    onUpdate(id, { DeliveryRate });
   };
 
-  /* ─── AssignedTo dropdown (admin only) ───────────────────── */
-  const handleAssignedToChange = async (id: number, AssignedTo: string) => {
-    setSavingId(id);
-    await onUpdate(id, { AssignedTo });
-    setSavingId(null);
+  /* ─── AssignedTo dropdown (admin only) — optimistic ───────── */
+  const handleAssignedToChange = (id: number, AssignedTo: string) => {
+    onUpdate(id, { AssignedTo });
   };
 
-  /* ─── Note inline edit (save on blur) ─────────────────────── */
-  const handleNoteBlur = async (order: Order, Note: string) => {
+  /* ─── Note inline edit (save on blur) — optimistic ────────── */
+  const handleNoteBlur = (order: Order, Note: string) => {
     if (Note === (order.Note ?? '')) return;
-    setSavingId(order.id);
-    await onUpdate(order.id, { Note });
-    setSavingId(null);
+    onUpdate(order.id, { Note });
   };
 
   /* ─── Address inline edit (save on blur) — all roles ──────── */

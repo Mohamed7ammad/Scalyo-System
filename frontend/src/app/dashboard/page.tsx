@@ -273,22 +273,34 @@ export default function DashboardPage() {
 
   /* ── Update / Delete ─────────────────────────────────────────── */
   const handleUpdate = async (id: number, data: Partial<Order>) => {
+    /* STRICT optimistic update — mutate the row in local state SYNCHRONOUSLY,
+       before any await, so the UI changes the instant the user picks a status
+       (no transparent/loading row). The API runs in the background; we only
+       touch state again if it FAILS (rollback). */
+    let prevOrder: Order | null = null;
+    setOrders((prev) => prev.map((o) => {
+      if (o.id !== id) return o;
+      prevOrder = o;                 // snapshot for rollback
+      return { ...o, ...data };      // instant merge
+    }));
+
     try {
-      const res = await updateOrder(id, data);
-      // Optimistic, surgical state patch — only the touched row changes, so the
-      // (memoised) OrdersTable re-renders once instead of refetching the list.
-      setOrders((prev) => prev.map((o) => (o.id === id ? res.data : o)));
-      showToast('تم الحفظ بنجاح', 'success');
-      // Refresh stock badges in the BACKGROUND, off the critical render path —
-      // never awaited, deferred a tick so it can't add to the update render.
-      // (OrdersTable is memoised against `products`, so this won't re-render the
-      // table — only the filter-bar badges.)
-      setTimeout(() => { fetchProducts(); }, 0);
+      await updateOrder(id, data);
+      // Success: non-blocking toast + background stock-badge refresh (deferred,
+      // never awaited; OrdersTable is memoised against products so it won't
+      // re-render the table).
+      setTimeout(() => showToast('تم الحفظ بنجاح', 'success'), 0);
+      setTimeout(() => fetchProducts(), 0);
     } catch (err: unknown) {
+      // Rollback to the pre-edit row only on failure.
+      if (prevOrder) {
+        const snapshot = prevOrder;
+        setOrders((prev) => prev.map((o) => (o.id === id ? snapshot : o)));
+      }
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'فشل في الحفظ';
-      showToast(msg, 'error');
+        'فشل في الحفظ — تم التراجع';
+      setTimeout(() => showToast(msg, 'error'), 0);
     }
   };
 
