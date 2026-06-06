@@ -729,74 +729,96 @@ async function syncSingleAccount(acct, startDate, endDate) {
     // console.log(`[meta/runSync] 🗑️  Hard-flushed ${del.rowCount} stale Meta row(s)`);
     */
 
-    /* 3b — insert new rows */
-    const insertedDates = new Set();
-    let   insertedCount = 0;
-    let   totalSpend    = 0;
+    /* 3b — AGGREGATE then UPSERT.
+       ───────────────────────────────────────────────────────────────────────
+       AD-SPEND LEAK FIX. The UPSERT conflict key is (expense_date,
+       campaign_name, business_id). Meta returns one row per campaign per day,
+       but DISTINCT campaigns can share an identical name — e.g. a duplicated
+       campaign keeps the original name plus "- نسخة" (copy). Upserting the raw
+       rows one-by-one made the second same-named campaign OVERWRITE the first
+       (DO UPDATE SET amount = EXCLUDED.amount), silently dropping the earlier
+       campaign's spend for that day (observed: 1,477.58 EGP lost on 2026-06-01).
 
-    console.log(`[meta/runSync] 📋 Starting INSERT loop — ${allData.length} raw API row(s) to process`);
-    if (allData.length === 0) {
-      console.warn('[meta/runSync] ⚠️  Meta API returned 0 rows for this date range — nothing to insert. Existing DB data is unchanged.');
-    }
+       Fix: pre-aggregate all API rows by (date_start, campaign_name), SUMMING
+       spend and purchases, and write ONE combined row per key. We keep
+       overwrite-on-conflict (NOT additive) so a re-run stays idempotent — each
+       sync recomputes the full per-key total and overwrites, never doubling.
+       Purchases ARE additive here because the merged rows are genuinely
+       different campaigns (each value is already de-duped across attribution
+       windows via the MAX below).                                             */
+    const groups = new Map();   // `${rowDate}|${campaignName}` → { rowDate, campaignName, spend, metaPurchases }
 
     for (const row of allData) {
-      const spend        = parseFloat(row.spend) || 0;
-      /* rowDate is taken strictly from the row's own date_start field.
-         This guarantees every campaign-day row lands on its correct calendar
-         date, preventing all spend from collapsing onto a single date.       */
-      const rowDate      = row.date_start;
+      /* rowDate is taken strictly from the row's own date_start field, so every
+         campaign-day lands on its correct calendar date. */
+      const rowDate = row.date_start;
+      if (!rowDate || !isValidDate(rowDate)) {
+        console.warn(`[meta/runSync] Skipping — invalid date_start: "${rowDate}" (campaign: "${row.campaign_name}")`);
+        continue;
+      }
       const campaignName = (typeof row.campaign_name === 'string' && row.campaign_name.trim())
         ? row.campaign_name.trim()
         : LEGACY_DESC;
-      /* extractSku returns null when the campaign name has no recognisable SKU tag.
-         We NEVER discard the row in that case — instead we store 'UNATTRIBUTED'
-         so the spend and purchase count still reach the Total Orders KPI.
-         Rows with sku = 'UNATTRIBUTED' are included in the expSql aggregate
-         (no SKU filter there) but are excluded from per-product profitability
-         (the expense_stats CTE joins on UPPER(p.sku), which won't match).    */
-      const skuRaw = extractSku(campaignName);
-      const sku    = skuRaw !== null ? skuRaw : 'UNATTRIBUTED';
+      const spend = parseFloat(row.spend) || 0;
 
-      /* Extract Meta-reported purchase count from the actions array.
-         Meta reports the SAME conversions under multiple action_type names:
-           • "purchase"                              (standard pixel event)
-           • "offsite_conversion.fb_pixel_purchase" (legacy pixel event)
-           • "omni_purchase"                        (omnichannel / value-based events)
-           • custom conversion names containing "purchase"
-
-         CRITICAL: these are NOT additive — they all count the same conversion
-         from different attribution windows.  SUM-ing them inflates the count
-         by 3–4×.  The correct value is the MAXIMUM across all matching entries
-         (the variant that reports the most granular / highest de-duped count).  */
+      /* Meta-reported purchases. The SAME conversion is reported under multiple
+         action_type names ("purchase", "offsite_conversion.fb_pixel_purchase",
+         "omni_purchase", custom names…) across attribution windows — these are
+         NOT additive, so we take the MAXIMUM (the highest de-duped variant) for
+         THIS campaign-day before aggregating distinct campaigns together.       */
       let metaPurchases = 0;
       if (Array.isArray(row.actions)) {
         const purchaseActions = row.actions.filter(
           (a) => a.action_type && a.action_type.toLowerCase().includes('purchase')
         );
         if (purchaseActions.length > 0) {
-          metaPurchases = Math.max(
-            ...purchaseActions.map((a) => parseInt(a.value, 10) || 0)
-          );
+          metaPurchases = Math.max(...purchaseActions.map((a) => parseInt(a.value, 10) || 0));
         }
       }
 
-      if (!rowDate || !isValidDate(rowDate)) {
-        console.warn(`[meta/runSync] Skipping — invalid date_start: "${rowDate}" (campaign: "${campaignName}")`);
-        continue;
+      const key = `${rowDate}|${campaignName}`;
+      const g = groups.get(key);
+      if (g) {
+        g.spend         += spend;
+        g.metaPurchases += metaPurchases;   // distinct same-named campaigns → additive
+      } else {
+        groups.set(key, { rowDate, campaignName, spend, metaPurchases });
       }
+    }
+
+    if (allData.length === 0) {
+      console.warn('[meta/runSync] ⚠️  Meta API returned 0 rows for this date range — nothing to insert. Existing DB data is unchanged.');
+    } else if (groups.size < allData.length) {
+      console.log(
+        `[meta/runSync] 🧮 Aggregated ${allData.length} API row(s) → ${groups.size} unique (date,campaign) key(s) ` +
+        `— merged ${allData.length - groups.size} same-name collision(s) that would otherwise overwrite each other.`
+      );
+    }
+
+    const insertedDates = new Set();
+    let   insertedCount = 0;
+    let   totalSpend    = 0;
+
+    for (const g of groups.values()) {
+      const spend = parseFloat(g.spend.toFixed(2));
       if (spend <= 0) {
-        console.log(`[meta/runSync] ⏭️  Skipping zero-spend row: ${rowDate} | "${campaignName}"`);
+        console.log(`[meta/runSync] ⏭️  Skipping zero-spend key: ${g.rowDate} | "${g.campaignName}"`);
         continue;
       }
+      /* extractSku returns null when the campaign name has no recognisable SKU
+         tag → store 'UNATTRIBUTED' so spend + purchases still reach the totals
+         (the expSql aggregate has no SKU filter) while staying out of per-product
+         profitability (which joins on UPPER(p.sku)). Same name → same SKU, so
+         merging same-named campaigns never crosses SKU boundaries.             */
+      const skuRaw = extractSku(g.campaignName);
+      const sku    = skuRaw !== null ? skuRaw : 'UNATTRIBUTED';
 
-      const insertedRow = { date: rowDate, campaign: campaignName, sku, spend, metaPurchases };
-      console.log('[SYNC DEBUG] Inserting row:', JSON.stringify(insertedRow));
+      console.log('[SYNC DEBUG] Upserting row:', JSON.stringify({ date: g.rowDate, campaign: g.campaignName, sku, spend, metaPurchases: g.metaPurchases }));
 
-      /* UPSERT — conflict key is (expense_date, campaign_name).
-         rowDate is the raw 'YYYY-MM-DD' string from Meta's date_start field —
-         passed as-is so Postgres casts it to DATE without any JS Date conversion.
-         If a row for this campaign+date already exists it is updated in-place;
-         otherwise a new row is inserted.  No rows are deleted.                  */
+      /* UPSERT — conflict key (expense_date, campaign_name, business_id).
+         rowDate is the raw 'YYYY-MM-DD' string from Meta's date_start, passed
+         as-is so Postgres casts it to DATE with no JS Date conversion. Overwrite
+         (not add) keeps re-runs idempotent. No rows are ever deleted.          */
       await pool.query(
         `INSERT INTO expenses
            (expense_date, campaign_name, amount, meta_purchases, meta_sync, sku, meta_account_id, business_id, category)
@@ -808,15 +830,15 @@ async function syncSingleAccount(acct, startDate, endDate) {
            sku             = EXCLUDED.sku,
            meta_account_id = EXCLUDED.meta_account_id,
            category        = EXCLUDED.category`,
-        [rowDate, campaignName, spend, metaPurchases, sku, metaAccountId, businessId]
+        [g.rowDate, g.campaignName, spend, g.metaPurchases, sku, metaAccountId, businessId]
       );
 
       totalSpend += spend;
       insertedCount++;
-      insertedDates.add(rowDate);
+      insertedDates.add(g.rowDate);
       console.log(
-        `[meta/runSync]   ✅ ${rowDate} | ${campaignName} [${sku}]` +
-        ` → spend: ${spend} | purchases: ${metaPurchases}`
+        `[meta/runSync]   ✅ ${g.rowDate} | ${g.campaignName} [${sku}]` +
+        ` → spend: ${spend} | purchases: ${g.metaPurchases}`
       );
     }
 
