@@ -442,8 +442,34 @@ export interface AgentAnalytics {
    *  Null when the agent has no post-delivery data for the period.  */
   ndr_pct:          string | null;
 
-  /** (confirmed × comm_confirmed) + (delivered × comm_delivered) + (rejected × comm_rejected) */
+  /** (confirmed × comm_confirmed) + (delivered × comm_delivered) + (rejected × comm_rejected)
+   *  — PERIOD earnings: respects the active date filter. */
   earned_commission: string | number;
+
+  /* ── Employee Ledger (all-time GLOBAL balance, ignores the date filter) ──
+     lifetime_commission = same formula over ALL orders;
+     total_paid          = Σ logged payouts;
+     outstanding_balance = lifetime_commission − total_paid (what is owed now). */
+  lifetime_commission?: number;
+  total_paid?:          number;
+  outstanding_balance?: number;
+}
+
+export interface EmployeePayout {
+  id:         number;
+  amount:     number;
+  note:       string | null;
+  paid_by?:   string | null;
+  paid_at:    string;
+  created_at: string;
+}
+
+export interface EmployeeLedger {
+  employee:            string;
+  lifetime_commission: number;
+  total_paid:          number;
+  outstanding_balance: number;
+  payouts:             EmployeePayout[];
 }
 
 function buildAnalyticsQS(startDate?: string, endDate?: string, product?: string) {
@@ -463,6 +489,22 @@ function buildAnalyticsQS(startDate?: string, endDate?: string, product?: string
  */
 export const getAgentAnalytics = (startDate?: string, endDate?: string) =>
   api.get<AgentAnalytics[]>(`/api/analytics/agents${buildAnalyticsQS(startDate, endDate)}`);
+
+/* ── Employee Ledger / payouts (admin) ───────────────────────────────────── */
+/** Full payout history + current global balance for one employee. */
+export const getEmployeePayouts = (id: string | number) =>
+  api.get<EmployeeLedger>(`/api/staff/${id}/payouts`);
+
+/** Log a cash settlement against an employee's earned commission.
+ *  Server validates 0 < amount ≤ current outstanding balance. */
+export const createEmployeePayout = (id: string | number, amount: number, note?: string) =>
+  api.post<{
+    message:             string;
+    payout:              EmployeePayout;
+    lifetime_commission: number;
+    total_paid:          number;
+    outstanding_balance: number;
+  }>(`/api/staff/${id}/payout`, { amount, note });
 
 /* ── Dashboard Financial Overview (legacy — kept for backward compat) ── */
 export interface DashboardOverview {

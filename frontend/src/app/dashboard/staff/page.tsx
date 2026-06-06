@@ -4,7 +4,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getStaff, createStaff, updateStaff, toggleAttendance, deleteStaff,
-  getAgentAnalytics,
+  getAgentAnalytics, createEmployeePayout,
   StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics,
 } from '@/lib/api';
 
@@ -349,6 +349,40 @@ export default function StaffPage() {
     } catch {
       showToast('فشل حفظ إعدادات العمولة', 'error');
       setCommModal(m => m ? {...m, saving:false} : null);
+    }
+  };
+
+  /* ── Payout (تسديد) modal — Employee Ledger settlement ──────────────────────
+     amount defaults to the employee's GLOBAL outstanding balance so the admin
+     can settle in full with one click, or edit it down for a partial payment. */
+  interface PayoutModal { agent: AgentAnalytics; outstanding: number; amount: string; note: string; saving: boolean; }
+  const [payoutModal, setPayoutModal] = useState<PayoutModal|null>(null);
+  const openPayoutModal = (agent: AgentAnalytics) => {
+    const outstanding = Math.max(0, toN(agent.outstanding_balance));
+    setPayoutModal({
+      agent,
+      outstanding,
+      amount: outstanding > 0 ? String(outstanding) : '',  // default = full balance
+      note:   '',
+      saving: false,
+    });
+  };
+  const savePayoutModal = async () => {
+    if (!payoutModal) return;
+    const amt = parseFloat(payoutModal.amount);
+    if (isNaN(amt) || amt <= 0) { showToast('أدخل مبلغاً صحيحاً أكبر من صفر', 'error'); return; }
+    if (amt > payoutModal.outstanding + 0.01) { showToast('المبلغ يتجاوز الرصيد المتبقي', 'error'); return; }
+    setPayoutModal(m => m ? {...m, saving:true} : null);
+    try {
+      const res = await createEmployeePayout(payoutModal.agent.agent_id, amt, payoutModal.note.trim() || undefined);
+      const { start, end } = aPreset !== 'custom' ? presetDates(aPreset) : { start: aCustomStart, end: aCustomEnd };
+      await loadAnalytics(start, end);
+      showToast(res.data?.message || 'تم تسجيل التسديد بنجاح');
+      setPayoutModal(null);
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      showToast(msg || 'فشل تسجيل التسديد', 'error');
+      setPayoutModal(m => m ? {...m, saving:false} : null);
     }
   };
 
@@ -704,14 +738,14 @@ export default function StaffPage() {
                 <table className="w-full text-sm">
                   <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
                     <tr>
-                      {['#','الموظف','إجمالي','معدل التأكيد','عدم الرد','الرفض','المرتجعات','قيمة العمولة','العمولات المستحقة'].map(h => (
+                      {['#','الموظف','إجمالي','معدل التأكيد','عدم الرد','الرفض','المرتجعات','قيمة العمولة','عمولة الفترة','الرصيد المتبقي الإجمالي'].map(h => (
                         <th key={h} className="px-4 py-3.5 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {ranked.length === 0 ? (
-                      <tr><td colSpan={9} className="text-center py-12 text-slate-400 text-sm">لا توجد بيانات للفترة المحددة</td></tr>
+                      <tr><td colSpan={10} className="text-center py-12 text-slate-400 text-sm">لا توجد بيانات للفترة المحددة</td></tr>
                     ) : ranked.map((agent, i) => {
                       const total = toN(agent.total_assigned), confirmed = toN(agent.status_confirmed);
                       const noAns     = toN(agent.status_no_answer);   // لا يرد only
@@ -847,12 +881,42 @@ export default function StaffPage() {
                               ) : <span className="text-xs text-slate-300 dark:text-slate-700">—</span>;
                             })()}
                           </td>
+
+                          {/* ── Global Outstanding Balance + Payout (Employee Ledger) ── */}
+                          <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
+                            {(() => {
+                              const lifetime    = toN(agent.lifetime_commission);
+                              const paid        = toN(agent.total_paid);
+                              const outstanding = toN(agent.outstanding_balance);
+                              const settled     = outstanding <= 0.009;
+                              return (
+                                <div className="flex flex-col gap-1.5 min-w-[150px]">
+                                  <span className={`text-sm font-black tabular-nums ${settled?'text-emerald-600 dark:text-emerald-400':'text-rose-600 dark:text-rose-400'}`}>
+                                    {fmtMoney(outstanding)}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 dark:text-slate-600 leading-snug whitespace-nowrap">
+                                    إجمالي {fmtMoney(lifetime)} − مدفوع {fmtMoney(paid)}
+                                  </span>
+                                  <button
+                                    onClick={() => openPayoutModal(agent)}
+                                    disabled={settled}
+                                    className={`inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap
+                                      ${settled
+                                        ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed'
+                                        : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'}`}
+                                  >
+                                    💸 {settled ? 'مُسدَّد بالكامل' : 'تسديد'}
+                                  </button>
+                                </div>
+                              );
+                            })()}
+                          </td>
                         </tr>
 
                         {/* ── Accordion detail row ── */}
                         {isExpanded && (
                           <tr key={`${agent.agent_id}-detail`} className="bg-slate-50/60 dark:bg-slate-800/30 border-b border-slate-100 dark:border-slate-800/60">
-                            <td colSpan={9} className="px-6 py-5">
+                            <td colSpan={10} className="px-6 py-5">
 
                               {/* ── Stacked distribution bar (top) ── */}
                               {total > 0 ? (
@@ -1205,6 +1269,127 @@ export default function StaffPage() {
           </div>
         </div>
       )}
+
+      {/* ── Payout (تسديد) modal — Employee Ledger settlement ── */}
+      {payoutModal && (() => {
+        const amt = parseFloat(payoutModal.amount);
+        const validAmt = !isNaN(amt) && amt > 0 && amt <= payoutModal.outstanding + 0.01;
+        const remainingAfter = !isNaN(amt) && amt > 0
+          ? Math.max(0, payoutModal.outstanding - amt)
+          : payoutModal.outstanding;
+        const isPartial = validAmt && amt < payoutModal.outstanding - 0.009;
+        return (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          onClick={e => { if (e.target===e.currentTarget && !payoutModal.saving) setPayoutModal(null); }}>
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm"/>
+          <div className="relative bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700/60 w-full max-w-sm p-6 space-y-5" dir="rtl">
+
+            {/* Header */}
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">💸 تسديد عمولة</h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{payoutModal.agent.agent_name}</p>
+              </div>
+              <button onClick={() => !payoutModal.saving && setPayoutModal(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* Balance summary */}
+            <div className="bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 rounded-xl px-4 py-3 space-y-1.5 text-xs">
+              <div className="flex justify-between text-slate-600 dark:text-slate-300">
+                <span>إجمالي العمولات (كل الفترات)</span>
+                <span className="font-bold tabular-nums">{fmtMoney(toN(payoutModal.agent.lifetime_commission))}</span>
+              </div>
+              <div className="flex justify-between text-slate-600 dark:text-slate-300">
+                <span>إجمالي المدفوع سابقاً</span>
+                <span className="font-bold tabular-nums">{fmtMoney(toN(payoutModal.agent.total_paid))}</span>
+              </div>
+              <div className="flex justify-between pt-1.5 border-t border-slate-200 dark:border-slate-700/60 font-bold text-rose-600 dark:text-rose-400">
+                <span>الرصيد المتبقي المستحق</span>
+                <span className="tabular-nums">{fmtMoney(payoutModal.outstanding)}</span>
+              </div>
+            </div>
+
+            {/* Amount input — defaults to the full outstanding balance */}
+            <div>
+              <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                <span>مبلغ التسديد</span>
+                <button
+                  type="button"
+                  onClick={() => setPayoutModal(m => m ? {...m, amount: String(m.outstanding)} : null)}
+                  disabled={payoutModal.saving}
+                  className="text-[10px] font-normal text-indigo-600 dark:text-indigo-400 hover:underline">
+                  تسديد كامل المبلغ
+                </button>
+              </label>
+              <div className="relative">
+                <input
+                  type="number" min="0" step="0.01" max={payoutModal.outstanding}
+                  autoFocus
+                  value={payoutModal.amount}
+                  onChange={e => setPayoutModal(m => m ? {...m, amount: e.target.value} : null)}
+                  disabled={payoutModal.saving}
+                  className={`w-full px-4 py-2.5 rounded-xl text-base font-black
+                    bg-slate-50 dark:bg-slate-800
+                    border text-slate-900 dark:text-slate-100
+                    outline-none disabled:opacity-60 transition
+                    focus:ring-2 focus:border-transparent
+                    ${validAmt || payoutModal.amount===''
+                      ? 'border-slate-200 dark:border-slate-700 focus:ring-indigo-400/50'
+                      : 'border-red-300 dark:border-red-700 focus:ring-red-400/50'}
+                    [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                />
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 dark:text-slate-500 pointer-events-none">ج.م</span>
+              </div>
+              {!validAmt && payoutModal.amount !== '' && (
+                <p className="text-[10px] text-red-500 dark:text-red-400 mt-1">
+                  أدخل مبلغاً بين 0 و {fmtMoney(payoutModal.outstanding)}
+                </p>
+              )}
+              {validAmt && (
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
+                  {isPartial
+                    ? `تسديد جزئي — سيتبقّى ${fmtMoney(remainingAfter)} مستحقاً`
+                    : 'تسديد كامل — سيصبح الرصيد المتبقي صفراً ✓'}
+                </p>
+              )}
+            </div>
+
+            {/* Optional note */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">ملاحظة (اختياري)</label>
+              <input
+                type="text"
+                value={payoutModal.note}
+                onChange={e => setPayoutModal(m => m ? {...m, note: e.target.value} : null)}
+                disabled={payoutModal.saving}
+                placeholder="مثال: تسديد نقدي — يونيو"
+                className="w-full px-4 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 outline-none focus:ring-2 focus:ring-indigo-400/50 focus:border-transparent disabled:opacity-60 transition"
+              />
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-3">
+              <button onClick={savePayoutModal} disabled={payoutModal.saving || !validAmt}
+                className="flex-1 inline-flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold
+                  bg-indigo-600 hover:bg-indigo-700 text-white shadow-md shadow-indigo-500/25
+                  disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95">
+                {payoutModal.saving && <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>}
+                {payoutModal.saving ? 'جارٍ التسجيل…' : `تأكيد تسديد ${validAmt ? fmtMoney(amt) : ''}`}
+              </button>
+              <button onClick={() => setPayoutModal(null)} disabled={payoutModal.saving}
+                className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 transition-all disabled:opacity-60">
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
 
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4"

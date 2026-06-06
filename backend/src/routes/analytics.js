@@ -3,6 +3,7 @@ const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
 const { getExternalAffiliateStats } = require('../services/externalAffiliate');
+const { EARNED_COMMISSION_SQL } = require('../utils/commission');
 
 const router = express.Router();
 
@@ -155,25 +156,9 @@ function buildAgentSql(joinOnClause, whereClause) {
         1
       )                                                                 AS ndr_pct,
 
-      /* commission = confirmed×cc + delivered×cd + rejected×cr + noAnswer×cn
-         NOTE: 'لا يرد' earns comm_no_answer ONLY after 5 logged call attempts
-         (anti-abuse rule). 'مؤجل' grants NO automatic commission. This MUST
-         match the treasury logic in orders.js / treasury.js or figures diverge. */
-      ROUND(
-          COUNT(o.id) FILTER (WHERE o."Status" IN (
-            'تم التأكيد', 'تم الشحن', 'تم التوصيل',
-            'جاري الإعادة', 'تم الإرجاع'
-          )) * COALESCE(u.comm_confirmed, 0)
-        + COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')
-            * COALESCE(u.comm_delivered, 0)
-        + COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')
-            * COALESCE(u.comm_rejected, 0)
-        + COUNT(o.id) FILTER (WHERE
-            o."Status" = 'لا يرد'
-            AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5
-          ) * COALESCE(u.comm_no_answer, 0),
-        2
-      )                                                                 AS earned_commission
+      /* Earned commission — shared formula (utils/commission.js) so the period
+         column here and the all-time global balance can never diverge. */
+      ${EARNED_COMMISSION_SQL}                                          AS earned_commission
 
     FROM  users u
     LEFT  JOIN orders o ON (
@@ -304,9 +289,56 @@ router.get('/agents', authenticate, requireAdmin, async (req, res) => {
       u.email ASC
   `;
 
+  /* ── All-time GLOBAL balance (Employee Ledger) ──────────────────────────────
+     The period `earned_commission` above respects the date filter, but a payout
+     settles the employee's ALL-TIME balance. So we compute, per agent:
+       lifetime_commission = the SAME earned-commission formula over ALL orders
+       total_paid          = Σ logged payouts (employee_payouts, all-time)
+       outstanding_balance = lifetime_commission − total_paid   (what is owed now)
+     Computed independently of the date filter and merged onto each row.        */
+  const lifetimeSql = `
+    SELECT
+      u.id                                      AS agent_id,
+      ${EARNED_COMMISSION_SQL}                  AS lifetime_commission,
+      COALESCE(pay.total_paid, 0)               AS total_paid
+    FROM users u
+    LEFT JOIN orders o
+      ON o."AssignedTo" = u.email AND o.business_id = $1::integer
+    LEFT JOIN (
+      SELECT user_id, SUM(amount) AS total_paid
+      FROM employee_payouts
+      WHERE business_id = $1::integer
+      GROUP BY user_id
+    ) pay ON pay.user_id = u.id
+    WHERE u.role = 'agent' AND u.business_id = $1::integer
+    GROUP BY u.id, u.comm_confirmed, u.comm_delivered,
+             u.comm_rejected, u.comm_no_answer, pay.total_paid
+  `;
+
   try {
     const result = await pool.query(sql, params);
-    res.json(result.rows);
+
+    /* Lifetime query uses ONLY $1 (tenant); guarded so a missing employee_payouts
+       table (pre-migration) degrades to period-only data instead of a 500. */
+    const life = await pool.query(lifetimeSql, [req.user.business_id]).catch((e) => {
+      console.warn('[analytics/agents] lifetime balance unavailable:', e.message);
+      return { rows: [] };
+    });
+    const lifeMap = new Map(life.rows.map((r) => [String(r.agent_id), r]));
+
+    const merged = result.rows.map((row) => {
+      const L = lifeMap.get(String(row.agent_id));
+      const lifetime = L ? (parseFloat(L.lifetime_commission) || 0) : 0;
+      const paid     = L ? (parseFloat(L.total_paid)          || 0) : 0;
+      return {
+        ...row,
+        lifetime_commission: parseFloat(lifetime.toFixed(2)),
+        total_paid:          parseFloat(paid.toFixed(2)),
+        outstanding_balance: parseFloat((lifetime - paid).toFixed(2)),
+      };
+    });
+
+    res.json(merged);
   } catch (err) {
     console.error('[analytics/agents] SQL error:', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
