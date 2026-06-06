@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, memo } from 'react';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
 
 const NO_ANSWER_REQUIRED = 5;
@@ -92,7 +92,7 @@ interface Props {
   onToast?:         (message: string, type?: 'success' | 'error') => void; // optional parent toast
 }
 
-export default function OrdersTable({
+function OrdersTable({
   orders, role, onUpdate, onDelete,
   selectedIds = [], onToggleSelect, onSelectAll,
   agents = [],
@@ -1468,6 +1468,39 @@ export default function OrdersTable({
     </>
   );
 }
+
+/* ── Memoisation ─────────────────────────────────────────────────────────────
+   The dashboard re-renders on many unrelated state changes (background product /
+   inventory refetches, search, modals, polls). Without this, the whole 100s-row
+   table re-renders every time → the ~3s freeze after a status change.
+
+   We only re-render when the DISPLAYED data actually changes. Callback props
+   (onUpdate/onDelete/onToast/onToggleSelect/onSelectAll) are intentionally
+   ignored — they're behaviourally stable and refreshed whenever a prop we DO
+   compare (orders/selectedIds/agents/…) changes, so no stale-closure risk.    */
+/* Shallow element-by-element comparison. `displayOrders` is a fresh array each
+   render, but the page mutates orders IMMUTABLY (replaces only the changed order
+   object), so unchanged rows keep their reference. Comparing element refs lets us
+   skip re-render when nothing the table shows changed (e.g. a background product
+   refetch), while still re-rendering on a real status edit. O(n) ref checks. */
+function sameRefArray<T>(a: T[] = [], b: T[] = []) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+function arePropsEqual(prev: Props, next: Props) {
+  return (
+    sameRefArray(prev.orders, next.orders) &&    // per-row ref compare
+    prev.role === next.role &&
+    prev.showProduct === next.showProduct &&
+    prev.emptyMessage === next.emptyMessage &&
+    sameRefArray(prev.selectedIds, next.selectedIds) &&
+    sameRefArray(prev.agents, next.agents)
+  );
+}
+
+export default memo(OrdersTable, arePropsEqual);
 
 /* ── Helpers ─────────────────────────────────────────────────── */
 

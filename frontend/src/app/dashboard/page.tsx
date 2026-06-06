@@ -275,11 +275,15 @@ export default function DashboardPage() {
   const handleUpdate = async (id: number, data: Partial<Order>) => {
     try {
       const res = await updateOrder(id, data);
+      // Optimistic, surgical state patch — only the touched row changes, so the
+      // (memoised) OrdersTable re-renders once instead of refetching the list.
       setOrders((prev) => prev.map((o) => (o.id === id ? res.data : o)));
       showToast('تم الحفظ بنجاح', 'success');
-      // Refresh both stock sources so filter-pill badges update immediately
-      fetchInventory();
-      fetchProducts();
+      // Refresh stock badges in the BACKGROUND, off the critical render path —
+      // never awaited, deferred a tick so it can't add to the update render.
+      // (OrdersTable is memoised against `products`, so this won't re-render the
+      // table — only the filter-bar badges.)
+      setTimeout(() => { fetchProducts(); }, 0);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
