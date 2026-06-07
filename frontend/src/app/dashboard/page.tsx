@@ -1013,11 +1013,12 @@ export default function DashboardPage() {
   // Matching order (most → least strict):
   //   1. exact full-name  2. short-name (first 3 words)  3. prefix containment
   // All comparisons are case-insensitive and whitespace-normalised.
-  const getStock = (shortName: string): number | null => {
-    if (!products.length) return null; // still loading — show no badge
+  // Resolve a filter pill's short name to its master catalog product (/api/products).
+  const findCatalogProduct = (shortName: string): Product | undefined => {
+    if (!products.length) return undefined; // still loading
     const norm  = (s: string) => s.toLowerCase().trim().replace(/\s+/g, ' ');
     const needle = norm(shortName);
-    const found = products.find((p) => {
+    return products.find((p) => {
       const full  = norm(p.name);
       const short = norm(getShortName(p.name));
       return (
@@ -1027,7 +1028,20 @@ export default function DashboardPage() {
         needle.startsWith(short)
       );
     });
+  };
+
+  const getStock = (shortName: string): number | null => {
+    const found = findCatalogProduct(shortName);
     return found !== undefined ? found.stock_quantity : null;
+  };
+
+  // Official master selling price from the catalog — stable, unlike order
+  // ProductPrice which includes dynamic shipping. null when not linked to a product.
+  const getCatalogPrice = (shortName: string): string | null => {
+    const found = findCatalogProduct(shortName);
+    if (!found) return null;
+    const sp = parseFloat(String(found.selling_price));
+    return Number.isFinite(sp) ? String(sp) : null;
   };
 
   /* ── Render ──────────────────────────────────────────────────── */
@@ -2267,7 +2281,9 @@ export default function DashboardPage() {
               {/* Individual product cards — two-line layout with price */}
               {uniqueProducts.map((p) => {
                 const count = agentFiltered.filter((o) => getShortName(o.ProductName) === p).length;
-                const price = productPriceMap[p];
+                // Prefer the official master catalog price (stable); fall back to the
+                // order-derived price only when the product isn't linked to inventory.
+                const price = getCatalogPrice(p) ?? productPriceMap[p];
                 const stock = getStock(p);
                 const isActive = activeProduct === p;
                 return (
