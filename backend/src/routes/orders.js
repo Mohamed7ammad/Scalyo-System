@@ -339,6 +339,43 @@ router.post('/bulk', authenticate, async (req, res) => {
     const toInsert = deduped.filter((c) => !recentPairs.has(composite(c)));
     duplicateCount += deduped.length - toInsert.length;   // recent same-product skips
 
+    /* 4b. Link to the canonical product catalog. Excel names arrive messy
+       (brackets, spacing, Arabic drift) and carry no reliable price, which would
+       spawn junk product variations and break inventory linking. We pre-fetch the
+       tenant's products and build a normProd()-keyed map (over each product NAME
+       and every alias), then for each survivor OVERRIDE the raw name with the
+       clean catalogue name and the price with the product's selling_price.
+       (Only selling_price is read — cost_price/COGS is never touched here.) */
+    if (toInsert.length) {
+      try {
+        const { rows: products } = await pool.query(
+          `SELECT name, selling_price, aliases FROM products WHERE business_id = $1`,
+          [businessId]
+        );
+        const prodMap = new Map();   // normalised name/alias → { name, price }
+        for (const p of products) {
+          const price = p.selling_price != null ? parseFloat(p.selling_price) : null;
+          const entry = { name: p.name, price };
+          const nameKey = normProd(p.name);
+          if (nameKey && !prodMap.has(nameKey)) prodMap.set(nameKey, entry);
+          for (const a of (p.aliases || [])) {
+            const aliasKey = normProd(a);
+            if (aliasKey && !prodMap.has(aliasKey)) prodMap.set(aliasKey, entry);
+          }
+        }
+        for (const c of toInsert) {
+          const match = c.prodKey ? prodMap.get(c.prodKey) : null;
+          if (match) {
+            c.ProductName = match.name;                       // clean catalogue name
+            if (match.price != null) c.ProductPrice = match.price;  // real selling price
+          }
+        }
+      } catch (catalogErr) {
+        // Non-fatal: fall back to the raw Excel name/price rather than lose the import.
+        console.warn('[Bulk Import] catalogue link skipped:', catalogErr.message);
+      }
+    }
+
     /* 5. Bulk insert the new rows in a single statement. */
     let imported = [];
     if (toInsert.length) {
