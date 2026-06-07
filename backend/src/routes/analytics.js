@@ -71,13 +71,20 @@ function getEgyptOffset(dateStr) {
    The offset is determined dynamically per date via getEgyptOffset()
    so DST transitions (April / October) are handled automatically.
 
-   'جديد' backlog rule:
-   ────────────────────
-   Unactioned orders (Status = 'جديد') must always be visible
-   regardless of the date filter.  They are included via:
-     (date_range_condition) OR (Status = 'جديد')
-   The AssignedTo check sits outside the OR, so only the correct
-   agent's orders can ever be joined.                                  */
+   Date basis — orders are counted by their CREATION date:
+   ───────────────────────────────────────────────────────
+   The range is applied to o."createdAt" (NOT "updatedAt"). "Today" therefore
+   means "orders CREATED today" — a stable cohort. Using "updatedAt" was the bug:
+   any old order edited today (status change, note, etc.) leaked into today's
+   numbers. Every metric in buildAgentSql() FILTERs over this same joined cohort,
+   so the denominator (total_assigned) and all percentages stay consistent.
+
+   STRICT range — no backlog override:
+   ───────────────────────────────────
+   The previous "(range) OR Status='جديد'" clause forced ALL unactioned orders
+   (any date) into EVERY filtered period, so "Today" showed last week's backlog.
+   The date range is now applied strictly; when no dates are passed we still join
+   ALL of the tenant's orders (the all-time view).                            */
 function buildJoinOn(params, startDate, endDate, bizIdx) {
   /* TENANT ISOLATION: only orders belonging to the caller's tenant may ever be
      joined onto a user row.  bizIdx is the $-position of req.user.business_id. */
@@ -94,23 +101,20 @@ function buildJoinOn(params, startDate, endDate, bizIdx) {
     const offset = getEgyptOffset(startDate);
     // Midnight Cairo on startDate, expressed as a UTC-anchored ISO string.
     params.push(`${startDate}T00:00:00${offset}`);
-    rangeParts.push(`o."updatedAt" >= $${params.length}::timestamptz`);
+    rangeParts.push(`o."createdAt" >= $${params.length}::timestamptz`);
   }
 
   if (endDate) {
     const offset = getEgyptOffset(endDate);
     // Last second of endDate in Cairo time.
     params.push(`${endDate}T23:59:59${offset}`);
-    rangeParts.push(`o."updatedAt" <= $${params.length}::timestamptz`);
+    rangeParts.push(`o."createdAt" <= $${params.length}::timestamptz`);
   }
 
   return [
     `o."AssignedTo" = u.email`,
     `AND ${bizClause}`,
-    `AND (`,
-    `  (${rangeParts.join(' AND ')})`,
-    `  OR o."Status" = 'جديد'`,
-    `)`,
+    `AND (${rangeParts.join(' AND ')})`,
   ].join('\n          ');
 }
 
