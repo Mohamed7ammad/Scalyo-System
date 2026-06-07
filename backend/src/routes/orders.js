@@ -259,15 +259,19 @@ router.post('/bulk', authenticate, async (req, res) => {
   };
 
   try {
-    /* 1. Normalise rows + drop invalid (missing name or phone). */
+    /* 1. Normalise rows. PHONE is the ONLY strictly-required field — messy
+       imports (EasyOrders/Shopify abandoned carts) routinely omit name, city,
+       address, price, etc. A row is "invalid" ONLY if it has no usable phone.
+       All other fields fall back to NULL (columns are nullable); a missing name
+       defaults to 'عميل جديد' so the order is still actionable. */
     let invalidCount = 0;
     const candidates = [];
     for (const o of rawList) {
       if (!o || typeof o !== 'object') { invalidCount++; continue; }
-      const FullName = pick(o, 'FullName', 'name', 'full_name', 'customer_name');
       const PhoneRaw = pick(o, 'Phone', 'phone', 'phone_number', 'mobile');
       const phoneKey = normPhone(PhoneRaw);
-      if (!FullName || !phoneKey) { invalidCount++; continue; }
+      if (!phoneKey) { invalidCount++; continue; }   // no phone → cannot dedup/contact
+      const FullName = pick(o, 'FullName', 'name', 'full_name', 'customer_name') || 'عميل جديد';
       candidates.push({
         FullName,
         Phone:        PhoneRaw,
