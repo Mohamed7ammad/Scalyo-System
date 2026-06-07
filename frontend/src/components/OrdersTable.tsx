@@ -635,33 +635,59 @@ function OrdersTable({
               </div>
             ))}
 
-            {/* ── Product — READ ONLY ─────────────────────────────────���──
-                Product is set by EasyOrders and must not be editable.
-                Displayed for reference only; never sent in the PATCH body. */}
-            {editForm.ProductName && (
+            {/* ── Product ────────────────────────────────────────────────
+                Editable by ADMINS (e.g. to fix legacy/mismatched names so they
+                merge in the UI); LOCKED read-only for agents. ProductName is in
+                the backend PATCH whitelist, and agents are separately restricted
+                to Status + Note, so this is safe both ways. */}
+            {(editForm.ProductName || role === 'admin') && (
               <div>
                 <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">
                   المنتج
                 </label>
-                <div className="flex items-center gap-2 px-3 py-2 rounded-xl
-                  border border-gray-200 dark:border-slate-700
-                  bg-gray-50 dark:bg-slate-800/60 select-none">
-                  <svg className="w-3.5 h-3.5 shrink-0 text-gray-400 dark:text-slate-500"
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                  </svg>
-                  <span className="flex-1 text-sm text-gray-700 dark:text-slate-300 truncate">
-                    {editForm.ProductName}
-                  </span>
-                  {editForm.sku && (
-                    <span className="shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded
-                      bg-indigo-50 text-indigo-600 border border-indigo-100
-                      dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-800/50">
-                      {editForm.sku}
+                {role === 'admin' ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      dir="rtl"
+                      value={editForm.ProductName ?? ''}
+                      onChange={(e) => setEditForm((p) => ({ ...p, ProductName: e.target.value }))}
+                      placeholder="اسم المنتج"
+                      className="flex-1 px-3 py-2 rounded-xl text-sm outline-none
+                        border border-gray-300 dark:border-slate-700
+                        bg-white dark:bg-slate-800
+                        text-gray-900 dark:text-slate-200
+                        focus:ring-2 focus:ring-indigo-400"
+                    />
+                    {editForm.sku && (
+                      <span className="shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded
+                        bg-indigo-50 text-indigo-600 border border-indigo-100
+                        dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-800/50">
+                        {editForm.sku}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-xl
+                    border border-gray-200 dark:border-slate-700
+                    bg-gray-50 dark:bg-slate-800/60 select-none">
+                    <svg className="w-3.5 h-3.5 shrink-0 text-gray-400 dark:text-slate-500"
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                    </svg>
+                    <span className="flex-1 text-sm text-gray-700 dark:text-slate-300 truncate">
+                      {editForm.ProductName}
                     </span>
-                  )}
-                </div>
+                    {editForm.sku && (
+                      <span className="shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded
+                        bg-indigo-50 text-indigo-600 border border-indigo-100
+                        dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-800/50">
+                        {editForm.sku}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
