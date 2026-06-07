@@ -8,6 +8,7 @@ import {
   getStaff, distributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
+  bulkImportOrders, BulkImportResult,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
   BostaFollowUps, BostaFollowUpOrder,
 } from '@/lib/api';
@@ -122,6 +123,11 @@ export default function DashboardPage() {
   const [xferTargetId,  setXferTargetId]  = useState<number | ''>('');
   const [xferSaving,    setXferSaving]    = useState(false);
   const [bulkDeleting,  setBulkDeleting]  = useState(false);
+  /* ── CSV bulk import ─────────────────────────────────────────── */
+  const [showCsvModal,  setShowCsvModal]  = useState(false);
+  const [csvParsed,     setCsvParsed]     = useState<Partial<Order>[]>([]);
+  const [csvFileName,   setCsvFileName]   = useState('');
+  const [csvUploading,  setCsvUploading]  = useState(false);
 
   /* ── Auth guard ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -655,6 +661,81 @@ export default function DashboardPage() {
     setShowAddModal(true);
   };
 
+  /* ── CSV bulk import helpers ─────────────────────────────────── */
+  const handleCsvFile = (file: File) => {
+    setCsvFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text   = (e.target?.result as string) ?? '';
+      const lines  = text.split(/\r?\n/).filter((l) => l.trim());
+      if (lines.length < 2) { showToast('الملف فارغ أو لا يحتوي على بيانات', 'error'); return; }
+
+      // Normalise header names (lowercase + trim)
+      const headers = lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/^"|"$/g, ''));
+
+      // Map flexible header aliases → our Order field names
+      const col = (aliases: string[]) => {
+        const idx = aliases.map((a) => headers.indexOf(a)).find((i) => i >= 0);
+        return idx ?? -1;
+      };
+
+      const idxName    = col(['fullname', 'name', 'full_name', 'الاسم الكامل', 'الاسم']);
+      const idxPhone   = col(['phone', 'telephone', 'mobile', 'رقم الهاتف', 'الهاتف']);
+      const idxCity    = col(['city', 'المدينة', 'المحافظة']);
+      const idxAddress = col(['address', 'العنوان']);
+      const idxProduct = col(['productname', 'product_name', 'product', 'المنتج']);
+      const idxPrice   = col(['productprice', 'price', 'السعر', 'الاجمالي', 'الإجمالي']);
+      const idxNote    = col(['note', 'notes', 'ملاحظة', 'ملاحظات']);
+
+      const parsed: Partial<Order>[] = [];
+      for (let i = 1; i < lines.length; i++) {
+        // Handle quoted CSV fields containing commas
+        const row = lines[i].match(/("(?:[^"]|"")*"|[^,]*)/g)
+          ?.map((v) => v.replace(/^"|"$/g, '').replace(/""/g, '"').trim()) ?? [];
+
+        const phone = idxPhone >= 0 ? (row[idxPhone] ?? '').trim() : '';
+        if (!phone) continue;   // phone is the dedup key — skip rows without one
+
+        parsed.push({
+          FullName:     idxName    >= 0 ? (row[idxName]    ?? '') : '',
+          Phone:        phone,
+          City:         idxCity    >= 0 ? (row[idxCity]    ?? '') : '',
+          Address:      idxAddress >= 0 ? (row[idxAddress] ?? '') : '',
+          ProductName:  idxProduct >= 0 ? (row[idxProduct] ?? '') : '',
+          ProductPrice: idxPrice   >= 0 ? (row[idxPrice]   ?? '') : '',
+          Note:         idxNote    >= 0 ? (row[idxNote]    ?? '') : null,
+        });
+      }
+
+      setCsvParsed(parsed);
+    };
+    reader.readAsText(file, 'UTF-8');
+  };
+
+  const handleCsvImport = async () => {
+    if (!csvParsed.length) return;
+    setCsvUploading(true);
+    try {
+      const res = await bulkImportOrders(csvParsed);
+      const { importedCount, skippedCount } = res.data;
+      showToast(
+        `تمت الإضافة! تم استيراد ${importedCount} طلب، وتجاهل ${skippedCount} طلب مكرر`,
+        'success',
+      );
+      setShowCsvModal(false);
+      setCsvParsed([]);
+      setCsvFileName('');
+      fetchOrders();
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل استيراد الملف';
+      showToast(msg, 'error');
+    } finally {
+      setCsvUploading(false);
+    }
+  };
+
   const handleCreateOrder = async () => {
     if (!addForm.FullName.trim() || !addForm.Phone.trim()) {
       showToast('الاسم ورقم الهاتف مطلوبان', 'error');
@@ -969,6 +1050,23 @@ export default function DashboardPage() {
               </svg>
               إضافة طلب
             </button>
+
+            {isAdmin && (
+              <button
+                onClick={() => { setCsvParsed([]); setCsvFileName(''); setShowCsvModal(true); }}
+                title="رفع طلبات من ملف CSV"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
+                  bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800
+                  text-white text-sm font-semibold shadow-sm shadow-emerald-500/20
+                  transition-all duration-150 active:scale-95"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                رفع طلبات (CSV)
+              </button>
+            )}
             <button
               onClick={fetchOrders}
               title="تحديث الطلبات"
@@ -1017,6 +1115,87 @@ export default function DashboardPage() {
                 </button>
               ))}
 
+            </div>
+          </div>
+        )}
+
+        {/* ── CSV Bulk Import Modal ─────────────────────────────────── */}
+        {showCsvModal && (
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={(e) => e.target === e.currentTarget && setShowCsvModal(false)}
+          >
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md p-6" dir="rtl">
+              <div className="flex items-center justify-between mb-5">
+                <h2 className="text-base font-bold text-slate-900 dark:text-white">رفع طلبات (CSV)</h2>
+                <button onClick={() => setShowCsvModal(false)}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Expected headers hint */}
+              <div className="mb-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-xl text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                <p className="font-semibold text-slate-700 dark:text-slate-300 mb-1">الأعمدة المتوقعة في الملف:</p>
+                <p dir="ltr" className="font-mono">name, phone, city, address, product_name, price, notes</p>
+                <p className="mt-1">• رقم الهاتف إلزامي — الصفوف بدونه تُتجاهل تلقائياً.</p>
+                <p>• أي هاتف موجود مسبقاً في النظام يُتجاهل (لا تكرار).</p>
+              </div>
+
+              {/* File picker */}
+              <label className="flex flex-col items-center justify-center gap-2 w-full h-32
+                border-2 border-dashed border-slate-300 dark:border-slate-600
+                rounded-xl cursor-pointer hover:border-emerald-400 transition
+                bg-slate-50 dark:bg-slate-800/50 mb-4">
+                <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                <span className="text-sm text-slate-500 dark:text-slate-400">
+                  {csvFileName || 'اضغط لاختيار ملف CSV'}
+                </span>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleCsvFile(file);
+                  }}
+                />
+              </label>
+
+              {/* Parse result preview */}
+              {csvParsed.length > 0 && (
+                <div className="mb-4 flex items-center gap-2 px-3 py-2 bg-emerald-50 dark:bg-emerald-900/30
+                  border border-emerald-200 dark:border-emerald-700 rounded-xl text-sm text-emerald-700 dark:text-emerald-300">
+                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  تم قراءة <span className="font-bold mx-1">{csvParsed.length}</span> طلب من الملف — جاهز للرفع
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                <button
+                  onClick={handleCsvImport}
+                  disabled={csvParsed.length === 0 || csvUploading}
+                  className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50
+                    text-white py-2.5 rounded-xl text-sm font-semibold transition"
+                >
+                  {csvUploading ? 'جارٍ الرفع...' : `استيراد ${csvParsed.length > 0 ? `(${csvParsed.length})` : ''}`}
+                </button>
+                <button
+                  onClick={() => setShowCsvModal(false)}
+                  className="flex-1 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200
+                    dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300
+                    py-2.5 rounded-xl text-sm font-semibold transition"
+                >
+                  إلغاء
+                </button>
+              </div>
             </div>
           </div>
         )}

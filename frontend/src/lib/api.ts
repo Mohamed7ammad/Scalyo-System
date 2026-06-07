@@ -1171,4 +1171,17 @@ export const syncTaagerOrders = () =>
     timeout: 120_000, // 2 min — overrides the instance default for this long-running op
   });
 
+/* ── Bulk CSV Import ─────────────────────────────────────────────── */
+export interface BulkImportResult {
+  success:       boolean;
+  importedCount: number;
+  skippedCount:  number;
+}
+
+/** Import an array of pre-parsed orders. Phone-number deduplication is enforced
+ *  server-side: any row whose phone already exists in the tenant is silently skipped.
+ *  Admin only. */
+export const bulkImportOrders = (orders: Partial<Order>[]) =>
+  api.post<BulkImportResult>('/api/orders/bulk', orders);
+
 export default api;
