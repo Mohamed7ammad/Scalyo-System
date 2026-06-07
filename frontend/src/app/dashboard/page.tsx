@@ -35,6 +35,18 @@ const getShortName = (name?: string) => {
   return name.trim().split(/\s+/).slice(0, 3).join(' ');
 };
 
+/* Strict product-grouping key — identifies a product by its NAME alone, so the
+   product filter shows each product ONCE regardless of ProductPrice. Resilient
+   to formatting drift: lowercases, folds Arabic variants (أإآ→ا, ة→ه), and keeps
+   only letters + digits (dropping brackets, punctuation and whitespace). So
+   "[جهاز ليزر IPL]" and "جهاز ليزر IPL" with any price collapse to one option. */
+const productNameKey = (name?: string) =>
+  (name ?? '')
+    .toLowerCase()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/[^\p{L}\p{N}]/gu, '');
+
 /* Normalise an order status for comparison — guards against hidden whitespace
    and Unicode-normalisation differences between the DB value and the UI literals
    (e.g. a stray RTL mark or NFC/NFD mismatch). Used by BOTH the status filter
@@ -796,12 +808,25 @@ export default function DashboardPage() {
     new Set(roleScoped.map((o) => getShortName(o.ProductName)).filter(Boolean))
   ) as string[];
 
-  // First known price per short product name — used in product filter tab badges
+  // Product-filter options — grouped STRICTLY by ProductName (price-agnostic).
+  // Each distinct product (by productNameKey) yields ONE option; the label is the
+  // first full ProductName seen for that product. Different ProductPrice values
+  // for the same product no longer spawn duplicate filter options.
+  const productFilterGroups = new Map<string, string>();   // key → display label
+  roleScoped.forEach((o) => {
+    const k = productNameKey(o.ProductName);
+    if (k && !productFilterGroups.has(k)) {
+      productFilterGroups.set(k, (o.ProductName ?? '').trim());
+    }
+  });
+  const productFilterOptions = Array.from(productFilterGroups.values()) as string[];
+
+  // First known price per product key — used in product filter tab badges
   const productPriceMap: Record<string, string> = {};
   roleScoped.forEach((o) => {
     if (o.ProductName && o.ProductPrice) {
-      const short = getShortName(o.ProductName);
-      if (!productPriceMap[short]) productPriceMap[short] = o.ProductPrice;
+      const k = productNameKey(o.ProductName);
+      if (k && !productPriceMap[k]) productPriceMap[k] = o.ProductPrice;
     }
   });
 
@@ -817,7 +842,7 @@ export default function DashboardPage() {
   const productFiltered =
     activeProduct === 'كل المنتجات'
       ? agentFiltered
-      : agentFiltered.filter((o) => getShortName(o.ProductName) === activeProduct);
+      : agentFiltered.filter((o) => productNameKey(o.ProductName) === productNameKey(activeProduct));
 
   // 2.5 Date scope — applied BEFORE status/search so every stat, pill count, and
   //     the table all reflect the selected day range. Timezone-safe (local day).
@@ -2234,7 +2259,7 @@ export default function DashboardPage() {
         )}
 
         {/* ── Product filter tabs ───────────────────────────────────── */}
-        {uniqueProducts.length > 0 && (
+        {productFilterOptions.length > 0 && (
           <div className="bg-white dark:bg-slate-900 rounded-2xl
             border border-slate-200 dark:border-slate-800 px-4 py-3.5 shadow-sm">
             <p className="text-xs font-semibold text-slate-400 dark:text-slate-500
@@ -2255,9 +2280,9 @@ export default function DashboardPage() {
               </button>
 
               {/* Individual product cards — two-line layout with price */}
-              {uniqueProducts.map((p) => {
-                const count = agentFiltered.filter((o) => getShortName(o.ProductName) === p).length;
-                const price = productPriceMap[p];
+              {productFilterOptions.map((p) => {
+                const count = agentFiltered.filter((o) => productNameKey(o.ProductName) === productNameKey(p)).length;
+                const price = productPriceMap[productNameKey(p)];
                 const stock = getStock(p);
                 const isActive = activeProduct === p;
                 return (
