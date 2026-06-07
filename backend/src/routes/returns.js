@@ -7,6 +7,41 @@ const { requireAdmin } = require('../middleware/roleGuard');
 
 const router = express.Router();
 
+/* ── Idempotent migrations for the reconciliation feature ────────────────────
+   note          — free-text audit tag (e.g. "Reconciliation Auto-Fix").
+   reconciled_at — set when an order-linked return's missing units have been
+                   topped-up, so the reconciliation report excludes it and the
+                   same discrepancy can never be auto-corrected twice.          */
+pool.query(`ALTER TABLE product_returns ADD COLUMN IF NOT EXISTS note TEXT`)
+  .then(() => pool.query(`ALTER TABLE product_returns ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMPTZ`))
+  .then(() => console.log('✅  product_returns: note + reconciled_at columns ready'))
+  .catch((err) => console.warn('⚠️   product_returns reconciliation columns:', err.message));
+
+/* ── Shared product-matching helpers (used by reconciliation report + fix) ────
+   normRec       — trim + lowercase for case-insensitive comparison.
+   wasOldMatched — replays the OLD restock logic (sku-first EXACT, no fallback;
+                   else EXACT name) → was stock incremented at the time?
+   resolveNew    — alias-aware resolution (sku/name vs product sku/name/aliases)
+                   → the real product, mirroring resolveProductForOrder.        */
+const normRec = (s) => String(s ?? '').trim().toLowerCase();
+function wasOldMatched(products, sku, name) {
+  const s = String(sku ?? '').trim();
+  if (s) return products.some((p) => p.sku === s);
+  return products.some((p) => String(p.name).trim() === String(name ?? '').trim());
+}
+function resolveNew(products, sku, name) {
+  const skuKey = normRec(sku), nameKey = normRec(name);
+  let best = null, bestRank = 99;
+  for (const p of products) {
+    let rank = 99;
+    if (skuKey && normRec(p.sku) === skuKey) rank = 1;
+    else if (nameKey && normRec(p.name) === nameKey) rank = 2;
+    else if ((p.aliases || []).some((a) => { const k = normRec(a); return (skuKey && k === skuKey) || (nameKey && k === nameKey); })) rank = 3;
+    if (rank < bestRank) { bestRank = rank; best = p; }
+  }
+  return best;
+}
+
 /* ── GET /api/returns/daily ──────────────────────────────────────────────────
    Query param:  ?date=YYYY-MM-DD   (defaults to today when omitted)
    Returns:      Array of { product_name, sku, quantity } for that date,
@@ -153,8 +188,6 @@ router.get('/reconciliation', authenticate, requireAdmin, async (req, res) => {
   if (startDate && !dateRe.test(startDate)) return res.status(400).json({ error: 'صيغة startDate غير صحيحة' });
   if (endDate   && !dateRe.test(endDate))   return res.status(400).json({ error: 'صيغة endDate غير صحيحة' });
 
-  const norm = (s) => String(s ?? '').trim().toLowerCase();
-
   try {
     // 1. Catalog for this tenant.
     const { rows: products } = await pool.query(
@@ -162,10 +195,11 @@ router.get('/reconciliation', authenticate, requireAdmin, async (req, res) => {
       [businessId]
     );
 
-    // 2. Order-linked physical returns (manual returns have order_id IS NULL and
-    //    were restocked atomically by id, so they're excluded).
+    // 2. Order-linked, NOT-yet-reconciled returns (manual returns have order_id
+    //    IS NULL and were restocked atomically by id; already-fixed rows carry
+    //    reconciled_at, so both are excluded).
     const params = [businessId];
-    let where = 'business_id = $1 AND order_id IS NOT NULL';
+    let where = 'business_id = $1 AND order_id IS NOT NULL AND reconciled_at IS NULL';
     if (startDate) { params.push(startDate); where += ` AND return_date >= $${params.length}`; }
     if (endDate)   { params.push(endDate);   where += ` AND return_date <= $${params.length}`; }
     const { rows: returns } = await pool.query(
@@ -173,38 +207,22 @@ router.get('/reconciliation', authenticate, requireAdmin, async (req, res) => {
       params
     );
 
-    // Pre-index products for matching.
-    const oldMatchesSku  = (sku)  => products.some((p) => p.sku === sku);                       // OLD: exact, case-sensitive
-    const oldMatchesName = (name) => products.some((p) => String(p.name).trim() === String(name).trim());
-    const resolveNew = (sku, name) => {
-      const skuKey = norm(sku), nameKey = norm(name);
-      let best = null, bestRank = 99;
-      for (const p of products) {
-        let rank = 99;
-        if (skuKey && norm(p.sku) === skuKey) rank = 1;
-        else if (nameKey && norm(p.name) === nameKey) rank = 2;
-        else if (p.aliases.some((a) => { const k = norm(a); return (skuKey && k === skuKey) || (nameKey && k === nameKey); })) rank = 3;
-        if (rank < bestRank) { bestRank = rank; best = p; }
-      }
-      return best;
-    };
-
     // 3. Find discrepancies, aggregate by (product, date).
-    const agg = new Map();   // key → { product_name, sku, return_date, missing_qty, resolved }
+    const agg = new Map();   // key → { product_id, product_name, sku, return_date, missing_qty, resolved }
     for (const r of returns) {
       const sku = r.sku ? String(r.sku).trim() : '';
       const name = r.product_name || '';
-      const oldMatched = sku ? oldMatchesSku(sku) : oldMatchesName(name);
-      if (oldMatched) continue;   // stock was correctly incremented at the time
+      if (wasOldMatched(products, sku, name)) continue;   // stock was correctly incremented at the time
 
-      const prod = resolveNew(sku, name);
+      const prod = resolveNew(products, sku, name);
       const dateStr = r.return_date instanceof Date ? r.return_date.toISOString().slice(0, 10) : String(r.return_date);
       const displayName = prod ? prod.name : (name || '—');
       const displaySku  = prod ? (prod.sku || '') : sku;
-      const key = `${prod ? prod.id : 'unresolved:' + norm(name)}|${dateStr}`;
+      const key = `${prod ? prod.id : 'unresolved:' + normRec(name)}|${dateStr}`;
       const hit = agg.get(key);
       if (hit) hit.missing_qty += r.quantity;
       else agg.set(key, {
+        product_id:   prod ? prod.id : null,
         product_name: displayName,
         sku:          displaySku,
         return_date:  dateStr,
@@ -222,6 +240,102 @@ router.get('/reconciliation', authenticate, requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('[Returns] /reconciliation error:', err);
     res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── POST /api/returns/reconcile-fix ─────────────────────────────────────────
+   Admin-only. Auto-corrects ONE reconciliation row: tops up the product's stock
+   by the units that were logged-but-never-restocked for that product on that
+   date, and marks those return rows reconciled so the fix is idempotent.
+
+   Body: { productId: UUID, returnDate?: YYYY-MM-DD }
+   The missing quantity is recomputed SERVER-SIDE (the client value is never
+   trusted) inside a transaction with FOR UPDATE row locks, so concurrent /
+   repeated clicks can never double-add. An audit row is also logged as a manual
+   return tagged "Reconciliation Auto-Fix".                                     */
+router.post('/reconcile-fix', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  const { productId, returnDate } = req.body;
+  if (!productId) return res.status(400).json({ error: 'productId مطلوب' });
+  if (returnDate && !/^\d{4}-\d{2}-\d{2}$/.test(returnDate)) {
+    return res.status(400).json({ error: 'صيغة returnDate غير صحيحة' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Target product (tenant-scoped).
+    const { rows: prodRows } = await client.query(
+      'SELECT id, name, sku, stock_quantity FROM products WHERE id = $1 AND business_id = $2',
+      [productId, businessId]
+    );
+    if (!prodRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'المنتج غير موجود' }); }
+    const product = prodRows[0];
+
+    // Full catalog for matching.
+    const { rows: products } = await client.query(
+      'SELECT id, name, sku, COALESCE(aliases, \'{}\'::text[]) AS aliases FROM products WHERE business_id = $1',
+      [businessId]
+    );
+
+    // Lock the candidate return rows (order-linked, not yet reconciled).
+    const params = [businessId];
+    let where = 'business_id = $1 AND order_id IS NOT NULL AND reconciled_at IS NULL';
+    if (returnDate) { params.push(returnDate); where += ` AND return_date = $${params.length}`; }
+    const { rows: returns } = await client.query(
+      `SELECT id, product_name, sku, quantity FROM product_returns WHERE ${where} FOR UPDATE`,
+      params
+    );
+
+    // Recompute the units missing for THIS product (old-unmatched + new-resolves-here).
+    const ids = [];
+    let missing = 0;
+    for (const r of returns) {
+      const sku = r.sku ? String(r.sku).trim() : '';
+      if (wasOldMatched(products, sku, r.product_name)) continue;
+      const resolved = resolveNew(products, sku, r.product_name);
+      if (resolved && resolved.id === product.id) { ids.push(r.id); missing += r.quantity; }
+    }
+
+    if (missing === 0) {
+      await client.query('ROLLBACK');
+      return res.json({ ok: true, corrected: 0, newStock: product.stock_quantity, product: product.name,
+        message: 'لا توجد كمية تحتاج تصحيح (ربما صُحّحت مسبقاً)' });
+    }
+
+    // Atomic top-up.
+    const upd = await client.query(
+      'UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2 AND business_id = $3 RETURNING stock_quantity',
+      [missing, product.id, businessId]
+    );
+
+    // Mark the contributing returns reconciled (idempotency guard).
+    await client.query(
+      'UPDATE product_returns SET reconciled_at = NOW() WHERE id = ANY($1::int[])',
+      [ids]
+    );
+
+    // Audit row — logged as a manual return with a note (order_id IS NULL).
+    await client.query(
+      `INSERT INTO product_returns (product_name, sku, return_date, quantity, business_id, note, reconciled_at)
+       VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, NOW())
+       ON CONFLICT (product_name, return_date, business_id) WHERE order_id IS NULL
+       DO UPDATE SET quantity = product_returns.quantity + EXCLUDED.quantity,
+                     note     = COALESCE(product_returns.note, EXCLUDED.note)`,
+      [product.name, product.sku, missing, businessId, 'Reconciliation Auto-Fix']
+    );
+
+    await client.query('COMMIT');
+    console.log(`[Returns/ReconcileFix] +${missing} → "${product.name}" | stock now ${upd.rows[0].stock_quantity} | ${ids.length} return row(s) reconciled`);
+
+    res.json({ ok: true, corrected: missing, newStock: upd.rows[0].stock_quantity, product: product.name });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[Returns] /reconcile-fix error:', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  } finally {
+    client.release();
   }
 });
 
