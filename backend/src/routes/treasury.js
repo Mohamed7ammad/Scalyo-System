@@ -403,6 +403,25 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
    ══════════════════════════════════════════════════════════════════════════ */
 router.get('/commissions-breakdown', authenticate, requireAdmin, async (req, res) => {
   try {
+    const { startDate, endDate, agentEmail } = req.query;
+
+    /* Build the WHERE clause dynamically; $1 is always the tenant. */
+    const params = [req.user.business_id];
+    let where = `tt.source LIKE 'comm_%' AND tt.business_id = $1`;
+
+    if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      params.push(startDate);
+      where += ` AND tt.transaction_date >= $${params.length}::date`;
+    }
+    if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      params.push(endDate);
+      where += ` AND tt.transaction_date <= $${params.length}::date`;
+    }
+    if (agentEmail && String(agentEmail).trim()) {
+      params.push(String(agentEmail).trim());
+      where += ` AND LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM($${params.length}))`;
+    }
+
     const { rows } = await pool.query(`
       SELECT
         TO_CHAR(tt.transaction_date, 'YYYY-MM-DD')      AS transaction_date,
@@ -412,11 +431,10 @@ router.get('/commissions-breakdown', authenticate, requireAdmin, async (req, res
         SUM(tt.amount)::float                            AS total_amount
       FROM   treasury_transactions tt
       LEFT   JOIN orders o ON o.id = tt.order_id
-      WHERE  tt.source LIKE 'comm_%'
-        AND  tt.business_id = $1
+      WHERE  ${where}
       GROUP  BY tt.transaction_date, o."AssignedTo", tt.source
       ORDER  BY tt.transaction_date DESC, agent_email ASC
-    `, [req.user.business_id]);
+    `, params);
 
     const dateMap = new Map();
 
