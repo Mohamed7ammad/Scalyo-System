@@ -13,6 +13,7 @@ import {
   BostaFollowUps, BostaFollowUpOrder,
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
+import * as XLSX from 'xlsx';
 
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
 
@@ -661,55 +662,65 @@ export default function DashboardPage() {
     setShowAddModal(true);
   };
 
-  /* ── CSV bulk import helpers ─────────────────────────────────── */
+  /* ── CSV / Excel bulk import helpers ─────────────────────────────
+     Reads .csv, .xlsx and .xls natively via the `xlsx` library so that
+     Excel files (the most common real-world upload) parse correctly
+     instead of being mangled by a text-only CSV reader. The first sheet
+     is converted to JSON objects keyed by header; flexible Arabic/English
+     header aliases are then matched against each row. */
   const handleCsvFile = (file: File) => {
     setCsvFileName(file.name);
     const reader = new FileReader();
     reader.onload = (e) => {
-      const text   = (e.target?.result as string) ?? '';
-      const lines  = text.split(/\r?\n/).filter((l) => l.trim());
-      if (lines.length < 2) { showToast('الملف فارغ أو لا يحتوي على بيانات', 'error'); return; }
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const wb = XLSX.read(data, { type: 'array' });
+        const firstSheet = wb.Sheets[wb.SheetNames[0]];
+        if (!firstSheet) { showToast('الملف فارغ أو لا يحتوي على بيانات', 'error'); return; }
 
-      // Normalise header names (lowercase + trim)
-      const headers = lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/^"|"$/g, ''));
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: '' });
+        if (!rows.length) { showToast('الملف فارغ أو لا يحتوي على بيانات', 'error'); return; }
 
-      // Map flexible header aliases → our Order field names
-      const col = (aliases: string[]) => {
-        const idx = aliases.map((a) => headers.indexOf(a)).find((i) => i >= 0);
-        return idx ?? -1;
-      };
+        const parsed: Partial<Order>[] = [];
+        for (const raw of rows) {
+          // Normalise header keys (lowercase + trim + strip wrapping quotes)
+          // and stringify values once, so alias lookups are cheap & robust.
+          const row: Record<string, string> = {};
+          for (const k of Object.keys(raw)) {
+            const v = raw[k];
+            row[k.trim().toLowerCase().replace(/^"|"$/g, '')] = v == null ? '' : String(v).trim();
+          }
 
-      const idxName    = col(['fullname', 'name', 'full_name', 'الاسم الكامل', 'الاسم']);
-      const idxPhone   = col(['phone', 'telephone', 'mobile', 'رقم الهاتف', 'الهاتف']);
-      const idxCity    = col(['city', 'المدينة', 'المحافظة']);
-      const idxAddress = col(['address', 'العنوان']);
-      const idxProduct = col(['productname', 'product_name', 'product', 'المنتج']);
-      const idxPrice   = col(['productprice', 'price', 'السعر', 'الاجمالي', 'الإجمالي']);
-      const idxNote    = col(['note', 'notes', 'ملاحظة', 'ملاحظات']);
+          // Map flexible header aliases → our Order field names
+          const pick = (aliases: string[]) => {
+            for (const a of aliases) { if (row[a]) return row[a]; }
+            return '';
+          };
 
-      const parsed: Partial<Order>[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        // Handle quoted CSV fields containing commas
-        const row = lines[i].match(/("(?:[^"]|"")*"|[^,]*)/g)
-          ?.map((v) => v.replace(/^"|"$/g, '').replace(/""/g, '"').trim()) ?? [];
+          // Normalise phone: strip non-digits, and recover the leading 0 that
+          // Excel drops when it stores a mobile as a number (10 digits starting
+          // with '1' → prepend '0' → valid 11-digit Egyptian mobile '010…').
+          let phone = pick(['phone', 'telephone', 'mobile', 'رقم الهاتف', 'الهاتف']).replace(/\D/g, '');
+          if (phone.length === 10 && phone.startsWith('1')) phone = '0' + phone;
+          if (!phone) continue;   // phone is the dedup key — skip rows without one
 
-        const phone = idxPhone >= 0 ? (row[idxPhone] ?? '').trim() : '';
-        if (!phone) continue;   // phone is the dedup key — skip rows without one
+          parsed.push({
+            FullName:     pick(['fullname', 'name', 'full_name', 'الاسم الكامل', 'الاسم']),
+            Phone:        phone,
+            City:         pick(['city', 'المدينة', 'المحافظة']),
+            Address:      pick(['address', 'العنوان']),
+            ProductName:  pick(['productname', 'product_name', 'product', 'المنتج']),
+            ProductPrice: pick(['productprice', 'price', 'السعر', 'الاجمالي', 'الإجمالي']),
+            Note:         pick(['note', 'notes', 'ملاحظة', 'ملاحظات']) || null,
+          });
+        }
 
-        parsed.push({
-          FullName:     idxName    >= 0 ? (row[idxName]    ?? '') : '',
-          Phone:        phone,
-          City:         idxCity    >= 0 ? (row[idxCity]    ?? '') : '',
-          Address:      idxAddress >= 0 ? (row[idxAddress] ?? '') : '',
-          ProductName:  idxProduct >= 0 ? (row[idxProduct] ?? '') : '',
-          ProductPrice: idxPrice   >= 0 ? (row[idxPrice]   ?? '') : '',
-          Note:         idxNote    >= 0 ? (row[idxNote]    ?? '') : null,
-        });
+        setCsvParsed(parsed);
+      } catch {
+        showToast('تعذّر قراءة الملف — تأكد أنه ملف Excel أو CSV صالح', 'error');
       }
-
-      setCsvParsed(parsed);
     };
-    reader.readAsText(file, 'UTF-8');
+    reader.readAsArrayBuffer(file);
   };
 
   const handleCsvImport = async () => {
@@ -1054,7 +1065,7 @@ export default function DashboardPage() {
             {isAdmin && (
               <button
                 onClick={() => { setCsvParsed([]); setCsvFileName(''); setShowCsvModal(true); }}
-                title="رفع طلبات من ملف CSV"
+                title="رفع ملفات Excel أو CSV"
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
                   bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800
                   text-white text-sm font-semibold shadow-sm shadow-emerald-500/20
@@ -1064,7 +1075,7 @@ export default function DashboardPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                 </svg>
-                رفع طلبات (CSV)
+                رفع ملفات (Excel / CSV)
               </button>
             )}
             <button
@@ -1127,7 +1138,7 @@ export default function DashboardPage() {
           >
             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md p-6" dir="rtl">
               <div className="flex items-center justify-between mb-5">
-                <h2 className="text-base font-bold text-slate-900 dark:text-white">رفع طلبات (CSV)</h2>
+                <h2 className="text-base font-bold text-slate-900 dark:text-white">رفع ملفات (Excel / CSV)</h2>
                 <button onClick={() => setShowCsvModal(false)}
                   className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1154,11 +1165,11 @@ export default function DashboardPage() {
                     d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                 </svg>
                 <span className="text-sm text-slate-500 dark:text-slate-400">
-                  {csvFileName || 'اضغط لاختيار ملف CSV'}
+                  {csvFileName || 'اضغط لاختيار ملف Excel أو CSV'}
                 </span>
                 <input
                   type="file"
-                  accept=".csv,text/csv"
+                  accept=".csv, .xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
                   className="hidden"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
