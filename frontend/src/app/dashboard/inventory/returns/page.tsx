@@ -227,16 +227,24 @@ export default function ReturnsPage() {
     }
   };
 
-  /* ── Derived totals ──────────────────────────────────────────────────── */
-  const totalUnits = rows.reduce((s, r) => s + r.quantity, 0);
-  const isToday    = date === todayISO();
+  /* ── Derived totals ──────────────────────────────────────────────────────
+     PHYSICAL returns only (actual courier shipments) drive the summary cards —
+     internal "Reconciliation Auto-Fix" stock adjustments are EXCLUDED so they
+     don't inflate the physical-returns figures. The detailed table + its footer
+     below still show every row (incl. fixes) as an audit trail. */
+  const isPhysical   = (r: DailyReturn) => r.note !== 'Reconciliation Auto-Fix';
+  const physicalRows = rows.filter(isPhysical);
+  const physicalUnits = physicalRows.reduce((s, r) => s + r.quantity, 0);
+  const totalUnits   = rows.reduce((s, r) => s + r.quantity, 0);   // ALL rows — table footer
+  const isToday      = date === todayISO();
 
-  /* ── Aggregated summary — total returned units per product ───────────────
-     Groups the currently displayed rows by SKU (falling back to product name),
-     summing ReturnedQuantity, sorted by most-returned first. */
+  /* ── Aggregated summary — total PHYSICAL returned units per product ──────
+     Groups physical returns by SKU (falling back to product name), summing
+     ReturnedQuantity, sorted by most-returned first. */
   const summary = useMemo(() => {
     const map = new Map<string, { name: string; sku: string; qty: number }>();
     for (const r of rows) {
+      if (!isPhysical(r)) continue;   // skip internal reconciliation adjustments
       const key = (r.sku || r.product_name || '').trim().toLowerCase() || '—';
       const hit = map.get(key);
       if (hit) hit.qty += r.quantity;
@@ -488,7 +496,7 @@ export default function ReturnsPage() {
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
         <StatCard
           label="إجمالي المرتجعات"
-          value={loading ? '…' : String(totalUnits)}
+          value={loading ? '…' : String(physicalUnits)}
           sub="وحدة مُستردة"
           color="purple"
           icon={
@@ -500,7 +508,7 @@ export default function ReturnsPage() {
         />
         <StatCard
           label="منتجات مختلفة"
-          value={loading ? '…' : String(rows.length)}
+          value={loading ? '…' : String(physicalRows.length)}
           sub="نوع منتج"
           color="indigo"
           icon={

@@ -61,7 +61,8 @@ router.get('/daily', authenticate, async (req, res) => {
          r.product_name,
          COALESCE(p.sku, '—')       AS sku,
          r.quantity,
-         r.return_date
+         r.return_date,
+         r.note
        FROM   product_returns r
        LEFT   JOIN products p
               ON TRIM(p.name) = TRIM(r.product_name)

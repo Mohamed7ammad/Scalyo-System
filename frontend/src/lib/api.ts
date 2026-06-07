@@ -258,6 +258,7 @@ export interface DailyReturn {
   sku:          string;
   quantity:     number;
   return_date:  string;
+  note:         string | null;   // 'Reconciliation Auto-Fix' for internal stock adjustments
 }
 
 /** Fetch returns for a specific date (YYYY-MM-DD). Defaults to today on the server if omitted. */
