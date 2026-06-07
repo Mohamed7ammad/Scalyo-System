@@ -705,11 +705,11 @@ export default function DashboardPage() {
           if (!phone) continue;   // phone is the dedup key — skip rows without one
 
           parsed.push({
-            FullName:     pick(['fullname', 'full name', 'name', 'full_name', 'customer name', 'customer_name', 'الاسم الكامل', 'الاسم بالكامل', 'اسم العميل', 'الاسم']),
+            FullName:     pick(['name', 'full name', 'fullname', 'full_name', 'customer name', 'customer_name', 'الاسم', 'اسم العميل', 'الاسم بالكامل', 'الاسم الكامل']),
             Phone:        phone,
-            City:         pick(['city', 'government', 'governorate', 'المدينة', 'المحافظة']),
-            Address:      pick(['address', 'العنوان']),
-            ProductName:  pick(['productname', 'product_name', 'product', 'products', 'المنتج']),
+            City:         pick(['city', 'government', 'governorate', 'state', 'province', 'المدينة', 'المحافظة', 'محافظة']),
+            Address:      pick(['address', 'street', 'العنوان', 'العنوان التفصيلي', 'الشارع', 'تفاصيل العنوان', 'عنوان']),
+            ProductName:  pick(['product', 'products', 'product_name', 'productname', 'item', 'المنتج', 'اسم المنتج', 'المنتجات']),
             ProductPrice: pick(['productprice', 'price', 'السعر', 'الاجمالي', 'الإجمالي']),
             Note:         pick(['note', 'notes', 'ملاحظة', 'ملاحظات']) || null,
           });
