@@ -738,14 +738,14 @@ export default function StaffPage() {
                 <table className="w-full text-sm">
                   <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
                     <tr>
-                      {['#','الموظف','إجمالي','معدل التأكيد','عدم الرد','الرفض','المرتجعات','قيمة العمولة','عمولة الفترة','الرصيد المتبقي الإجمالي'].map(h => (
+                      {['#','الموظف','إجمالي','معدل التأكيد','عدم الرد','الرفض','تم التوصيل','المرتجعات','قيمة العمولة','عمولة الفترة','الرصيد المتبقي الإجمالي'].map(h => (
                         <th key={h} className="px-4 py-3.5 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {ranked.length === 0 ? (
-                      <tr><td colSpan={10} className="text-center py-12 text-slate-400 text-sm">لا توجد بيانات للفترة المحددة</td></tr>
+                      <tr><td colSpan={11} className="text-center py-12 text-slate-400 text-sm">لا توجد بيانات للفترة المحددة</td></tr>
                     ) : ranked.map((agent, i) => {
                       const total = toN(agent.total_assigned), confirmed = toN(agent.status_confirmed);
                       const noAns     = toN(agent.status_no_answer);   // لا يرد only
@@ -757,6 +757,7 @@ export default function StaffPage() {
                       const commission = toN(agent.earned_commission);
                       const ndrFlagged = ndr !== null && ndr > 25;
                       const cPct = pct(confirmed, total), nPct = pct(noAns + postponed, total), xPct = pct(cancelled, total);
+                      const dPct = pct(delivered, total), rPct = pct(returned, total);   // delivered / returned share of cohort
                       const isExpanded = expandedAgentId === agent.agent_id;
 
                       /* ── accordion content helpers ── */
@@ -831,15 +832,39 @@ export default function StaffPage() {
                             </div>
                             {total>0 && <Bar value={xPct} color={xPct>30?'red':'slate'}/>}
                           </td>
-                          <td className="px-4 py-3.5">
-                            {ndr===null ? <span className="text-xs text-slate-300 dark:text-slate-700">—</span> : (
-                              <div className="flex flex-col gap-1">
-                                <div className="flex items-center gap-1.5">
-                                  <span className={`text-xs font-bold px-2 py-0.5 rounded-lg ${ndrFlagged?'bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-400 ring-1 ring-red-300 dark:ring-red-700':'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'}`}>{ndr}%</span>
-                                  {ndrFlagged && <span className="text-sm animate-pulse" title="NDR مرتفع">🚩</span>}
-                                </div>
-                                <span className="text-[10px] text-slate-400 dark:text-slate-600">{returned} مرتجع / {delivered+returned} وصل</span>
-                              </div>
+                          {/* ── Deliveries (تم التوصيل) — count + % of cohort ── */}
+                          <td className="px-4 py-3.5 min-w-[120px]">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap">
+                                {delivered.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
+                              </span>
+                              <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-md tabular-nums shrink-0
+                                ${delivered>0?'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400':'text-slate-300 dark:text-slate-700'}`}>
+                                {total===0?'—':`${dPct}%`}
+                              </span>
+                            </div>
+                            {total>0 && <Bar value={dPct} color="emerald"/>}
+                          </td>
+
+                          {/* ── Returns (المرتجعات) — count + % of cohort, with NDR flag ── */}
+                          <td className="px-4 py-3.5 min-w-[120px]">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap flex items-center gap-1">
+                                {returned.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
+                                {ndrFlagged && <span className="text-xs animate-pulse" title={ndr!==null?`NDR ${ndr}% — مرتفع`:'NDR مرتفع'}>🚩</span>}
+                              </span>
+                              <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-md tabular-nums shrink-0
+                                ${ndrFlagged?'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
+                                  :returned>0?'bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+                                  :'text-slate-300 dark:text-slate-700'}`}>
+                                {total===0?'—':`${rPct}%`}
+                              </span>
+                            </div>
+                            {total>0 && <Bar value={rPct} color={ndrFlagged?'red':'amber'}/>}
+                            {ndr!==null && (
+                              <span className="block text-[9px] text-slate-400 dark:text-slate-600 mt-1 tabular-nums">
+                                NDR {ndr}% · {delivered+returned} وصل
+                              </span>
                             )}
                           </td>
 
@@ -916,7 +941,7 @@ export default function StaffPage() {
                         {/* ── Accordion detail row ── */}
                         {isExpanded && (
                           <tr key={`${agent.agent_id}-detail`} className="bg-slate-50/60 dark:bg-slate-800/30 border-b border-slate-100 dark:border-slate-800/60">
-                            <td colSpan={10} className="px-6 py-5">
+                            <td colSpan={11} className="px-6 py-5">
 
                               {/* ── Stacked distribution bar (top) ── */}
                               {total > 0 ? (
