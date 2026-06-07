@@ -333,6 +333,52 @@ router.post('/bulk', authenticate, async (req, res) => {
       imported = rows;
     }
 
+    /* 6. Auto-assign the freshly-imported orders to employees — same philosophy
+       as single-order create (POST /api/orders) and /auto-distribute: present,
+       active agents only. We fetch them ordered by current 'جديد' load ASC, then
+       round-robin the new batch across them (starting from the lightest agent),
+       so the import is spread evenly and fairly. Non-fatal: orders are already
+       inserted, so an assignment hiccup must never fail the import.            */
+    if (imported.length) {
+      try {
+        const { rows: agents } = await pool.query(
+          `SELECT u.email,
+                  COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
+             FROM users u
+             LEFT JOIN orders o
+               ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+            WHERE u.role = 'agent'
+              AND COALESCE(u.is_active,  true)  = true
+              AND COALESCE(u.is_absent, false)  = false
+              AND u.business_id = $1
+            GROUP BY u.email
+            ORDER BY load ASC, u.email ASC`,
+          [businessId]
+        );
+
+        if (agents.length) {
+          const ids    = [];
+          const emails = [];
+          imported.forEach((o, idx) => {
+            ids.push(o.id);
+            emails.push(agents[idx % agents.length].email);   // round-robin
+          });
+          await pool.query(
+            `UPDATE orders AS o
+                SET "AssignedTo" = m.email, "updatedAt" = NOW()
+               FROM unnest($1::int[], $2::text[]) AS m(id, email)
+              WHERE o.id = m.id AND o.business_id = $3`,
+            [ids, emails, businessId]
+          );
+          console.log(`[Bulk Import] 🤝 distributed ${ids.length} order(s) round-robin across ${agents.length} agent(s)`);
+        } else {
+          console.log('[Bulk Import] ℹ️  imported orders left unassigned — no present agents');
+        }
+      } catch (assignErr) {
+        console.warn('[Bulk Import] auto-assignment skipped:', assignErr.message);
+      }
+    }
+
     const importedCount = imported.length;
     const skippedCount  = rawList.length - importedCount;
 
