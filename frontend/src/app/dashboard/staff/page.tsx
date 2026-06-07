@@ -847,9 +847,14 @@ export default function StaffPage() {
                               </span>
                             </div>
                             {confirmed>0 && <Bar value={dPct} color="emerald"/>}
+                            {confirmed>0 && inTransit>0 && (
+                              <span className="block text-[9px] text-slate-400 dark:text-slate-600 mt-1 tabular-nums">
+                                {inTransit} قيد التوصيل
+                              </span>
+                            )}
                           </td>
 
-                          {/* ── Returns (المرتجعات) — count + % of cohort, with NDR flag ── */}
+                          {/* ── Returns (المرتجعات) — count + % of confirmed ── */}
                           <td className="px-4 py-3.5 min-w-[120px]">
                             <div className="flex items-baseline justify-between gap-2">
                               <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap flex items-center gap-1">
@@ -864,11 +869,6 @@ export default function StaffPage() {
                               </span>
                             </div>
                             {confirmed>0 && <Bar value={rPct} color={ndrFlagged?'red':'amber'}/>}
-                            {ndr!==null && (
-                              <span className="block text-[9px] text-slate-400 dark:text-slate-600 mt-1 tabular-nums">
-                                NDR {ndr}% · {delivered+returned} وصل
-                              </span>
-                            )}
                           </td>
 
                           {/* ── Commission settings button ── */}
