@@ -92,7 +92,11 @@ function buildJoinOn(params, startDate, endDate, bizIdx) {
 
   if (!startDate && !endDate) {
     // No date filter — join ALL of the tenant's orders for the agent.
-    return `o."AssignedTo" = u.email AND ${bizClause}`;
+    // Email match is normalised (LOWER+TRIM): orders.AssignedTo can drift in
+    // case/whitespace from users.email, and an exact match silently DROPS those
+    // orders from the per-agent totals (the dashboard, which doesn't join users,
+    // still counts them — that mismatch was the missing-delivered-orders bug).
+    return `LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email)) AND ${bizClause}`;
   }
 
   const rangeParts = [];
@@ -112,7 +116,7 @@ function buildJoinOn(params, startDate, endDate, bizIdx) {
   }
 
   return [
-    `o."AssignedTo" = u.email`,
+    `LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email))`,
     `AND ${bizClause}`,
     `AND (${rangeParts.join(' AND ')})`,
   ].join('\n          ');
@@ -307,7 +311,7 @@ router.get('/agents', authenticate, requireAdmin, async (req, res) => {
       COALESCE(pay.total_paid, 0)               AS total_paid
     FROM users u
     LEFT JOIN orders o
-      ON o."AssignedTo" = u.email AND o.business_id = $1::integer
+      ON LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email)) AND o.business_id = $1::integer
     LEFT JOIN (
       SELECT user_id, SUM(amount) AS total_paid
       FROM employee_payouts
