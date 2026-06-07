@@ -8,10 +8,12 @@ import {
   getStaff, distributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
+  bulkImportOrders, BulkImportResult,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
   BostaFollowUps, BostaFollowUpOrder,
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
+import * as XLSX from 'xlsx';
 
 const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
 
@@ -122,6 +124,11 @@ export default function DashboardPage() {
   const [xferTargetId,  setXferTargetId]  = useState<number | ''>('');
   const [xferSaving,    setXferSaving]    = useState(false);
   const [bulkDeleting,  setBulkDeleting]  = useState(false);
+  /* ── CSV bulk import ─────────────────────────────────────────── */
+  const [showCsvModal,  setShowCsvModal]  = useState(false);
+  const [csvParsed,     setCsvParsed]     = useState<Partial<Order>[]>([]);
+  const [csvFileName,   setCsvFileName]   = useState('');
+  const [csvUploading,  setCsvUploading]  = useState(false);
 
   /* ── Auth guard ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -655,6 +662,91 @@ export default function DashboardPage() {
     setShowAddModal(true);
   };
 
+  /* ── CSV / Excel bulk import helpers ─────────────────────────────
+     Reads .csv, .xlsx and .xls natively via the `xlsx` library so that
+     Excel files (the most common real-world upload) parse correctly
+     instead of being mangled by a text-only CSV reader. The first sheet
+     is converted to JSON objects keyed by header; flexible Arabic/English
+     header aliases are then matched against each row. */
+  const handleCsvFile = (file: File) => {
+    setCsvFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const wb = XLSX.read(data, { type: 'array' });
+        const firstSheet = wb.Sheets[wb.SheetNames[0]];
+        if (!firstSheet) { showToast('الملف فارغ أو لا يحتوي على بيانات', 'error'); return; }
+
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: '' });
+        if (!rows.length) { showToast('الملف فارغ أو لا يحتوي على بيانات', 'error'); return; }
+
+        const parsed: Partial<Order>[] = [];
+        for (const raw of rows) {
+          // Normalise header keys (lowercase + trim + strip wrapping quotes)
+          // and stringify values once, so alias lookups are cheap & robust.
+          const row: Record<string, string> = {};
+          for (const k of Object.keys(raw)) {
+            const v = raw[k];
+            row[k.trim().toLowerCase().replace(/^"|"$/g, '')] = v == null ? '' : String(v).trim();
+          }
+
+          // Map flexible header aliases → our Order field names
+          const pick = (aliases: string[]) => {
+            for (const a of aliases) { if (row[a]) return row[a]; }
+            return '';
+          };
+
+          // Normalise phone: strip non-digits, and recover the leading 0 that
+          // Excel drops when it stores a mobile as a number (10 digits starting
+          // with '1' → prepend '0' → valid 11-digit Egyptian mobile '010…').
+          let phone = pick(['phone', 'telephone', 'mobile', 'رقم الهاتف', 'الهاتف']).replace(/\D/g, '');
+          if (phone.length === 10 && phone.startsWith('1')) phone = '0' + phone;
+          if (!phone) continue;   // phone is the dedup key — skip rows without one
+
+          parsed.push({
+            FullName:     pick(['fullname', 'full name', 'name', 'full_name', 'customer name', 'customer_name', 'الاسم الكامل', 'الاسم بالكامل', 'اسم العميل', 'الاسم']),
+            Phone:        phone,
+            City:         pick(['city', 'المدينة', 'المحافظة']),
+            Address:      pick(['address', 'العنوان']),
+            ProductName:  pick(['productname', 'product_name', 'product', 'المنتج']),
+            ProductPrice: pick(['productprice', 'price', 'السعر', 'الاجمالي', 'الإجمالي']),
+            Note:         pick(['note', 'notes', 'ملاحظة', 'ملاحظات']) || null,
+          });
+        }
+
+        setCsvParsed(parsed);
+      } catch {
+        showToast('تعذّر قراءة الملف — تأكد أنه ملف Excel أو CSV صالح', 'error');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleCsvImport = async () => {
+    if (!csvParsed.length) return;
+    setCsvUploading(true);
+    try {
+      const res = await bulkImportOrders(csvParsed);
+      const { importedCount, skippedCount } = res.data;
+      showToast(
+        `تمت الإضافة! تم استيراد ${importedCount} طلب، وتجاهل ${skippedCount} طلب مكرر`,
+        'success',
+      );
+      setShowCsvModal(false);
+      setCsvParsed([]);
+      setCsvFileName('');
+      fetchOrders();
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل استيراد الملف';
+      showToast(msg, 'error');
+    } finally {
+      setCsvUploading(false);
+    }
+  };
+
   const handleCreateOrder = async () => {
     if (!addForm.FullName.trim() || !addForm.Phone.trim()) {
       showToast('الاسم ورقم الهاتف مطلوبان', 'error');
@@ -969,6 +1061,23 @@ export default function DashboardPage() {
               </svg>
               إضافة طلب
             </button>
+
+            {isAdmin && (
+              <button
+                onClick={() => { setCsvParsed([]); setCsvFileName(''); setShowCsvModal(true); }}
+                title="رفع ملفات Excel أو CSV"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
+                  bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800
+                  text-white text-sm font-semibold shadow-sm shadow-emerald-500/20
+                  transition-all duration-150 active:scale-95"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                رفع ملفات (Excel / CSV)
+              </button>
+            )}
             <button
               onClick={fetchOrders}
               title="تحديث الطلبات"
@@ -1017,6 +1126,87 @@ export default function DashboardPage() {
                 </button>
               ))}
 
+            </div>
+          </div>
+        )}
+
+        {/* ── CSV Bulk Import Modal ─────────────────────────────────── */}
+        {showCsvModal && (
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={(e) => e.target === e.currentTarget && setShowCsvModal(false)}
+          >
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md p-6" dir="rtl">
+              <div className="flex items-center justify-between mb-5">
+                <h2 className="text-base font-bold text-slate-900 dark:text-white">رفع ملفات (Excel / CSV)</h2>
+                <button onClick={() => setShowCsvModal(false)}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Expected headers hint */}
+              <div className="mb-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-xl text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                <p className="font-semibold text-slate-700 dark:text-slate-300 mb-1">الأعمدة المتوقعة في الملف:</p>
+                <p dir="ltr" className="font-mono">name, phone, city, address, product_name, price, notes</p>
+                <p className="mt-1">• رقم الهاتف إلزامي — الصفوف بدونه تُتجاهل تلقائياً.</p>
+                <p>• أي هاتف موجود مسبقاً في النظام يُتجاهل (لا تكرار).</p>
+              </div>
+
+              {/* File picker */}
+              <label className="flex flex-col items-center justify-center gap-2 w-full h-32
+                border-2 border-dashed border-slate-300 dark:border-slate-600
+                rounded-xl cursor-pointer hover:border-emerald-400 transition
+                bg-slate-50 dark:bg-slate-800/50 mb-4">
+                <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                <span className="text-sm text-slate-500 dark:text-slate-400">
+                  {csvFileName || 'اضغط لاختيار ملف Excel أو CSV'}
+                </span>
+                <input
+                  type="file"
+                  accept=".csv, .xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleCsvFile(file);
+                  }}
+                />
+              </label>
+
+              {/* Parse result preview */}
+              {csvParsed.length > 0 && (
+                <div className="mb-4 flex items-center gap-2 px-3 py-2 bg-emerald-50 dark:bg-emerald-900/30
+                  border border-emerald-200 dark:border-emerald-700 rounded-xl text-sm text-emerald-700 dark:text-emerald-300">
+                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  تم قراءة <span className="font-bold mx-1">{csvParsed.length}</span> طلب من الملف — جاهز للرفع
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                <button
+                  onClick={handleCsvImport}
+                  disabled={csvParsed.length === 0 || csvUploading}
+                  className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50
+                    text-white py-2.5 rounded-xl text-sm font-semibold transition"
+                >
+                  {csvUploading ? 'جارٍ الرفع...' : `استيراد ${csvParsed.length > 0 ? `(${csvParsed.length})` : ''}`}
+                </button>
+                <button
+                  onClick={() => setShowCsvModal(false)}
+                  className="flex-1 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200
+                    dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300
+                    py-2.5 rounded-xl text-sm font-semibold transition"
+                >
+                  إلغاء
+                </button>
+              </div>
             </div>
           </div>
         )}

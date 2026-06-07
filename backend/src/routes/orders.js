@@ -230,6 +230,170 @@ router.post('/', authenticate, async (req, res) => {
   }
 });
 
+/* ── POST /api/orders/bulk — CSV bulk import (admins + agents) ───────────────
+   Imports an array of parsed order rows (e.g. abandoned carts from EasyOrders).
+   PHONE DEDUPLICATION: any row whose phone already exists in the tenant's orders
+   (digits-only comparison) is skipped — and duplicates WITHIN the file are also
+   collapsed. New rows are bulk-inserted as 'جديد' (unassigned — distribute later).
+
+   Body: { orders: [ { name|FullName, phone|Phone, address|Address, city|City,
+                       product_name|ProductName, price|ProductPrice, notes|Note } ] }
+   (a bare array is also accepted.)
+   Response: { success, importedCount, skippedCount, duplicateCount, invalidCount } */
+router.post('/bulk', authenticate, async (req, res) => {
+  const businessId = req.user.business_id;
+  const rawList = Array.isArray(req.body) ? req.body
+    : Array.isArray(req.body?.orders) ? req.body.orders
+    : null;
+
+  if (!rawList || rawList.length === 0) {
+    return res.status(400).json({ error: 'لا توجد طلبات للاستيراد' });
+  }
+
+  const normPhone = (v) => String(v ?? '').replace(/\D/g, '');
+  const pick = (o, ...keys) => {
+    for (const k of keys) {
+      if (o[k] !== undefined && o[k] !== null && String(o[k]).trim() !== '') return String(o[k]).trim();
+    }
+    return '';
+  };
+
+  try {
+    /* 1. Normalise rows. PHONE is the ONLY strictly-required field — messy
+       imports (EasyOrders/Shopify abandoned carts) routinely omit name, city,
+       address, price, etc. A row is "invalid" ONLY if it has no usable phone.
+       All other fields fall back to NULL (columns are nullable); a missing name
+       defaults to 'عميل جديد' so the order is still actionable. */
+    let invalidCount = 0;
+    const candidates = [];
+    for (const o of rawList) {
+      if (!o || typeof o !== 'object') { invalidCount++; continue; }
+      const PhoneRaw = pick(o, 'Phone', 'phone', 'phone_number', 'mobile');
+      const phoneKey = normPhone(PhoneRaw);
+      if (!phoneKey) { invalidCount++; continue; }   // no phone → cannot dedup/contact
+      const FullName = pick(o, 'FullName', 'name', 'full_name', 'customer_name') || 'عميل جديد';
+      candidates.push({
+        FullName,
+        Phone:        PhoneRaw,
+        phoneKey,
+        City:         pick(o, 'City', 'city', 'government', 'governorate') || null,
+        Address:      pick(o, 'Address', 'address', 'shipping_address') || null,
+        ProductName:  pick(o, 'ProductName', 'product_name', 'product') || null,
+        ProductPrice: pick(o, 'ProductPrice', 'price', 'total', 'amount') || null,
+        Note:         pick(o, 'Note', 'notes', 'note', 'comment') || null,
+      });
+    }
+
+    /* 2. Collapse duplicates WITHIN the file (keep first per phone). */
+    const batchSeen = new Set();
+    const deduped = [];
+    let duplicateCount = 0;
+    for (const c of candidates) {
+      if (batchSeen.has(c.phoneKey)) { duplicateCount++; continue; }
+      batchSeen.add(c.phoneKey);
+      deduped.push(c);
+    }
+
+    /* 3. One query → which of these phones already exist in the tenant. */
+    const phoneKeys = [...batchSeen];
+    let existing = new Set();
+    if (phoneKeys.length) {
+      const { rows } = await pool.query(
+        `SELECT DISTINCT regexp_replace("Phone", '[^0-9]', '', 'g') AS p
+           FROM orders
+          WHERE business_id = $1
+            AND regexp_replace("Phone", '[^0-9]', '', 'g') = ANY($2::text[])`,
+        [businessId, phoneKeys]
+      );
+      existing = new Set(rows.map((r) => r.p));
+    }
+
+    /* 4. Keep only rows whose phone is NOT already in the system. */
+    const toInsert = deduped.filter((c) => !existing.has(c.phoneKey));
+    duplicateCount += deduped.length - toInsert.length;   // existing-phone skips
+
+    /* 5. Bulk insert the new rows in a single statement. */
+    let imported = [];
+    if (toInsert.length) {
+      const valuesSql = [];
+      const params = [];
+      let i = 1;
+      for (const c of toInsert) {
+        valuesSql.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, 'بدون', 'جديد', 'csv', $${i++}, 1)`);
+        params.push(c.FullName, c.Phone, c.City, c.Address, c.ProductName, c.ProductPrice, c.Note, businessId);
+      }
+      const { rows } = await pool.query(
+        `INSERT INTO orders
+           ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "Note",
+            "DeliveryRate", "Status", order_source, business_id, quantity)
+         VALUES ${valuesSql.join(', ')}
+         RETURNING id, "Phone"`,
+        params
+      );
+      imported = rows;
+    }
+
+    /* 6. Auto-assign the freshly-imported orders to employees — same philosophy
+       as single-order create (POST /api/orders) and /auto-distribute: present,
+       active agents only. We fetch them ordered by current 'جديد' load ASC, then
+       round-robin the new batch across them (starting from the lightest agent),
+       so the import is spread evenly and fairly. Non-fatal: orders are already
+       inserted, so an assignment hiccup must never fail the import.            */
+    if (imported.length) {
+      try {
+        const { rows: agents } = await pool.query(
+          `SELECT u.email,
+                  COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
+             FROM users u
+             LEFT JOIN orders o
+               ON o."AssignedTo" = u.email AND o.business_id = u.business_id
+            WHERE u.role = 'agent'
+              AND COALESCE(u.is_active,  true)  = true
+              AND COALESCE(u.is_absent, false)  = false
+              AND u.business_id = $1
+            GROUP BY u.email
+            ORDER BY load ASC, u.email ASC`,
+          [businessId]
+        );
+
+        if (agents.length) {
+          const ids    = [];
+          const emails = [];
+          imported.forEach((o, idx) => {
+            ids.push(o.id);
+            emails.push(agents[idx % agents.length].email);   // round-robin
+          });
+          await pool.query(
+            `UPDATE orders AS o
+                SET "AssignedTo" = m.email, "updatedAt" = NOW()
+               FROM unnest($1::int[], $2::text[]) AS m(id, email)
+              WHERE o.id = m.id AND o.business_id = $3`,
+            [ids, emails, businessId]
+          );
+          console.log(`[Bulk Import] 🤝 distributed ${ids.length} order(s) round-robin across ${agents.length} agent(s)`);
+        } else {
+          console.log('[Bulk Import] ℹ️  imported orders left unassigned — no present agents');
+        }
+      } catch (assignErr) {
+        console.warn('[Bulk Import] auto-assignment skipped:', assignErr.message);
+      }
+    }
+
+    const importedCount = imported.length;
+    const skippedCount  = rawList.length - importedCount;
+
+    console.log(`[Bulk Import] tenant ${businessId}: imported ${importedCount}, skipped ${skippedCount} (dup ${duplicateCount}, invalid ${invalidCount})`);
+
+    res.json({ success: true, importedCount, skippedCount, duplicateCount, invalidCount });
+
+    // Background: fill حالة الاستلام for each new order (throttled Bosta queue).
+    for (const o of imported) enrichDeliveryRate(o.id, o.Phone);
+  } catch (err) {
+    console.error('[POST /orders/bulk] error:', err.message);
+    res.status(500).json({ error: 'فشل استيراد الطلبات' });
+  }
+});
+
 // POST /api/orders/bulk-transfer — admin only
 // Transfers all 'جديد' orders from one agent to another.
 router.post('/bulk-transfer', authenticate, requireAdmin, async (req, res) => {
@@ -547,6 +711,91 @@ router.delete('/bulk', authenticate, requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('[bulk-delete]', err);
     res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── POST /api/orders/bulk — CSV batch import (admin only) ──────────────────
+   Accepts a JSON array of pre-parsed order objects (FullName, Phone, City,
+   Address, ProductName, ProductPrice, Note).  Deduplicates by phone against
+   ALL existing orders in this tenant — a phone that already exists is silently
+   skipped.  New orders are round-robin assigned to present, active agents.
+   Returns { success: true, importedCount, skippedCount }.                    */
+router.post('/bulk', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  const incoming   = req.body;
+
+  if (!Array.isArray(incoming) || incoming.length === 0) {
+    return res.status(400).json({ error: 'يجب إرسال مصفوفة من الطلبات' });
+  }
+
+  // Normalise phone numbers from the incoming batch (strip whitespace)
+  const rawPhones = incoming
+    .map((o) => String(o.Phone ?? o.phone ?? '').trim().replace(/\s/g, ''))
+    .filter(Boolean);
+
+  if (rawPhones.length === 0) {
+    return res.status(400).json({ error: 'لم يتم العثور على أرقام هواتف في الملف' });
+  }
+
+  try {
+    // Single query: which of these phones already exist in this tenant?
+    const existing = await pool.query(
+      `SELECT DISTINCT TRIM("Phone") AS phone
+         FROM orders
+        WHERE business_id = $1
+          AND TRIM("Phone") = ANY($2::text[])`,
+      [businessId, rawPhones]
+    );
+    const existingPhones = new Set(existing.rows.map((r) => r.phone));
+
+    // Present, active agents for round-robin assignment
+    const agentsRes = await pool.query(
+      `SELECT email FROM users
+        WHERE role = 'agent'
+          AND COALESCE(is_active,  true)  = true
+          AND COALESCE(is_absent, false)  = false
+          AND business_id = $1
+        ORDER BY id ASC`,
+      [businessId]
+    );
+    const agents = agentsRes.rows.map((r) => r.email);
+
+    // Filter: keep only orders whose phone is NOT already in the DB
+    const toInsert = incoming.filter((o) => {
+      const phone = String(o.Phone ?? o.phone ?? '').trim().replace(/\s/g, '');
+      return phone && !existingPhones.has(phone);
+    });
+
+    const skippedCount  = incoming.length - toInsert.length;
+    let   importedCount = 0;
+    let   agentIdx      = 0;
+
+    for (const o of toInsert) {
+      const phone      = String(o.Phone       ?? o.phone        ?? '').trim();
+      const fullName   = String(o.FullName    ?? o.name         ?? '').trim() || null;
+      const city       = String(o.City        ?? o.city         ?? '').trim() || null;
+      const address    = String(o.Address     ?? o.address      ?? '').trim() || null;
+      const product    = String(o.ProductName ?? o.product_name ?? '').trim() || null;
+      const price      = String(o.ProductPrice ?? o.price       ?? '').trim() || null;
+      const note       = String(o.Note        ?? o.notes        ?? '').trim() || null;
+      const assignedTo = agents.length > 0 ? agents[agentIdx % agents.length] : null;
+      agentIdx++;
+
+      await pool.query(
+        `INSERT INTO orders
+           ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice",
+            "Note", "DeliveryRate", "Status", "AssignedTo", order_source, business_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'بدون', 'جديد', $8, 'csv_import', $9)`,
+        [fullName, phone, city, address, product, price, note, assignedTo, businessId]
+      );
+      importedCount++;
+    }
+
+    console.log(`[Bulk Import] ✅ ${importedCount} imported, ${skippedCount} skipped (duplicates) — tenant ${businessId}`);
+    res.json({ success: true, importedCount, skippedCount });
+  } catch (err) {
+    console.error('[bulk-import]', err);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء الاستيراد' });
   }
 });
 
