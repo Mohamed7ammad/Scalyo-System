@@ -251,9 +251,14 @@ router.post('/bulk', authenticate, async (req, res) => {
   }
 
   const normPhone = (v) => String(v ?? '').replace(/\D/g, '');
-  // Product normaliser — MUST mirror the SQL form below
-  // (LOWER(TRIM(collapse-whitespace))) so JS and DB composite keys match.
-  const normProd  = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // Product normaliser — MUST mirror the SQL form below so JS and DB composite
+  // keys match: lowercase, fold Arabic variants (أإآ→ا, ة→ه) and strip ALL
+  // whitespace. Makes "طقم دريل 47 قطعة" === "طقم دريل 47 قطعه ".
+  const normProd  = (v) => String(v ?? '')
+    .toLowerCase()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, '');
   const pick = (o, ...keys) => {
     for (const k of keys) {
       if (o[k] !== undefined && o[k] !== null && String(o[k]).trim() !== '') return String(o[k]).trim();
@@ -307,14 +312,15 @@ router.post('/bulk', authenticate, async (req, res) => {
        tenant within the last 3 days. STRICT tenant isolation: scoped by
        business_id (this system's tenant id) so Merchant A's customers can never
        block Merchant B's orders. The product is normalised identically to the JS
-       side (LOWER(TRIM(collapse-whitespace))) so the composite keys line up. */
+       side (lowercase + fold أإآ→ا/ة→ه + strip ALL whitespace) so the composite
+       keys line up despite Arabic spelling/spacing drift. */
     const phoneKeys = [...new Set(deduped.map((c) => c.phoneKey))];
     let recentPairs = new Set();
     if (phoneKeys.length) {
       const { rows } = await pool.query(
         `SELECT DISTINCT
                 regexp_replace("Phone", '[^0-9]', '', 'g') AS p,
-                LOWER(TRIM(regexp_replace(COALESCE("ProductName", ''), '\\s+', ' ', 'g'))) AS prod
+                LOWER(regexp_replace(translate(COALESCE("ProductName", ''), 'أإآة', 'اااه'), '\\s+', '', 'g')) AS prod
            FROM orders
           WHERE business_id = $1
             AND "createdAt" >= NOW() - INTERVAL '3 days'
