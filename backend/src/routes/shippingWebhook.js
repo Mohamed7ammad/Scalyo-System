@@ -242,35 +242,59 @@ async function applyPhysicalReturn(order) {
     [order.id, businessId]
   );
 
-  // 2. Idempotency gate — already logged as a physical return?
-  const dup = await pool.query(
-    'SELECT 1 FROM product_returns WHERE order_id = $1 AND business_id = $2 LIMIT 1',
-    [order.id, businessId]
+  // 2. Idempotency CLAIM — insert the return row first and let the partial unique
+  //    index decide. If the order was already logged, ON CONFLICT inserts nothing
+  //    and we skip the restock entirely → a return can NEVER be double-counted,
+  //    even under concurrent webhook + sync delivery. Tying the restock to winning
+  //    this insert is safer than a separate SELECT gate (no check-then-act window).
+  const claim = await pool.query(
+    `INSERT INTO product_returns (product_name, sku, order_id, return_date, quantity, business_id)
+     VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
+     ON CONFLICT (order_id) WHERE order_id IS NOT NULL DO NOTHING
+     RETURNING id`,
+    [productName, orderSku, order.id, orderQty, businessId]
   );
-  if (dup.rowCount > 0) {
+  if (claim.rowCount === 0) {
     return { statusUpdated: true, alreadyLogged: true, restocked: false, qty: orderQty };
   }
 
-  // 3. Stock replenishment (SKU-first, name fallback).
+  // 3. Stock replenishment — ATOMIC + alias-aware. Matches the order's sku OR name
+  //    against a product's sku, name, OR any aliases[] entry (case-insensitive,
+  //    trimmed; exact SKU preferred) — the SAME resolution as resolveProductForOrder
+  //    used at order time, so a return whose sku is a campaign alias (or whose name
+  //    drifted in case/spacing) still restocks the right product instead of being
+  //    silently skipped. Done as ONE statement so the increment stays atomic and
+  //    concurrent restocks can never overwrite each other.
   let restocked = false;
   if (productName || orderSku) {
-    const hasSku   = Boolean(orderSku);
-    const stockSql = hasSku
-      ? `UPDATE products SET stock_quantity = stock_quantity + $2
-          WHERE sku = $1 AND business_id = $3 RETURNING name, stock_quantity`
-      : `UPDATE products SET stock_quantity = stock_quantity + $2
-          WHERE TRIM(name) = TRIM($1) AND business_id = $3 RETURNING name, stock_quantity`;
-    const r = await pool.query(stockSql, [hasSku ? orderSku : productName, orderQty, businessId]);
+    const r = await pool.query(
+      `UPDATE products
+          SET stock_quantity = stock_quantity + $3
+        WHERE business_id = $4
+          AND id = (
+            SELECT id FROM products
+             WHERE business_id = $4
+               AND (
+                     LOWER(TRIM(sku))  = LOWER(NULLIF($1, ''))
+                  OR LOWER(TRIM(name)) = LOWER(NULLIF($2, ''))
+                  OR EXISTS (
+                       SELECT 1 FROM unnest(COALESCE(aliases, '{}'::text[])) AS a
+                        WHERE LOWER(TRIM(a)) = LOWER(NULLIF($1, ''))
+                           OR LOWER(TRIM(a)) = LOWER(NULLIF($2, ''))
+                     )
+                   )
+             ORDER BY CASE
+                        WHEN LOWER(TRIM(sku))  = LOWER(NULLIF($1, '')) THEN 1
+                        WHEN LOWER(TRIM(name)) = LOWER(NULLIF($2, '')) THEN 2
+                        ELSE 3
+                      END
+             LIMIT 1
+          )
+        RETURNING name, stock_quantity`,
+      [orderSku, productName, orderQty, businessId]
+    );
     restocked = r.rowCount > 0;
   }
-
-  // 4. Log the return (one row per order; guaranteed order_id partial index).
-  await pool.query(
-    `INSERT INTO product_returns (product_name, sku, order_id, return_date, quantity, business_id)
-     VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
-     ON CONFLICT (order_id) WHERE order_id IS NOT NULL DO NOTHING`,
-    [productName, orderSku, order.id, orderQty, businessId]
-  );
 
   return { statusUpdated: true, alreadyLogged: false, restocked, qty: orderQty };
 }
