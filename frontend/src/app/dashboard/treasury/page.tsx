@@ -255,6 +255,13 @@ function CommissionsModal({
   loading:   boolean;
   onClose:   () => void;
 }) {
+  // Single-day filter — compares the YYYY-MM-DD prefix of each group's date
+  // against the picker value; empty = show all days.
+  const [filterDate, setFilterDate] = useState('');
+  const visibleDays = filterDate
+    ? breakdown.filter((d) => String(d.date).slice(0, 10) === filterDate)
+    : breakdown;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
@@ -289,6 +296,45 @@ function CommissionsModal({
           </button>
         </div>
 
+        {/* Single-day filter bar */}
+        {!loading && breakdown.length > 0 && (
+          <div className="flex items-center gap-2 px-6 py-3 border-b border-slate-100 dark:border-slate-800 shrink-0">
+            <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
+              عرض يوم محدد:
+            </label>
+            <div className="relative">
+              <input
+                type="date"
+                value={filterDate}
+                onChange={(e) => setFilterDate(e.target.value)}
+                dir="ltr"
+                className="pl-3 pr-9 py-1.5 rounded-xl text-sm outline-none cursor-pointer
+                  border border-slate-300 dark:border-slate-700
+                  bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200
+                  focus:ring-2 focus:ring-violet-400 focus:border-violet-400 transition"
+              />
+              <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500 pointer-events-none"
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </div>
+            {filterDate && (
+              <button
+                onClick={() => setFilterDate('')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold
+                  text-slate-500 hover:text-slate-700 bg-slate-100 hover:bg-slate-200
+                  dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 transition"
+              >
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                مسح الفلتر
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6">
           {loading ? (
@@ -304,9 +350,17 @@ function CommissionsModal({
               </svg>
               <p className="text-sm text-slate-400">لا توجد عمولات مسجلة بعد</p>
             </div>
+          ) : visibleDays.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3">
+              <svg className="w-10 h-10 text-slate-300 dark:text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              <p className="text-sm text-slate-400">لا توجد عمولات في هذا اليوم</p>
+            </div>
           ) : (
             <div className="space-y-6">
-              {breakdown.map((day) => (
+              {visibleDays.map((day) => (
                 <div key={day.date}>
                   {/* Date divider */}
                   <div className="flex items-center gap-3 mb-3">
