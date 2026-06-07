@@ -705,7 +705,7 @@ export default function DashboardPage() {
           if (!phone) continue;   // phone is the dedup key — skip rows without one
 
           parsed.push({
-            FullName:     pick(['fullname', 'name', 'full_name', 'الاسم الكامل', 'الاسم']),
+            FullName:     pick(['fullname', 'full name', 'name', 'full_name', 'customer name', 'customer_name', 'الاسم الكامل', 'الاسم بالكامل', 'اسم العميل', 'الاسم']),
             Phone:        phone,
             City:         pick(['city', 'المدينة', 'المحافظة']),
             Address:      pick(['address', 'العنوان']),
