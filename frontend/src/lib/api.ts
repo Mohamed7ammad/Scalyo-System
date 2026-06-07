@@ -264,6 +264,28 @@ export interface DailyReturn {
 export const getDailyReturns = (date: string) =>
   api.get<DailyReturn[]>(`/api/returns/daily?date=${date}`);
 
+export interface ReconciliationRow {
+  product_name: string;
+  sku:          string;
+  missing_qty:  number;
+  return_date:  string;
+  resolved:     boolean;   // true → mapped to a real product (recoverable top-up)
+}
+export interface ReconciliationReport {
+  totalMissingQty:  number;
+  affectedProducts: number;
+  rows:             ReconciliationRow[];
+}
+
+/** Admin-only. Reports returns that were logged but never restocked (old matching bug). */
+export const getReturnsReconciliation = (params: { startDate?: string; endDate?: string } = {}) => {
+  const q = new URLSearchParams();
+  if (params.startDate) q.set('startDate', params.startDate);
+  if (params.endDate)   q.set('endDate',   params.endDate);
+  const qs = q.toString();
+  return api.get<ReconciliationReport>(`/api/returns/reconciliation${qs ? `?${qs}` : ''}`);
+};
+
 export interface ManualReturnPayload {
   productId:  string;
   quantity:   number;

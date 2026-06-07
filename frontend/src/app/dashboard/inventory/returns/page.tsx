@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   getDailyReturns, postManualReturn, syncBostaReturns,
   getProducts, Product, DailyReturn,
+  getReturnsReconciliation, ReconciliationReport,
 } from '@/lib/api';
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -25,6 +26,13 @@ export default function ReturnsPage() {
   const [rows,    setRows]    = useState<DailyReturn[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  /* ── Reconciliation report state ─────────────────────────────────────── */
+  const [reconOpen,    setReconOpen]    = useState(false);
+  const [reconLoading, setReconLoading] = useState(false);
+  const [reconData,    setReconData]    = useState<ReconciliationReport | null>(null);
+  const [reconError,   setReconError]   = useState<string | null>(null);
 
   /* ── Bosta returns-sync modal state ──────────────────────────────────── */
   const [syncOpen,    setSyncOpen]    = useState(false);
@@ -50,8 +58,32 @@ export default function ReturnsPage() {
   useEffect(() => {
     if (typeof window !== 'undefined' && !localStorage.getItem('token')) {
       router.push('/');
+      return;
     }
+    try {
+      const u = JSON.parse(localStorage.getItem('user') || 'null');
+      setIsAdmin(u?.role === 'admin');
+    } catch { /* ignore malformed user */ }
   }, [router]);
+
+  /* ── Reconciliation report — fetch on open ───────────────────────────── */
+  const openRecon = useCallback(async () => {
+    setReconOpen(true);
+    setReconLoading(true);
+    setReconError(null);
+    try {
+      const { data } = await getReturnsReconciliation();
+      setReconData(data);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? (err instanceof Error ? err.message : 'تعذّر تحميل التقرير');
+      setReconError(msg);
+      setReconData(null);
+    } finally {
+      setReconLoading(false);
+    }
+  }, []);
 
   /* ── Fetch returns list ──────────────────────────────────────────────── */
   const fetchReturns = useCallback(async (d: string) => {
@@ -294,6 +326,23 @@ export default function ReturnsPage() {
               </svg>
               مزامنة المرتجعات
             </button>
+
+            {/* Reconciliation report — admin only */}
+            {isAdmin && (
+              <button
+                onClick={openRecon}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold
+                  bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-700/60
+                  text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-slate-700
+                  transition-all duration-150 whitespace-nowrap"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                فحص أخطاء الجرد
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -906,6 +955,165 @@ export default function ReturnsPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ════════════════════════════════════════════════════════════════════
+          Reconciliation Report Modal (فحص أخطاء الجرد)
+          ════════════════════════════════════════════════════════════════ */}
+      {reconOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4
+            bg-black/60 backdrop-blur-sm"
+          onClick={(e) => e.target === e.currentTarget && setReconOpen(false)}
+          dir="rtl"
+        >
+          <div className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
+            border border-gray-200 dark:border-slate-700 overflow-hidden flex flex-col max-h-[85vh]">
+
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4
+              border-b border-gray-100 dark:border-slate-800 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-900/40
+                  flex items-center justify-center shrink-0">
+                  <svg className="w-4 h-4 text-amber-600 dark:text-amber-400"
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-gray-900 dark:text-slate-100 leading-tight">
+                    فحص أخطاء الجرد — مرتجعات لم تُضف للمخزن
+                  </h2>
+                  <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                    وحدات سُجّلت كمرتجع لكن لم تُرحّل لرصيد المنتج بسبب عطل المطابقة القديم
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setReconOpen(false)}
+                className="p-1.5 rounded-lg text-gray-400 dark:text-slate-500
+                  hover:text-gray-700 hover:bg-gray-100
+                  dark:hover:text-slate-300 dark:hover:bg-slate-800 transition"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-y-auto p-6">
+              {reconLoading && (
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <div className="w-8 h-8 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                  <p className="text-sm text-gray-400 dark:text-slate-500">جاري فحص السجلات…</p>
+                </div>
+              )}
+
+              {!reconLoading && reconError && (
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <p className="text-sm font-semibold text-red-600 dark:text-red-400">تعذّر تحميل التقرير</p>
+                  <p className="text-xs text-gray-400 dark:text-slate-500 text-center">{reconError}</p>
+                  <button onClick={openRecon}
+                    className="mt-1 px-4 py-2 text-xs font-semibold rounded-xl
+                      bg-amber-50 text-amber-600 hover:bg-amber-100
+                      dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/60 transition">
+                    إعادة المحاولة
+                  </button>
+                </div>
+              )}
+
+              {!reconLoading && !reconError && reconData && reconData.rows.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <div className="w-14 h-14 rounded-2xl bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
+                    <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                  <p className="text-sm font-semibold text-gray-700 dark:text-slate-200">لا توجد فروقات</p>
+                  <p className="text-xs text-gray-400 dark:text-slate-500 text-center max-w-xs">
+                    جميع المرتجعات المسجّلة تمت إضافتها لرصيد المخزون بشكل صحيح.
+                  </p>
+                </div>
+              )}
+
+              {!reconLoading && !reconError && reconData && reconData.rows.length > 0 && (
+                <>
+                  {/* Totals */}
+                  <div className="grid grid-cols-2 gap-3 mb-5">
+                    <div className="rounded-xl border border-amber-200 dark:border-amber-800/50
+                      bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+                      <p className="text-xs text-amber-700 dark:text-amber-400">إجمالي الوحدات الناقصة</p>
+                      <p className="text-2xl font-bold text-amber-700 dark:text-amber-300">{reconData.totalMissingQty}</p>
+                    </div>
+                    <div className="rounded-xl border border-gray-200 dark:border-slate-700
+                      bg-gray-50 dark:bg-slate-800/60 px-4 py-3">
+                      <p className="text-xs text-gray-500 dark:text-slate-400">منتجات متأثرة</p>
+                      <p className="text-2xl font-bold text-gray-700 dark:text-slate-200">{reconData.affectedProducts}</p>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-slate-800">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 dark:bg-slate-800/50 border-b border-gray-100 dark:border-slate-700">
+                        <tr>
+                          <Th>المنتج</Th>
+                          <Th>الكمية الناقصة</Th>
+                          <Th>التاريخ</Th>
+                          <Th>الحالة</Th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+                        {reconData.rows.map((r, i) => (
+                          <tr key={`${r.product_name}-${r.return_date}-${i}`}
+                            className="hover:bg-gray-50 dark:hover:bg-slate-800/40 transition-colors">
+                            <td className="px-5 py-3">
+                              <span className="font-medium text-gray-800 dark:text-slate-200">{r.product_name}</span>
+                              {r.sku && (
+                                <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded
+                                  bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400
+                                  border border-gray-200 dark:border-slate-700" dir="ltr">{r.sku}</span>
+                              )}
+                            </td>
+                            <td className="px-5 py-3">
+                              <span className="text-lg font-bold text-amber-700 dark:text-amber-300">{r.missing_qty}</span>
+                              <span className="text-xs text-gray-400 dark:text-slate-500 mr-1">وحدة</span>
+                            </td>
+                            <td className="px-5 py-3 text-gray-600 dark:text-slate-300 whitespace-nowrap" dir="ltr">
+                              {fmtDateAr(r.return_date)}
+                            </td>
+                            <td className="px-5 py-3">
+                              {r.resolved ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
+                                  bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300
+                                  border border-emerald-200 dark:border-emerald-700/50">
+                                  قابل للتصحيح
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
+                                  bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300
+                                  border border-red-200 dark:border-red-700/50">
+                                  غير مطابَق
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="mt-4 text-xs text-gray-400 dark:text-slate-500 leading-relaxed">
+                    «قابل للتصحيح»: المرتجع يطابق منتجاً معروفاً — أضِف الكمية الناقصة عبر «تسجيل مرتجع يدوي»
+                    أو بتعديل رصيد المنتج. «غير مطابَق»: لم نستطع ربطه بمنتج — يحتاج مراجعة يدوية.
+                  </p>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
