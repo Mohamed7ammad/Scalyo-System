@@ -757,7 +757,10 @@ export default function StaffPage() {
                       const commission = toN(agent.earned_commission);
                       const ndrFlagged = ndr !== null && ndr > 25;
                       const cPct = pct(confirmed, total), nPct = pct(noAns + postponed, total), xPct = pct(cancelled, total);
-                      const dPct = pct(delivered, total), rPct = pct(returned, total);   // delivered / returned share of cohort
+                      // Deliveries/Returns % are measured against CONFIRMED orders
+                      // (the only ones sent to shipping), NOT total assigned.
+                      // pct() returns 0 when the denominator is 0 (confirm === 0).
+                      const dPct = pct(delivered, confirmed), rPct = pct(returned, confirmed);
                       const isExpanded = expandedAgentId === agent.agent_id;
 
                       /* ── accordion content helpers ── */
@@ -840,10 +843,10 @@ export default function StaffPage() {
                               </span>
                               <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-md tabular-nums shrink-0
                                 ${delivered>0?'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400':'text-slate-300 dark:text-slate-700'}`}>
-                                {total===0?'—':`${dPct}%`}
+                                {confirmed===0?'—':`${dPct}%`}
                               </span>
                             </div>
-                            {total>0 && <Bar value={dPct} color="emerald"/>}
+                            {confirmed>0 && <Bar value={dPct} color="emerald"/>}
                           </td>
 
                           {/* ── Returns (المرتجعات) — count + % of cohort, with NDR flag ── */}
@@ -857,10 +860,10 @@ export default function StaffPage() {
                                 ${ndrFlagged?'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
                                   :returned>0?'bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
                                   :'text-slate-300 dark:text-slate-700'}`}>
-                                {total===0?'—':`${rPct}%`}
+                                {confirmed===0?'—':`${rPct}%`}
                               </span>
                             </div>
-                            {total>0 && <Bar value={rPct} color={ndrFlagged?'red':'amber'}/>}
+                            {confirmed>0 && <Bar value={rPct} color={ndrFlagged?'red':'amber'}/>}
                             {ndr!==null && (
                               <span className="block text-[9px] text-slate-400 dark:text-slate-600 mt-1 tabular-nums">
                                 NDR {ndr}% · {delivered+returned} وصل
