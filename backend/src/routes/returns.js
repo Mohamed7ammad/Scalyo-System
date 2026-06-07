@@ -128,4 +128,101 @@ router.post('/manual', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+/* ── GET /api/returns/reconciliation ─────────────────────────────────────────
+   Admin-only. Surfaces returns that were LOGGED (product_returns, order-linked)
+   but whose units were never added back to stock because of the old SKU-first
+   restock matching bug (a sku that was actually a campaign alias, or a name with
+   case/spacing drift, matched 0 product rows → logged but not restocked).
+
+   For each order-linked return we compare:
+     • OLD logic (what actually ran): sku-first EXACT (no fallback); if no sku,
+       EXACT name. This decides whether stock was incremented at the time.
+     • NEW logic (alias-aware): match sku OR name against product sku/name/aliases
+       (case-insensitive, trimmed). This tells us the real product to top up.
+   A discrepancy = NEW resolves a product but OLD did not → those units are
+   missing from that product's stock. Rows that resolve to no product at all are
+   reported separately as "unresolved" so the admin can investigate.
+
+   Optional query: ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD (defaults: all time).
+   Response: { totalMissingQty, affectedProducts, rows: [ { product_name, sku,
+              missing_qty, return_date, resolved } ] }                          */
+router.get('/reconciliation', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  const { startDate, endDate } = req.query;
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  if (startDate && !dateRe.test(startDate)) return res.status(400).json({ error: 'صيغة startDate غير صحيحة' });
+  if (endDate   && !dateRe.test(endDate))   return res.status(400).json({ error: 'صيغة endDate غير صحيحة' });
+
+  const norm = (s) => String(s ?? '').trim().toLowerCase();
+
+  try {
+    // 1. Catalog for this tenant.
+    const { rows: products } = await pool.query(
+      'SELECT id, name, sku, COALESCE(aliases, \'{}\'::text[]) AS aliases FROM products WHERE business_id = $1',
+      [businessId]
+    );
+
+    // 2. Order-linked physical returns (manual returns have order_id IS NULL and
+    //    were restocked atomically by id, so they're excluded).
+    const params = [businessId];
+    let where = 'business_id = $1 AND order_id IS NOT NULL';
+    if (startDate) { params.push(startDate); where += ` AND return_date >= $${params.length}`; }
+    if (endDate)   { params.push(endDate);   where += ` AND return_date <= $${params.length}`; }
+    const { rows: returns } = await pool.query(
+      `SELECT product_name, sku, quantity, return_date FROM product_returns WHERE ${where}`,
+      params
+    );
+
+    // Pre-index products for matching.
+    const oldMatchesSku  = (sku)  => products.some((p) => p.sku === sku);                       // OLD: exact, case-sensitive
+    const oldMatchesName = (name) => products.some((p) => String(p.name).trim() === String(name).trim());
+    const resolveNew = (sku, name) => {
+      const skuKey = norm(sku), nameKey = norm(name);
+      let best = null, bestRank = 99;
+      for (const p of products) {
+        let rank = 99;
+        if (skuKey && norm(p.sku) === skuKey) rank = 1;
+        else if (nameKey && norm(p.name) === nameKey) rank = 2;
+        else if (p.aliases.some((a) => { const k = norm(a); return (skuKey && k === skuKey) || (nameKey && k === nameKey); })) rank = 3;
+        if (rank < bestRank) { bestRank = rank; best = p; }
+      }
+      return best;
+    };
+
+    // 3. Find discrepancies, aggregate by (product, date).
+    const agg = new Map();   // key → { product_name, sku, return_date, missing_qty, resolved }
+    for (const r of returns) {
+      const sku = r.sku ? String(r.sku).trim() : '';
+      const name = r.product_name || '';
+      const oldMatched = sku ? oldMatchesSku(sku) : oldMatchesName(name);
+      if (oldMatched) continue;   // stock was correctly incremented at the time
+
+      const prod = resolveNew(sku, name);
+      const dateStr = r.return_date instanceof Date ? r.return_date.toISOString().slice(0, 10) : String(r.return_date);
+      const displayName = prod ? prod.name : (name || '—');
+      const displaySku  = prod ? (prod.sku || '') : sku;
+      const key = `${prod ? prod.id : 'unresolved:' + norm(name)}|${dateStr}`;
+      const hit = agg.get(key);
+      if (hit) hit.missing_qty += r.quantity;
+      else agg.set(key, {
+        product_name: displayName,
+        sku:          displaySku,
+        return_date:  dateStr,
+        missing_qty:  r.quantity,
+        resolved:     Boolean(prod),
+      });
+    }
+
+    const rows = Array.from(agg.values())
+      .sort((a, b) => (a.return_date < b.return_date ? 1 : a.return_date > b.return_date ? -1 : b.missing_qty - a.missing_qty));
+    const totalMissingQty  = rows.reduce((s, r) => s + r.missing_qty, 0);
+    const affectedProducts = new Set(rows.map((r) => r.product_name)).size;
+
+    res.json({ totalMissingQty, affectedProducts, rows });
+  } catch (err) {
+    console.error('[Returns] /reconciliation error:', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
 module.exports = router;
