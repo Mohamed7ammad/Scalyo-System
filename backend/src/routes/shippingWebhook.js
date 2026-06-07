@@ -19,7 +19,8 @@ const router = express.Router();
    │   delivered_to_merchant      │                                          │
    │ out_for_delivery             │ Order status only                        │
    │ returning_to_merchant        │ Order status only — parcel still in transit│
-   │ cancelled                    │ Order status only                        │
+   │ cancelled / canceled /       │ → 'جاري الإعادة' (RTO): leaves in-transit, │
+   │   terminated                 │   restock deferred to physical 'returned' │
    │ (any unmapped status)        │ Log only — order row untouched           │
    └──────────────────────────────┴──────────────────────────────────────────┘
 
@@ -53,7 +54,14 @@ const FINAL_RETURN_STATUSES = new Set(['returned', 'delivered_to_merchant']);
 const BOSTA_TO_ORDER_STATUS = {
   'out_for_delivery':      'تم الشحن',
   'delivered':             'تم التوصيل',
-  'cancelled':             'تم الرفض',
+  // Bosta only emits webhooks for parcels already in its system (i.e. dispatched),
+  // so a 'cancelled'/'canceled'/'terminated' event is a SHIPPED parcel being killed
+  // → it is return-bound (RTO), NOT a pre-ship rejection. Map it to the in-transit
+  // return leg so it (a) leaves "قيد التوصيل"/in-transit immediately and counts
+  // toward returns/NDR, and (b) restocks ONLY once it is physically received
+  // (code 46 / 'returned'), never prematurely. Was 'تم الرفض', which stranded the
+  // parcel outside the return pipeline and never restored its deducted stock.
+  'cancelled':             'جاري الإعادة',   // RTO in transit back — NO stock change yet
   'returning_to_merchant': 'جاري الإعادة',   // in transit back — NO stock change
   'returned':              'تم الإرجاع',     // physically received → triggers stock+N
   'delivered_to_merchant': 'تم الإرجاع',     // alternate Bosta field for same event
