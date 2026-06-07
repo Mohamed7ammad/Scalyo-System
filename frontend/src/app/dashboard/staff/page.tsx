@@ -762,6 +762,9 @@ export default function StaffPage() {
                       // pct() returns 0 when the denominator is 0 (confirm === 0).
                       const dPct = pct(delivered, confirmed), rPct = pct(returned, confirmed);
                       const isExpanded = expandedAgentId === agent.agent_id;
+                      // Synthetic "غير محدد" bucket (orphaned / admin-assigned orders)
+                      // — a summary row, not a real person: no commission/payout actions.
+                      const isUnassigned = agent.agent_email === 'unassigned@system';
 
                       /* ── accordion content helpers ── */
                       const cc = toN(agent.comm_confirmed), cd = toN(agent.comm_delivered);
@@ -782,7 +785,7 @@ export default function StaffPage() {
                         <React.Fragment key={agent.agent_id}>
                         <tr
                           className={`transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40 ${ndrFlagged?'bg-red-50/60 dark:bg-red-950/20':''} ${isExpanded?'border-b-0':''}`}>
-                          <td className="px-4 py-3.5"><div className="flex justify-center"><Rank n={i+1}/></div></td>
+                          <td className="px-4 py-3.5"><div className="flex justify-center">{isUnassigned ? <span className="text-slate-300 dark:text-slate-700 text-base leading-none">•</span> : <Rank n={i+1}/>}</div></td>
                           <td
                             className="px-4 py-3.5 cursor-pointer group/nameCell hover:bg-indigo-50/60 dark:hover:bg-indigo-950/20 transition-colors select-none"
                             onClick={() => setExpandedAgentId(isExpanded ? null : agent.agent_id)}
@@ -790,7 +793,8 @@ export default function StaffPage() {
                           >
                             <div className="flex items-center gap-2.5">
                               <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-bold
-                                ${i===0?'bg-amber-100 text-amber-700 ring-2 ring-amber-300 dark:bg-amber-900/40 dark:text-amber-400 dark:ring-amber-700'
+                                ${isUnassigned?'bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500'
+                                :i===0?'bg-amber-100 text-amber-700 ring-2 ring-amber-300 dark:bg-amber-900/40 dark:text-amber-400 dark:ring-amber-700'
                                 :i===1?'bg-slate-200 text-slate-600 ring-2 ring-slate-300 dark:bg-slate-700 dark:text-slate-300 dark:ring-slate-600'
                                 :i===2?'bg-orange-100 text-orange-700 ring-2 ring-orange-300 dark:bg-orange-900/40 dark:text-orange-400 dark:ring-orange-700'
                                 :'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400'}`}>
@@ -805,7 +809,7 @@ export default function StaffPage() {
                                   {!agent.is_active && <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-600">غير نشط</span>}
                                 </div>
                                 <p className="text-[11px] text-slate-400 dark:text-slate-600 truncate max-w-[160px] flex items-center gap-1">
-                                  {agent.agent_email}
+                                  {isUnassigned ? 'طلبات غير مُسندة لموظف' : agent.agent_email}
                                   <svg className={`w-2.5 h-2.5 shrink-0 transition-transform duration-200 ${isExpanded?'rotate-180 opacity-60':'opacity-0 group-hover/nameCell:opacity-40'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/>
                                   </svg>
@@ -871,20 +875,24 @@ export default function StaffPage() {
                             {confirmed>0 && <Bar value={rPct} color={ndrFlagged?'red':'amber'}/>}
                           </td>
 
-                          {/* ── Commission settings button ── */}
+                          {/* ── Commission settings button (not for the synthetic row) ── */}
                           <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
-                            <button
-                              onClick={() => openCommModal(agent)}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium
-                                text-amber-700 dark:text-amber-400
-                                bg-amber-50 dark:bg-amber-900/20
-                                border border-amber-200 dark:border-amber-700/50
-                                hover:bg-amber-100 dark:hover:bg-amber-900/40
-                                transition-all whitespace-nowrap"
-                            >
-                              <span>⚙️</span>
-                              إعدادات العمولة
-                            </button>
+                            {isUnassigned ? (
+                              <span className="text-xs text-slate-300 dark:text-slate-700">—</span>
+                            ) : (
+                              <button
+                                onClick={() => openCommModal(agent)}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium
+                                  text-amber-700 dark:text-amber-400
+                                  bg-amber-50 dark:bg-amber-900/20
+                                  border border-amber-200 dark:border-amber-700/50
+                                  hover:bg-amber-100 dark:hover:bg-amber-900/40
+                                  transition-all whitespace-nowrap"
+                              >
+                                <span>⚙️</span>
+                                إعدادات العمولة
+                              </button>
+                            )}
                           </td>
 
                           {/* ── Commission earned (matrix math) ── */}
@@ -912,7 +920,9 @@ export default function StaffPage() {
 
                           {/* ── Global Outstanding Balance + Payout (Employee Ledger) ── */}
                           <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
-                            {(() => {
+                            {isUnassigned ? (
+                              <span className="text-xs text-slate-300 dark:text-slate-700">—</span>
+                            ) : (() => {
                               const lifetime    = toN(agent.lifetime_commission);
                               const paid        = toN(agent.total_paid);
                               const outstanding = toN(agent.outstanding_balance);
