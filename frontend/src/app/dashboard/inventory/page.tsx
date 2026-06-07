@@ -34,7 +34,7 @@
  * ════════════════════════════════════════════════════════════════════
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getProducts, createProduct, updateProduct, deleteProduct, postPurchase,
@@ -59,10 +59,10 @@ type FormState = {
   name: string; sku: string;
   cost_price: string; selling_price: string;
   stock_quantity: string; image_url: string;
-  aliases: string;   // comma-separated in the UI; parsed to string[] on save
+  aliases: string[];   // tags/chips in the UI — matches backend aliases text[]
 };
 const EMPTY_FORM: FormState = {
-  name: '', sku: '', cost_price: '', selling_price: '', stock_quantity: '', image_url: '', aliases: '',
+  name: '', sku: '', cost_price: '', selling_price: '', stock_quantity: '', image_url: '', aliases: [],
 };
 
 type PurchaseFormState = {
@@ -179,6 +179,7 @@ export default function InventoryPage() {
   const [showModal,     setShowModal]     = useState(false);
   const [editTarget,    setEditTarget]    = useState<Product | null>(null);
   const [form,          setForm]          = useState<FormState>(EMPTY_FORM);
+  const [aliasInput,    setAliasInput]    = useState('');   // in-progress chip text
   const [saving,        setSaving]        = useState(false);
   const [formError,     setFormError]     = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState<Product | null>(null);
@@ -237,6 +238,7 @@ export default function InventoryPage() {
   const openAdd = () => {
     setEditTarget(null);
     setForm(EMPTY_FORM);
+    setAliasInput('');
     setFormError('');
     setShowModal(true);
   };
@@ -250,13 +252,53 @@ export default function InventoryPage() {
       selling_price:  String(parseN(p.selling_price)),
       stock_quantity: String(p.stock_quantity),
       image_url:      p.image_url ?? '',
-      aliases:        Array.isArray(p.aliases) ? p.aliases.join(', ') : '',
+      aliases:        Array.isArray(p.aliases) ? p.aliases : [],
     });
+    setAliasInput('');
     setFormError('');
     setShowModal(true);
   };
 
-  const closeModal = () => { setShowModal(false); setEditTarget(null); };
+  const closeModal = () => { setShowModal(false); setEditTarget(null); setAliasInput(''); };
+
+  /* ── Aliases tag/chip input helpers ───────────────────────────────────────
+     Aliases are kept as a string[] (matches the backend text[]). Typing an SKU
+     and pressing Enter or comma commits it as a chip. Empty/duplicate (case-
+     insensitive) entries are rejected. Backspace on an empty input removes the
+     last chip. */
+  const addAlias = (raw: string) => {
+    const v = raw.trim();
+    if (!v) return;
+    setForm((p) =>
+      p.aliases.some((a) => a.toLowerCase() === v.toLowerCase())
+        ? p                                   // duplicate — ignore
+        : { ...p, aliases: [...p.aliases, v] },
+    );
+    setAliasInput('');
+  };
+
+  const removeAlias = (idx: number) =>
+    setForm((p) => ({ ...p, aliases: p.aliases.filter((_, i) => i !== idx) }));
+
+  const onAliasKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      addAlias(aliasInput);
+    } else if (e.key === 'Backspace' && !aliasInput && form.aliases.length) {
+      removeAlias(form.aliases.length - 1);
+    }
+  };
+
+  // Support pasting "sku1, sku2, sku3" — split on comma, commit each.
+  const onAliasChange = (val: string) => {
+    if (val.includes(',')) {
+      const parts = val.split(',');
+      parts.slice(0, -1).forEach((t) => addAlias(t));
+      setAliasInput(parts[parts.length - 1]);
+    } else {
+      setAliasInput(val);
+    }
+  };
 
   /* ── Purchase modal helpers ───────────────────────────────────────────── */
   const openPurchase = () => {
@@ -303,6 +345,20 @@ export default function InventoryPage() {
     if (!form.name.trim())  { setFormError('اسم المنتج مطلوب');   return; }
     if (!form.sku.trim())   { setFormError('SKU مطلوب');           return; }
 
+    // Aliases come from the chip array; also commit any text still in the input
+    // box (user typed an SKU but didn't press Enter). Trim, drop empties, and
+    // de-dupe case-insensitively (keeping the first-entered casing).
+    const aliasSeen = new Set<string>();
+    const aliases = [...form.aliases, aliasInput]
+      .map((a) => a.trim())
+      .filter(Boolean)
+      .filter((a) => {
+        const k = a.toLowerCase();
+        if (aliasSeen.has(k)) return false;
+        aliasSeen.add(k);
+        return true;
+      });
+
     const payload: ProductPayload = {
       name:           form.name.trim(),
       sku:            form.sku.trim().toUpperCase(),
@@ -310,10 +366,7 @@ export default function InventoryPage() {
       selling_price:  parseN(form.selling_price),
       stock_quantity: Math.max(0, Math.round(parseN(form.stock_quantity))),
       image_url:      form.image_url.trim() || null,
-      // Parse the comma-separated aliases textbox → trimmed, de-duped array.
-      aliases:        [...new Set(
-        form.aliases.split(',').map((a) => a.trim()).filter(Boolean)
-      )],
+      aliases,
     };
 
     setSaving(true);
@@ -841,18 +894,55 @@ export default function InventoryPage() {
               />
             </Field>
 
-            {/* Campaign aliases (SKU mapping) */}
+            {/* Campaign aliases (SKU mapping) — tag/chip input */}
             <Field label="أكواد الحملات (Aliases)">
-              <input
-                type="text" dir="ltr"
-                value={form.aliases}
-                onChange={(e) => setForm((p) => ({ ...p, aliases: e.target.value }))}
-                placeholder="ipl, laser-ad, heating-Pad"
-                className={inputCls}
-              />
+              <div
+                dir="ltr"
+                onClick={(e) => (e.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}
+                className={`flex flex-wrap items-center gap-1.5 cursor-text
+                  w-full px-2 py-2 rounded-xl text-sm transition
+                  border border-slate-300 dark:border-slate-700
+                  bg-white dark:bg-slate-800
+                  focus-within:ring-2 focus-within:ring-indigo-400 focus-within:border-transparent`}
+              >
+                {form.aliases.map((a, idx) => (
+                  <span
+                    key={`${a}-${idx}`}
+                    className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md
+                      text-xs font-medium
+                      bg-indigo-100 text-indigo-700
+                      dark:bg-indigo-500/20 dark:text-indigo-300"
+                  >
+                    {a}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); removeAlias(idx); }}
+                      aria-label={`إزالة ${a}`}
+                      className="inline-flex items-center justify-center w-4 h-4 rounded
+                        text-indigo-500 hover:text-white hover:bg-indigo-500
+                        dark:text-indigo-300 dark:hover:bg-indigo-500 transition"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </span>
+                ))}
+                <input
+                  type="text"
+                  value={aliasInput}
+                  onChange={(e) => onAliasChange(e.target.value)}
+                  onKeyDown={onAliasKeyDown}
+                  onBlur={() => addAlias(aliasInput)}
+                  placeholder={form.aliases.length ? '' : 'ipl, laser-ad, heating-Pad'}
+                  className="flex-1 min-w-[8rem] bg-transparent outline-none
+                    text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600"
+                />
+              </div>
               <p className="mt-1 text-xs text-gray-400 dark:text-slate-500" dir="rtl">
-                أكواد بديلة (مفصولة بفاصلة) يستخدمها الميديا باير في إعلانات Meta / إيزي أوردر.
-                أي طلب يصل بأحد هذه الأكواد سيُطابق هذا المنتج لخصم/إرجاع المخزون تلقائياً.
+                اكتب الكود واضغط Enter أو فاصلة (،) لإضافته كوسم. أكواد بديلة يستخدمها
+                الميديا باير في إعلانات Meta / إيزي أوردر — أي طلب يصل بأحد هذه الأكواد
+                سيُطابق هذا المنتج لخصم/إرجاع المخزون تلقائياً.
               </p>
             </Field>
 
