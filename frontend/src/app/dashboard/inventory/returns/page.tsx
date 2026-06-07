@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   getDailyReturns, postManualReturn, syncBostaReturns,
   getProducts, Product, DailyReturn,
-  getReturnsReconciliation, ReconciliationReport,
+  getReturnsReconciliation, ReconciliationReport, ReconciliationRow, reconcileFix,
 } from '@/lib/api';
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -33,6 +33,8 @@ export default function ReturnsPage() {
   const [reconLoading, setReconLoading] = useState(false);
   const [reconData,    setReconData]    = useState<ReconciliationReport | null>(null);
   const [reconError,   setReconError]   = useState<string | null>(null);
+  // Per-row auto-fix status, keyed by `${product_id}|${return_date}`.
+  const [fixState,     setFixState]     = useState<Record<string, 'saving' | 'done' | 'error'>>({});
 
   /* ── Bosta returns-sync modal state ──────────────────────────────────── */
   const [syncOpen,    setSyncOpen]    = useState(false);
@@ -67,10 +69,13 @@ export default function ReturnsPage() {
   }, [router]);
 
   /* ── Reconciliation report — fetch on open ───────────────────────────── */
+  const fixKey = (r: ReconciliationRow) => `${r.product_id}|${r.return_date}`;
+
   const openRecon = useCallback(async () => {
     setReconOpen(true);
     setReconLoading(true);
     setReconError(null);
+    setFixState({});
     try {
       const { data } = await getReturnsReconciliation();
       setReconData(data);
@@ -82,6 +87,19 @@ export default function ReturnsPage() {
       setReconData(null);
     } finally {
       setReconLoading(false);
+    }
+  }, []);
+
+  /* ── Auto-correct one reconciliation row ─────────────────────────────── */
+  const handleFix = useCallback(async (row: ReconciliationRow) => {
+    if (!row.product_id) return;
+    const key = fixKey(row);
+    setFixState((s) => (s[key] === 'saving' || s[key] === 'done' ? s : { ...s, [key]: 'saving' }));
+    try {
+      await reconcileFix({ productId: row.product_id, returnDate: row.return_date });
+      setFixState((s) => ({ ...s, [key]: 'done' }));
+    } catch {
+      setFixState((s) => ({ ...s, [key]: 'error' }));
     }
   }, []);
 
@@ -1087,18 +1105,52 @@ export default function ReturnsPage() {
                               {fmtDateAr(r.return_date)}
                             </td>
                             <td className="px-5 py-3">
-                              {r.resolved ? (
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
-                                  bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300
-                                  border border-emerald-200 dark:border-emerald-700/50">
-                                  قابل للتصحيح
-                                </span>
-                              ) : (
+                              {!r.resolved ? (
                                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
                                   bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300
                                   border border-red-200 dark:border-red-700/50">
                                   غير مطابَق
                                 </span>
+                              ) : fixState[fixKey(r)] === 'done' ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
+                                  bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300
+                                  border border-emerald-200 dark:border-emerald-700/50">
+                                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                  تمت الإضافة
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={() => handleFix(r)}
+                                  disabled={fixState[fixKey(r)] === 'saving'}
+                                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold
+                                    transition disabled:cursor-not-allowed
+                                    ${fixState[fixKey(r)] === 'error'
+                                      ? 'bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60'
+                                      : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm shadow-emerald-500/30 disabled:opacity-60'}`}
+                                >
+                                  {fixState[fixKey(r)] === 'saving' ? (
+                                    <>
+                                      <div className="w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                                      جارٍ التصحيح…
+                                    </>
+                                  ) : fixState[fixKey(r)] === 'error' ? (
+                                    <>
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                      </svg>
+                                      إعادة المحاولة
+                                    </>
+                                  ) : (
+                                    <>
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                      </svg>
+                                      تصحيح الكمية
+                                    </>
+                                  )}
+                                </button>
                               )}
                             </td>
                           </tr>

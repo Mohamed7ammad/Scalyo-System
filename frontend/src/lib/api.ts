@@ -265,6 +265,7 @@ export const getDailyReturns = (date: string) =>
   api.get<DailyReturn[]>(`/api/returns/daily?date=${date}`);
 
 export interface ReconciliationRow {
+  product_id:   string | null;   // resolved catalog product (null when unresolved)
   product_name: string;
   sku:          string;
   missing_qty:  number;
@@ -285,6 +286,18 @@ export const getReturnsReconciliation = (params: { startDate?: string; endDate?:
   const qs = q.toString();
   return api.get<ReconciliationReport>(`/api/returns/reconciliation${qs ? `?${qs}` : ''}`);
 };
+
+export interface ReconcileFixResult {
+  ok:        boolean;
+  corrected: number;
+  newStock:  number;
+  product:   string;
+  message?:  string;
+}
+
+/** Admin-only. Auto-corrects one reconciliation row: tops up stock for a product/date. */
+export const reconcileFix = (payload: { productId: string; returnDate?: string }) =>
+  api.post<ReconcileFixResult>('/api/returns/reconcile-fix', payload);
 
 export interface ManualReturnPayload {
   productId:  string;
