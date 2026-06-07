@@ -865,18 +865,30 @@ router.get('/dashboard', authenticate, async (req, res) => {
          not a function of the selected date range (it still respects product/tenant
          scope via ordFilter).
 
-         GHOST GUARD: a parcel being processed for RETURN can linger at 'تم الشحن'
-         until reconciled, but Bosta zeroes its collectable COD ("بدون تحصيل") →
-         expected_cod = 0. So forward = Status='تم الشحن' AND Bosta hasn't zeroed the
-         COD (expected_cod NULL = not yet reported → treat as forward, fall back to
-         price). Cash uses the LIVE expected_cod when known, else (price − deposit). */
+         STRICT forecast — only money ACTIVELY moving toward the customer. A parcel
+         counts as forward ONLY when ALL hold:
+           • Status = 'تم الشحن'  (Ticket Created / Processing / Out-for-delivery —
+             our single forward status; returns are 'جاري الإعادة' / 'تم الإرجاع'),
+           • Bosta hasn't zeroed its COD — COALESCE(expected_cod,1) > 0 (a return-leg
+             "Processing" parcel reads بدون تحصيل = 0; NULL = not yet synced → forward),
+           • NOT in Bosta's "في انتظار متابعتك" action-required bucket
+             (bosta_action_required = FALSE) — exceptions are NOT moving forward, so
+             they are excluded even though they might eventually recover.
+         Cash = SUM of Bosta's LIVE expected_cod (the exact per-AWB collection,
+         already quantity-inclusive), falling back to (ProductPrice − deposit) — which
+         is itself the ORDER TOTAL (qty × unit baked in at creation; verified against
+         Bosta COD) — for genuinely-forward orders Bosta hasn't reported yet.        */
       COUNT(id) FILTER (
-        WHERE "Status" = 'تم الشحن' AND COALESCE("expected_cod"::numeric, 1) > 0
+        WHERE "Status" = 'تم الشحن'
+          AND COALESCE("expected_cod"::numeric, 1) > 0
+          AND NOT COALESCE("bosta_action_required", FALSE)
       )                                                                               AS in_transit_count,
       COALESCE(SUM(
         COALESCE("expected_cod"::numeric, GREATEST(${P} - ${DEP}, 0))
       ) FILTER (
-        WHERE "Status" = 'تم الشحن' AND COALESCE("expected_cod"::numeric, 1) > 0
+        WHERE "Status" = 'تم الشحن'
+          AND COALESCE("expected_cod"::numeric, 1) > 0
+          AND NOT COALESCE("bosta_action_required", FALSE)
       ), 0)                                                                           AS outstanding_cash
     FROM orders
     WHERE 1=1${ordFilter}
