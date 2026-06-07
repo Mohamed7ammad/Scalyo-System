@@ -32,7 +32,17 @@ const EGYPT_GOVERNORATES = [
 
 const getShortName = (name?: string) => {
   if (!name) return '';
-  return name.trim().split(/\s+/).slice(0, 3).join(' ');
+  // Drop brackets/punctuation (→ space) BEFORE taking the first 3 words, so a raw
+  // unlinked name like "[جهاز ليزر IPL]" collapses to the SAME short name as the
+  // clean inventory-linked "جهاز ليزر IPL". This keeps the product pill list
+  // deduped strictly by short name (price-agnostic) while staying short & clean,
+  // and keeps the filter, count, stock badge and inventory modal all in sync.
+  return name
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .slice(0, 3)
+    .join(' ');
 };
 
 /* Normalise an order status for comparison — guards against hidden whitespace
