@@ -251,6 +251,9 @@ router.post('/bulk', authenticate, async (req, res) => {
   }
 
   const normPhone = (v) => String(v ?? '').replace(/\D/g, '');
+  // Product normaliser — MUST mirror the SQL form below
+  // (LOWER(TRIM(collapse-whitespace))) so JS and DB composite keys match.
+  const normProd  = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
   const pick = (o, ...keys) => {
     for (const k of keys) {
       if (o[k] !== undefined && o[k] !== null && String(o[k]).trim() !== '') return String(o[k]).trim();
@@ -272,45 +275,60 @@ router.post('/bulk', authenticate, async (req, res) => {
       const phoneKey = normPhone(PhoneRaw);
       if (!phoneKey) { invalidCount++; continue; }   // no phone → cannot dedup/contact
       const FullName = pick(o, 'FullName', 'name', 'full_name', 'customer_name') || 'عميل جديد';
+      const ProductName = pick(o, 'ProductName', 'product_name', 'product', 'products') || null;
       candidates.push({
         FullName,
         Phone:        PhoneRaw,
         phoneKey,
+        prodKey:      normProd(ProductName),
         City:         pick(o, 'City', 'city', 'government', 'governorate') || null,
         Address:      pick(o, 'Address', 'address', 'shipping_address') || null,
-        ProductName:  pick(o, 'ProductName', 'product_name', 'product') || null,
+        ProductName,
         ProductPrice: pick(o, 'ProductPrice', 'price', 'total', 'amount') || null,
         Note:         pick(o, 'Note', 'notes', 'note', 'comment') || null,
       });
     }
 
-    /* 2. Collapse duplicates WITHIN the file (keep first per phone). */
+    /* 2. Collapse duplicates WITHIN the file using the COMPOSITE key
+       (phone + normalised product). A returning customer ordering a DIFFERENT
+       product in the same file is NOT a duplicate. */
+    const composite = (c) => `${c.phoneKey}|${c.prodKey}`;
     const batchSeen = new Set();
     const deduped = [];
     let duplicateCount = 0;
     for (const c of candidates) {
-      if (batchSeen.has(c.phoneKey)) { duplicateCount++; continue; }
-      batchSeen.add(c.phoneKey);
+      const key = composite(c);
+      if (batchSeen.has(key)) { duplicateCount++; continue; }
+      batchSeen.add(key);
       deduped.push(c);
     }
 
-    /* 3. One query → which of these phones already exist in the tenant. */
-    const phoneKeys = [...batchSeen];
-    let existing = new Set();
+    /* 3. One query → recent (phone + product) pairs that ALREADY exist in THIS
+       tenant within the last 3 days. STRICT tenant isolation: scoped by
+       business_id (this system's tenant id) so Merchant A's customers can never
+       block Merchant B's orders. The product is normalised identically to the JS
+       side (LOWER(TRIM(collapse-whitespace))) so the composite keys line up. */
+    const phoneKeys = [...new Set(deduped.map((c) => c.phoneKey))];
+    let recentPairs = new Set();
     if (phoneKeys.length) {
       const { rows } = await pool.query(
-        `SELECT DISTINCT regexp_replace("Phone", '[^0-9]', '', 'g') AS p
+        `SELECT DISTINCT
+                regexp_replace("Phone", '[^0-9]', '', 'g') AS p,
+                LOWER(TRIM(regexp_replace(COALESCE("ProductName", ''), '\\s+', ' ', 'g'))) AS prod
            FROM orders
           WHERE business_id = $1
+            AND "createdAt" >= NOW() - INTERVAL '3 days'
             AND regexp_replace("Phone", '[^0-9]', '', 'g') = ANY($2::text[])`,
         [businessId, phoneKeys]
       );
-      existing = new Set(rows.map((r) => r.p));
+      recentPairs = new Set(rows.map((r) => `${r.p}|${r.prod}`));
     }
 
-    /* 4. Keep only rows whose phone is NOT already in the system. */
-    const toInsert = deduped.filter((c) => !existing.has(c.phoneKey));
-    duplicateCount += deduped.length - toInsert.length;   // existing-phone skips
+    /* 4. A row is a duplicate ONLY IF the SAME phone+product was ordered in this
+       tenant WITHIN THE LAST 3 DAYS. Same phone + different product → new order;
+       same phone+product but older than 3 days → new order (returning customer). */
+    const toInsert = deduped.filter((c) => !recentPairs.has(composite(c)));
+    duplicateCount += deduped.length - toInsert.length;   // recent same-product skips
 
     /* 5. Bulk insert the new rows in a single statement. */
     let imported = [];
