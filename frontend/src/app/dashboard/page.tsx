@@ -707,9 +707,9 @@ export default function DashboardPage() {
           parsed.push({
             FullName:     pick(['fullname', 'full name', 'name', 'full_name', 'customer name', 'customer_name', 'الاسم الكامل', 'الاسم بالكامل', 'اسم العميل', 'الاسم']),
             Phone:        phone,
-            City:         pick(['city', 'المدينة', 'المحافظة']),
+            City:         pick(['city', 'government', 'governorate', 'المدينة', 'المحافظة']),
             Address:      pick(['address', 'العنوان']),
-            ProductName:  pick(['productname', 'product_name', 'product', 'المنتج']),
+            ProductName:  pick(['productname', 'product_name', 'product', 'products', 'المنتج']),
             ProductPrice: pick(['productprice', 'price', 'السعر', 'الاجمالي', 'الإجمالي']),
             Note:         pick(['note', 'notes', 'ملاحظة', 'ملاحظات']) || null,
           });
