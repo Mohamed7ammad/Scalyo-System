@@ -346,6 +346,80 @@ router.get('/agents', authenticate, requireAdmin, async (req, res) => {
       };
     });
 
+    /* ── Synthetic "غير محدد" (unassigned) bucket ───────────────────────────────
+       Captures every order in the period that does NOT belong to any role='agent'
+       user — AssignedTo NULL / empty, or assigned to an admin / media_buyer /
+       deleted user. The per-agent rows only cover agent-owned orders, so without
+       this bucket their sum is LESS than the dashboard (which counts ALL tenant
+       orders). Same metric definitions as a real agent; commission/ledger fields
+       are 0 (orphaned orders earn no agent commission). The NOT EXISTS check uses
+       the SAME normalised email match (LOWER+TRIM) and COALESCE so NULL/empty
+       AssignedTo is treated as unassigned. Date scope = same createdAt range. */
+    const unParams = [req.user.business_id];
+    let unRange = '';
+    if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      unParams.push(`${startDate}T00:00:00${getEgyptOffset(startDate)}`);
+      unRange += ` AND o."createdAt" >= $${unParams.length}::timestamptz`;
+    }
+    if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      unParams.push(`${endDate}T23:59:59${getEgyptOffset(endDate)}`);
+      unRange += ` AND o."createdAt" <= $${unParams.length}::timestamptz`;
+    }
+    const unassignedSql = `
+      SELECT
+        COUNT(o.id)                                                       AS total_assigned,
+        COUNT(o.id) FILTER (WHERE o."Status" = 'جديد')                   AS status_new,
+        COUNT(o.id) FILTER (WHERE o."Status" = 'لا يرد')                AS status_no_answer,
+        COUNT(o.id) FILTER (WHERE o."Status" = 'مؤجل')                  AS status_postponed,
+        COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')              AS status_cancelled,
+        COUNT(o.id) FILTER (WHERE o."Status" IN (
+          'تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'
+        ))                                                                AS status_confirmed,
+        COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')            AS status_delivered,
+        COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع')) AS status_returned,
+        ROUND(
+          COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع'))::numeric
+          / NULLIF(COUNT(o.id) FILTER (WHERE o."Status" IN (
+              'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع')), 0) * 100, 1
+        )                                                                 AS ndr_pct
+      FROM orders o
+      WHERE o.business_id = $1::integer
+        AND NOT EXISTS (
+          SELECT 1 FROM users u
+           WHERE u.role = 'agent'
+             AND u.business_id = $1::integer
+             AND LOWER(TRIM(u.email)) = LOWER(TRIM(COALESCE(o."AssignedTo", '')))
+        )
+        ${unRange}
+    `;
+    const un = await pool.query(unassignedSql, unParams).catch((e) => {
+      console.warn('[analytics/agents] unassigned bucket unavailable:', e.message);
+      return { rows: [] };
+    });
+    const ur = un.rows[0];
+    if (ur && parseInt(ur.total_assigned, 10) > 0) {
+      merged.push({
+        agent_id:            'unassigned',
+        agent_name:          'غير محدد',
+        agent_email:         'unassigned@system',
+        is_active:           true,
+        comm_confirmed: 0, comm_delivered: 0, comm_rejected: 0, comm_no_answer: 0,
+        total_assigned:      ur.total_assigned,
+        status_new:          ur.status_new,
+        status_no_answer:    ur.status_no_answer,
+        status_postponed:    ur.status_postponed,
+        status_cancelled:    ur.status_cancelled,
+        status_confirmed:    ur.status_confirmed,
+        status_delivered:    ur.status_delivered,
+        status_returned:     ur.status_returned,
+        ndr_pct:             ur.ndr_pct,
+        earned_commission:   0,
+        lifetime_commission: 0,
+        total_paid:          0,
+        outstanding_balance: 0,
+      });
+    }
+
     res.json(merged);
   } catch (err) {
     console.error('[analytics/agents] SQL error:', err.message);
