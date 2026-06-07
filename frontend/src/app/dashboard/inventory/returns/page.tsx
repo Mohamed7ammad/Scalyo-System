@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getDailyReturns, postManualReturn, syncBostaReturns,
@@ -180,6 +180,20 @@ export default function ReturnsPage() {
   /* ── Derived totals ──────────────────────────────────────────────────── */
   const totalUnits = rows.reduce((s, r) => s + r.quantity, 0);
   const isToday    = date === todayISO();
+
+  /* ── Aggregated summary — total returned units per product ───────────────
+     Groups the currently displayed rows by SKU (falling back to product name),
+     summing ReturnedQuantity, sorted by most-returned first. */
+  const summary = useMemo(() => {
+    const map = new Map<string, { name: string; sku: string; qty: number }>();
+    for (const r of rows) {
+      const key = (r.sku || r.product_name || '').trim().toLowerCase() || '—';
+      const hit = map.get(key);
+      if (hit) hit.qty += r.quantity;
+      else map.set(key, { name: r.product_name || '—', sku: r.sku || '', qty: r.quantity });
+    }
+    return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
+  }, [rows]);
 
   /* ─────────────────────────────────────────────────────────────────────── */
   return (
@@ -442,6 +456,68 @@ export default function ReturnsPage() {
           }
         />
       </div>
+
+      {/* ── Aggregated summary (تجميعة المرتجعات) ──────────────────────────── */}
+      {!loading && !error && summary.length > 0 && (
+        <div className="mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <svg className="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-slate-200">
+              {isToday ? 'ملخص مرتجعات اليوم' : `ملخص مرتجعات ${fmtDateAr(date)}`}
+            </h2>
+            <span className="text-xs text-gray-400 dark:text-slate-500">
+              ({summary.length} {summary.length === 1 ? 'منتج' : 'منتجات'})
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {summary.map((s) => (
+              <div
+                key={s.sku || s.name}
+                className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200
+                  dark:border-slate-800 shadow-sm p-3.5 flex flex-col gap-2
+                  hover:border-indigo-200 dark:hover:border-indigo-800/60 transition-colors"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-100 dark:bg-indigo-900/40
+                    flex items-center justify-center shrink-0">
+                    <svg className="w-4 h-4 text-indigo-600 dark:text-indigo-400"
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                        d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                    </svg>
+                  </div>
+                  <span className="text-2xl font-bold leading-none text-indigo-700 dark:text-indigo-300">
+                    {s.qty}
+                  </span>
+                </div>
+
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-800 dark:text-slate-200 truncate"
+                    title={s.name}>
+                    {s.name}
+                  </p>
+                  <div className="flex items-center justify-between gap-2 mt-1">
+                    {s.sku ? (
+                      <span className="font-mono text-[10px] px-1.5 py-0.5 rounded
+                        bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400
+                        border border-gray-200 dark:border-slate-700 truncate" dir="ltr">
+                        {s.sku}
+                      </span>
+                    ) : <span />}
+                    <span className="text-[11px] text-gray-400 dark:text-slate-500 shrink-0">
+                      وحدة مرتجعة
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Table card ────────────────────────────────────────────────────── */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200
