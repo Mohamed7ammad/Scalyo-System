@@ -297,6 +297,16 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS expected_cod NUMERIC(12,
   .then(() => console.log('✅  Orders: expected_cod column ready'))
   .catch((err) => console.warn('⚠️   expected_cod migration skipped:', err.message));
 
+/* ── bosta_action_required — parcel is in Bosta's "في انتظار متابعتك" bucket ───
+   A delivery exception the merchant must act on (failed attempts, address issue…).
+   It is NOT actively moving toward the customer, so it is EXCLUDED from the
+   forecasting pipeline (in-transit count + outstanding cash). Maintained as a live
+   mirror by the hourly Bosta reconciliation; cleared automatically when the parcel
+   recovers (back to a forward state) or leaves 'تم الشحن'. */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bosta_action_required BOOLEAN NOT NULL DEFAULT FALSE`)
+  .then(() => console.log('✅  Orders: bosta_action_required column ready'))
+  .catch((err) => console.warn('⚠️   bosta_action_required migration skipped:', err.message));
+
 /* ── product_returns table ─────────────────────────────────────────────── */
 pool.query(`
   CREATE TABLE IF NOT EXISTS product_returns (

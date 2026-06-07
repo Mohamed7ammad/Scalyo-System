@@ -1078,12 +1078,24 @@ async function reconcileInTransitOrders(businessId) {
   const returning = await fetchBucket(RETURNING_STATE_CODES);
   const actionReq = await fetchBucket(ACTION_REQUIRED_STATE_CODES);
 
-  let reclassified = 0, codUpdated = 0;
+  let reclassified = 0, codUpdated = 0, flagged = 0, unflagged = 0;
 
-  /* 1 — definitive return leg → leave the forward pipeline. */
+  /* 0 — clear the action-required flag on every forward order first, so a parcel
+         that has SINCE moved out of "في انتظار متابعتك" (e.g. rescheduled and now
+         out for delivery) is re-included in the forecast. The bucket pass below
+         re-flags whoever is still stuck. Keeps the flag a fresh live mirror. */
+  const clr = await pool.query(
+    `UPDATE orders SET bosta_action_required = FALSE
+      WHERE business_id = $1 AND "Status" = 'تم الشحن' AND bosta_action_required = TRUE`,
+    [businessId]
+  );
+  unflagged = clr.rowCount || 0;
+
+  /* 1 — definitive return leg → leave the forward pipeline entirely. */
   if (returning.size) {
     const r = await pool.query(
-      `UPDATE orders SET "Status" = 'جاري الإعادة', expected_cod = 0, "updatedAt" = NOW()
+      `UPDATE orders SET "Status" = 'جاري الإعادة', expected_cod = 0,
+                         bosta_action_required = FALSE, "updatedAt" = NOW()
         WHERE business_id = $1 AND "Status" = 'تم الشحن'
           AND "BostaTrackingCode" = ANY($2)`,
       [businessId, [...returning.keys()]]
@@ -1091,22 +1103,28 @@ async function reconcileInTransitOrders(businessId) {
     reclassified = r.rowCount || 0;
   }
 
-  /* 2 — exceptions still in the field → just sync Bosta's live COD (so any parcel
-         Bosta has already zeroed stops counting as outstanding cash). */
+  /* 2 — "في انتظار متابعتك" (action required): EXCLUDE from the forecast — these are
+         NOT actively moving toward the customer. Flag them (so analytics drops them)
+         AND sync Bosta's live COD for accuracy. They keep Status='تم الشحن' (an
+         exception may still recover) but the flag keeps them out of the pipeline. */
   for (const [tn, cod] of actionReq.entries()) {
     const r = await pool.query(
-      `UPDATE orders SET expected_cod = $1
+      `UPDATE orders SET expected_cod = $1, bosta_action_required = TRUE
         WHERE business_id = $2 AND "Status" = 'تم الشحن' AND "BostaTrackingCode" = $3`,
       [cod, businessId, tn]
     );
-    codUpdated += r.rowCount || 0;
+    if (r.rowCount) { codUpdated += r.rowCount; flagged += r.rowCount; }
   }
 
   console.log(
     `[bosta/reconcile] tenant ${businessId}: ${reclassified} → 'جاري الإعادة', ` +
+    `${flagged} flagged action-required (excluded), ${unflagged} re-included, ` +
     `${codUpdated} expected_cod synced (buckets: returning ${returning.size}, action ${actionReq.size})`
   );
-  return { reclassified, codUpdated, returningBucket: returning.size, actionBucket: actionReq.size };
+  return {
+    reclassified, codUpdated, flagged, unflagged,
+    returningBucket: returning.size, actionBucket: actionReq.size,
+  };
 }
 
 module.exports = router;
