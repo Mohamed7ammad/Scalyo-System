@@ -415,7 +415,8 @@ export default function StaffPage() {
     { assigned:0, confirmed:0, delivered:0, commission:0 }
   );
   const avgConfirmRate = pct(aTotals.confirmed, aTotals.assigned);
-  const flagged        = ranked.filter(a => toN(a.ndr_pct) > 25).length;
+  // "Under monitoring" = return rate (returned ÷ confirmed) over 40%.
+  const flagged        = ranked.filter(a => pct(toN(a.status_returned), toN(a.status_confirmed)) > 40).length;
 
   /* ─────────────────────────────────────────────────────────────
      Render
@@ -714,7 +715,7 @@ export default function StaffPage() {
               icon={<svg className="w-5 h-5 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}/>
             <KpiCard label="إجمالي العمولات" value={fmtMoney(aTotals.commission)} sub={`${aTotals.delivered.toLocaleString()} توصيل مكتمل`} accent="amber"
               icon={<svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}/>
-            <KpiCard label="تحت المراقبة (NDR>25%)" value={flagged===0?'لا أحد ✓':`${flagged} موظف`} sub={flagged>0?'يستوجب المراجعة الفورية':'جميع المعدلات طبيعية'} accent={flagged>0?'red':'slate'}
+            <KpiCard label="تحت المراقبة (المرتجعات > 40%)" value={flagged===0?'لا أحد ✓':`${flagged} موظف`} sub={flagged>0?'يستوجب المراجعة الفورية':'جميع المعدلات طبيعية'} accent={flagged>0?'red':'slate'}
               icon={<svg className={`w-5 h-5 ${flagged>0?'text-red-600 dark:text-red-400':'text-slate-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>}/>
           </div>
 
@@ -731,7 +732,7 @@ export default function StaffPage() {
               {flagged > 0 && (
                 <div className="flex items-center gap-2.5 px-5 py-3 bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-800/50 text-red-700 dark:text-red-400 text-xs font-medium">
                   <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-                  تنبيه: {flagged} موظف يتخطى معدل المرتجعات نسبة 25% — مؤشر محتمل لتأكيد طلبات وهمية. راجع السجلات فوراً.
+                  تنبيه: {flagged} موظف يتخطى معدل المرتجعات نسبة 40% — مؤشر محتمل لتأكيد طلبات وهمية. راجع السجلات فوراً.
                 </div>
               )}
               <div className="overflow-x-auto">
@@ -755,7 +756,8 @@ export default function StaffPage() {
                       const newOrd = toN(agent.status_new);
                       const ndr = agent.ndr_pct !== null ? parseFloat(agent.ndr_pct as string) : null;
                       const commission = toN(agent.earned_commission);
-                      const ndrFlagged = ndr !== null && ndr > 25;
+                      // Flag when the RETURN rate (returned ÷ confirmed) exceeds 40%.
+                      const ndrFlagged = pct(returned, confirmed) > 40;
                       const cPct = pct(confirmed, total), nPct = pct(noAns + postponed, total), xPct = pct(cancelled, total);
                       // Deliveries/Returns % are measured against CONFIRMED orders
                       // (the only ones sent to shipping), NOT total assigned.
