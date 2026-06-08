@@ -588,6 +588,26 @@ router.post('/bosta', async (req, res) => {
        so a Bosta event can never mutate another tenant's stock/treasury.   */
     const businessId  = order.business_id ?? null;
 
+    /* ── "بدون تحصيل" (COD zeroed) → return-bound ────────────────────────────
+       Bosta zeroes the collectable COD the instant a parcel is refused / cancelled
+       / RTO. If THIS event reports COD = 0 for an order that ACTUALLY had a COD to
+       collect (net forward COD = ProductPrice − deposit > 0) and the parcel is still
+       in a FORWARD state (maps to 'تم الشحن', or is an unmapped intermediate), it is
+       return-bound → force the in-transit return leg so it leaves "قيد التوصيل"
+       immediately and counts toward returns/NDR. The net-COD guard means genuinely
+       prepaid orders (COD 0 from the start) are never misread. No restock here — the
+       physical 'تم الإرجاع' event (code 46) restocks once the parcel arrives. */
+    const netForwardCod =
+      (parseFloat(String(order.ProductPrice ?? '').replace(/[^0-9.]/g, '')) || 0)
+      - (parseFloat(order.depositAmount) || 0);
+    const codZeroed = webhookCod !== null && webhookCod !== undefined && Number(webhookCod) === 0;
+    const mappedNow = BOSTA_TO_ORDER_STATUS[canonical];
+    const isForwardMapped = mappedNow === undefined || mappedNow === 'تم الشحن';
+    if (codZeroed && netForwardCod > 0 && isForwardMapped) {
+      console.log(`[Bosta Webhook] Order #${order.id} COD=0 (بدون تحصيل) on a COD order in forward state → forcing "returning_to_merchant"`);
+      canonical = 'returning_to_merchant';
+    }
+
     const newOrderStatus = BOSTA_TO_ORDER_STATUS[canonical];
 
     console.log(
