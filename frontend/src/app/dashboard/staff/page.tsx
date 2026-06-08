@@ -739,7 +739,7 @@ export default function StaffPage() {
                   <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
                     <tr>
                       {['#','الموظف','إجمالي','معدل التأكيد','عدم الرد','الرفض','تم التوصيل','المرتجعات','قيمة العمولة','عمولة الفترة','الرصيد المتبقي الإجمالي'].map(h => (
-                        <th key={h} className="px-4 py-3.5 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">{h}</th>
+                        <th key={h} className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -785,9 +785,9 @@ export default function StaffPage() {
                         <React.Fragment key={agent.agent_id}>
                         <tr
                           className={`transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40 ${ndrFlagged?'bg-red-50/60 dark:bg-red-950/20':''} ${isExpanded?'border-b-0':''}`}>
-                          <td className="px-4 py-3.5"><div className="flex justify-center">{isUnassigned ? <span className="text-slate-300 dark:text-slate-700 text-base leading-none">•</span> : <Rank n={i+1}/>}</div></td>
+                          <td className="px-4 py-2.5"><div className="flex justify-center">{isUnassigned ? <span className="text-slate-300 dark:text-slate-700 text-base leading-none">•</span> : <Rank n={i+1}/>}</div></td>
                           <td
-                            className="px-4 py-3.5 cursor-pointer group/nameCell hover:bg-indigo-50/60 dark:hover:bg-indigo-950/20 transition-colors select-none"
+                            className="px-4 py-2.5 cursor-pointer group/nameCell hover:bg-indigo-50/60 dark:hover:bg-indigo-950/20 transition-colors select-none"
                             onClick={() => setExpandedAgentId(isExpanded ? null : agent.agent_id)}
                             title={isExpanded ? 'إخفاء التفاصيل' : 'عرض التفاصيل'}
                           >
@@ -817,30 +817,30 @@ export default function StaffPage() {
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-3.5"><span className="text-base font-bold text-slate-800 dark:text-slate-200">{total.toLocaleString()}</span></td>
-                          <td className="px-4 py-3.5 min-w-[130px]">
-                            <div className="flex items-center justify-between gap-1 text-xs font-bold">
+                          <td className="px-4 py-2.5"><span className="text-base font-bold text-slate-800 dark:text-slate-200 tabular-nums">{total.toLocaleString()}</span></td>
+                          <td className="px-4 py-2.5 min-w-[130px]">
+                            <div className="flex items-center justify-between gap-1 text-xs font-bold tabular-nums whitespace-nowrap">
                               <span className={cPct>=60?'text-emerald-600 dark:text-emerald-400':cPct>=40?'text-amber-600 dark:text-amber-400':total===0?'text-slate-300 dark:text-slate-700':'text-red-500 dark:text-red-400'}>{total===0?'—':`${cPct}%`}</span>
                               <span className="text-[10px] text-slate-400 font-normal">{confirmed}</span>
                             </div>
                             {total>0 && <Bar value={cPct} color={cPct>=60?'emerald':cPct>=40?'amber':'red'}/>}
                           </td>
-                          <td className="px-4 py-3.5 min-w-[110px]">
-                            <div className="flex items-center justify-between gap-1 text-xs font-semibold">
+                          <td className="px-4 py-2.5 min-w-[110px]">
+                            <div className="flex items-center justify-between gap-1 text-xs font-semibold tabular-nums whitespace-nowrap">
                               <span className={nPct>40?'text-amber-600 dark:text-amber-400':'text-slate-600 dark:text-slate-400'}>{total===0?'—':`${nPct}%`}</span>
                               <span className="text-[10px] text-slate-400 font-normal">{noAns + postponed}</span>
                             </div>
                             {total>0 && <Bar value={nPct} color={nPct>40?'amber':'slate'}/>}
                           </td>
-                          <td className="px-4 py-3.5 min-w-[110px]">
-                            <div className="flex items-center justify-between gap-1 text-xs font-semibold">
+                          <td className="px-4 py-2.5 min-w-[110px]">
+                            <div className="flex items-center justify-between gap-1 text-xs font-semibold tabular-nums whitespace-nowrap">
                               <span className={xPct>30?'text-red-500 dark:text-red-400':'text-slate-600 dark:text-slate-400'}>{total===0?'—':`${xPct}%`}</span>
                               <span className="text-[10px] text-slate-400 font-normal">{cancelled}</span>
                             </div>
                             {total>0 && <Bar value={xPct} color={xPct>30?'red':'slate'}/>}
                           </td>
                           {/* ── Deliveries (تم التوصيل) — count + % of cohort ── */}
-                          <td className="px-4 py-3.5 min-w-[120px]">
+                          <td className="px-4 py-2.5 min-w-[120px]">
                             <div className="flex items-baseline justify-between gap-2">
                               <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap">
                                 {delivered.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
@@ -859,7 +859,7 @@ export default function StaffPage() {
                           </td>
 
                           {/* ── Returns (المرتجعات) — count + % of confirmed ── */}
-                          <td className="px-4 py-3.5 min-w-[120px]">
+                          <td className="px-4 py-2.5 min-w-[120px]">
                             <div className="flex items-baseline justify-between gap-2">
                               <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap flex items-center gap-1">
                                 {returned.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
@@ -876,27 +876,31 @@ export default function StaffPage() {
                           </td>
 
                           {/* ── Commission settings button (not for the synthetic row) ── */}
-                          <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
+                          <td className="px-4 py-2.5" onClick={e => e.stopPropagation()}>
                             {isUnassigned ? (
                               <span className="text-xs text-slate-300 dark:text-slate-700">—</span>
                             ) : (
                               <button
                                 onClick={() => openCommModal(agent)}
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium
+                                title="إعدادات العمولة"
+                                className="inline-flex w-fit items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium
                                   text-amber-700 dark:text-amber-400
                                   bg-amber-50 dark:bg-amber-900/20
                                   border border-amber-200 dark:border-amber-700/50
                                   hover:bg-amber-100 dark:hover:bg-amber-900/40
                                   transition-all whitespace-nowrap"
                               >
-                                <span>⚙️</span>
-                                إعدادات العمولة
+                                <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                </svg>
+                                إعدادات
                               </button>
                             )}
                           </td>
 
                           {/* ── Commission earned (matrix math) ── */}
-                          <td className="px-4 py-3.5">
+                          <td className="px-4 py-2.5">
                             {(() => {
                               const parts: string[] = [];
                               if (cc > 0) parts.push(`(${confirmed} تأكيد × ${cc})`);
@@ -919,7 +923,7 @@ export default function StaffPage() {
                           </td>
 
                           {/* ── Global Outstanding Balance + Payout (Employee Ledger) ── */}
-                          <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
+                          <td className="px-4 py-2.5" onClick={e => e.stopPropagation()}>
                             {isUnassigned ? (
                               <span className="text-xs text-slate-300 dark:text-slate-700">—</span>
                             ) : (() => {
