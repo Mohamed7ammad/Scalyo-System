@@ -1091,12 +1091,14 @@ async function reconcileInTransitOrders(businessId) {
   );
   unflagged = clr.rowCount || 0;
 
-  /* 1 — definitive return leg → leave the forward pipeline entirely. */
+  /* 1 — definitive return leg → leave the forward pipeline entirely. Covers both
+         'تم الشحن' AND 'تم التأكيد' (a parcel can be physically returning while our
+         status lagged at confirmed) so "قيد التوصيل" is kept pure. */
   if (returning.size) {
     const r = await pool.query(
       `UPDATE orders SET "Status" = 'جاري الإعادة', expected_cod = 0,
                          bosta_action_required = FALSE, "updatedAt" = NOW()
-        WHERE business_id = $1 AND "Status" = 'تم الشحن'
+        WHERE business_id = $1 AND "Status" IN ('تم الشحن', 'تم التأكيد')
           AND "BostaTrackingCode" = ANY($2)`,
       [businessId, [...returning.keys()]]
     );
