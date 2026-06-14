@@ -23,7 +23,7 @@ const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
-const { NETWORK_KEYS, AFFILIATE_KEYS } = require('../services/externalAffiliate');
+const { NETWORK_KEYS, AFFILIATE_KEYS, loadAffiliateCreds, fetchSafqaStats } = require('../services/externalAffiliate');
 const { runTaagerSync } = require('../services/taagerSync');
 
 const router = express.Router();
@@ -179,6 +179,38 @@ router.post('/taager/sync', authenticate, requireAdmin, requireAffiliatePlan, as
     const status = err.response?.status;
     console.error('[affiliate/taager/sync POST] Error:', status ? `HTTP ${status}` : '', err.message);
     res.status(502).json({ error: 'تعذّرت مزامنة الطلبات من تاجر — تحقق من التوكن والرابط' });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   POST /api/affiliate/safqa/test
+   REAL connection test — pings Safqa's official public API (api/v1/public/ +
+   api-safka-key header) with the tenant's SAVED creds and reports whether data
+   actually came back, instead of trusting that a token was merely stored.
+   ══════════════════════════════════════════════════════════════════════════ */
+router.post('/safqa/test', authenticate, requireAdmin, requireAffiliatePlan, async (req, res) => {
+  try {
+    const creds = await loadAffiliateCreds(req.user.business_id);
+    if (!creds.safqa.token && !creds.safqa.merchant) {
+      return res.status(400).json({ ok: false, error: 'لم يتم حفظ بيانات Safqa بعد' });
+    }
+    const stat = await fetchSafqaStats(creds.safqa.url, creds.safqa.merchant, creds.safqa.token);
+    if (stat.error) {
+      return res.status(502).json({
+        ok: false,
+        error: 'تعذّر الاتصال بـ Safqa — تحقق من المفتاح (api-safka-key) والرابط (api/v1/public)',
+        ...stat,
+      });
+    }
+    return res.json({
+      ok: true,
+      message: `تم الاتصال بنجاح — ${stat.orders} طلب، إيراد ${stat.revenue} ج.م`,
+      ...stat,
+    });
+  } catch (err) {
+    const status = err.response?.status;
+    console.error('[affiliate/safqa/test POST] Error:', status ? `HTTP ${status}` : '', err.message);
+    return res.status(502).json({ ok: false, error: 'تعذّر اختبار اتصال Safqa' });
   }
 });
 

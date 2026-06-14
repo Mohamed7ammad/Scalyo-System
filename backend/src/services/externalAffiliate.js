@@ -263,6 +263,28 @@ async function fetchTaagerProducts(apiUrl, merchantId, apiToken, { maxPages = TA
 const SAFQA_PAGE_SIZE = 100;   // orders requested per page
 const SAFQA_MAX_PAGES = 50;    // safety cap → up to 5,000 orders/tenant per refresh
 
+/* ── Safqa public-API base path ──────────────────────────────────────────────
+   Per Safqa's official docs ALL public endpoints live under `api/v1/public/`.
+   Merchants commonly paste only the host (or a path missing that segment), which
+   404s and returns ZERO data even though the token is valid. This normaliser
+   guarantees the request targets the public base while PRESERVING the host, the
+   resource path the merchant entered, and any query string. URLs already under
+   `api/v1/public/` are returned unchanged. */
+const SAFQA_PUBLIC_BASE = 'api/v1/public';
+function withSafqaPublicBase(rawUrl) {
+  const raw = (rawUrl || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try { parsed = new URL(raw.includes('://') ? raw : `https://${raw}`); }
+  catch { return raw; }   // not a parseable URL — hand back as-is
+  let path = parsed.pathname.replace(/^\/+|\/+$/g, '');     // strip surrounding slashes
+  if (!new RegExp(`^${SAFQA_PUBLIC_BASE}(/|$)`, 'i').test(path)) {
+    const resource = path || 'orders';                       // default resource when only a host was given
+    path = `${SAFQA_PUBLIC_BASE}/${resource}`;
+  }
+  return `${parsed.origin}/${path}${parsed.search || ''}`;
+}
+
 /* Where the array of orders may live in the response body. */
 const ORDERS_ARRAY_KEYS = ['data', 'orders', 'results', 'items', 'rows', 'list'];
 /* Per-order monetary field candidates (first numeric match wins). */
@@ -408,13 +430,14 @@ async function fetchSafqaStats(apiUrl, merchantId, apiToken) {
   /* Configured when we have at least an identifier or a token. */
   if (!merchantId && !apiToken) return emptyStat(false);
 
-  const baseUrl = (apiUrl || '').trim();
+  /* Force the official `api/v1/public/` base onto whatever the merchant saved. */
+  const baseUrl = withSafqaPublicBase(apiUrl);
   if (!baseUrl) {
     console.warn('[externalAffiliate] Safqa URL not configured for this tenant — skipping live fetch.');
     return { ...emptyStat(true), error: true };
   }
 
-  /* Official public-API auth: api-safka-key only. */
+  /* Official public-API auth: api-safka-key header ONLY (no Bearer, no cookies). */
   const headers = { Accept: 'application/json' };
   if (apiToken) headers['api-safka-key'] = apiToken;
 
@@ -544,4 +567,6 @@ module.exports = {
   getExternalAffiliateStats,
   fetchTaagerOrders,
   fetchTaagerProducts,
+  fetchSafqaStats,
+  withSafqaPublicBase,
 };
