@@ -263,26 +263,54 @@ async function fetchTaagerProducts(apiUrl, merchantId, apiToken, { maxPages = TA
 const SAFQA_PAGE_SIZE = 100;   // orders requested per page
 const SAFQA_MAX_PAGES = 50;    // safety cap → up to 5,000 orders/tenant per refresh
 
-/* ── Safqa public-API base path ──────────────────────────────────────────────
-   Per Safqa's official docs ALL public endpoints live under `api/v1/public/`.
-   Merchants commonly paste only the host (or a path missing that segment), which
-   404s and returns ZERO data even though the token is valid. This normaliser
-   guarantees the request targets the public base while PRESERVING the host, the
-   resource path the merchant entered, and any query string. URLs already under
-   `api/v1/public/` are returned unchanged. */
-const SAFQA_PUBLIC_BASE = 'api/v1/public';
+/* ── Safqa official public-API endpoint builder ──────────────────────────────
+   Per Safqa's docs (https://public-api-docs.safka-eg.com/) ALL public endpoints
+   live on the host `https://api.safka-eg.com` under the base path `api/v1/public/`,
+   authenticated with the `api-safka-key` header. The orders/profits list is
+   `api/v1/public/orders` (verified live: that path returns 401 "needs key", a
+   bogus path also 401s — the gateway authenticates every route).
+
+   Merchants paste this field inconsistently — a full URL, a bare host
+   ("api.safka-eg.com"), a RELATIVE path ("/api/v1/public"), just a resource
+   ("orders"), or nothing. This builder is bulletproof: it injects the official
+   HOST whenever one is missing, forces the `api/v1/public/` base, defaults the
+   resource to `orders`, and preserves an explicit host/resource/query when the
+   merchant supplied a complete URL. */
+const SAFQA_API_HOST     = 'https://api.safka-eg.com';   // official public-API host
+const SAFQA_PUBLIC_BASE  = 'api/v1/public';
+const SAFQA_DEFAULT_RES  = 'orders';
 function withSafqaPublicBase(rawUrl) {
   const raw = (rawUrl || '').trim();
-  if (!raw) return '';
-  let parsed;
-  try { parsed = new URL(raw.includes('://') ? raw : `https://${raw}`); }
-  catch { return raw; }   // not a parseable URL — hand back as-is
-  let path = parsed.pathname.replace(/^\/+|\/+$/g, '');     // strip surrounding slashes
-  if (!new RegExp(`^${SAFQA_PUBLIC_BASE}(/|$)`, 'i').test(path)) {
-    const resource = path || 'orders';                       // default resource when only a host was given
-    path = `${SAFQA_PUBLIC_BASE}/${resource}`;
+
+  let origin = SAFQA_API_HOST;   // default to the official host
+  let path   = '';
+  let search = '';
+
+  if (raw) {
+    const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);          // http(s)://…
+    const bareHost  = !hasScheme && /^[^/?#]+\.[^/?#]+/.test(raw);   // dot before first / ? #
+    if (hasScheme || bareHost) {
+      try {
+        const u = new URL(hasScheme ? raw : `https://${raw}`);
+        origin = u.origin; path = u.pathname; search = u.search;
+      } catch { origin = SAFQA_API_HOST; }     // unparseable → official host + default path
+    } else {
+      // Relative path ("/api/v1/public") or a bare resource ("orders") → keep the
+      // official host, use whatever path/query the merchant typed.
+      const q = raw.indexOf('?');
+      path   = q >= 0 ? raw.slice(0, q) : raw;
+      search = q >= 0 ? raw.slice(q)    : '';
+    }
   }
-  return `${parsed.origin}/${path}${parsed.search || ''}`;
+
+  path = path.replace(/^\/+|\/+$/g, '');                              // strip surrounding slashes
+  const underBase = new RegExp(`^${SAFQA_PUBLIC_BASE}(/|$)`, 'i').test(path);
+  if (!underBase) {
+    path = `${SAFQA_PUBLIC_BASE}/${path || SAFQA_DEFAULT_RES}`;       // inject base (+ default resource)
+  } else if (path.toLowerCase() === SAFQA_PUBLIC_BASE) {
+    path = `${SAFQA_PUBLIC_BASE}/${SAFQA_DEFAULT_RES}`;               // base given but NO resource → add it
+  }
+  return `${origin}/${path}${search}`;
 }
 
 /* Where the array of orders may live in the response body. */
