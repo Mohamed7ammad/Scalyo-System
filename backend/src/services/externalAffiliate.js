@@ -90,6 +90,133 @@ async function loadAffiliateCreds(businessId) {
   return { taager: pick('taager'), safqa: pick('safqa') };
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   SAFQA — WEBHOOK (PUSH) ARCHITECTURE
+   ────────────────────────────────────────────────────────────────────────────
+   Safqa's public API has NO GET orders/stats endpoint to pull from. It PUSHES
+   real-time order updates to our `orderHook` URL (event "order.status.updated").
+   We persist each pushed order per-tenant in `external_affiliate_orders` and the
+   dashboard aggregates from THAT table — no outbound HTTP at read time.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Per-tenant store of Safqa-pushed orders. Idempotent migration (runs on require). */
+pool.query(`
+  CREATE TABLE IF NOT EXISTS external_affiliate_orders (
+    id            SERIAL        PRIMARY KEY,
+    network       VARCHAR(20)   NOT NULL DEFAULT 'safqa',
+    external_id   VARCHAR(80)   NOT NULL,
+    business_id   INTEGER       NOT NULL,
+    status        VARCHAR(40),
+    status_ar     VARCHAR(120),
+    status_class  VARCHAR(20)   NOT NULL DEFAULT 'pending',
+    total         NUMERIC(12,2) NOT NULL DEFAULT 0,
+    marketer      VARCHAR(80),
+    raw           JSONB,
+    created_at    TIMESTAMPTZ   DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ   DEFAULT NOW()
+  )
+`)
+  .then(() => pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS external_affiliate_orders_uidx
+      ON external_affiliate_orders (network, external_id, business_id)
+  `))
+  .then(() => console.log('✅  external_affiliate_orders table ready'))
+  .catch((err) => console.warn('⚠️   external_affiliate_orders migration:', err.message));
+
+/* Map Safqa's status → our class. delivered ⊂ confirmed (a delivered order was
+   necessarily confirmed). Revenue is realised on delivered only.
+     pending/skip                                  → pending
+     preparing/printing/shipped/holding/ask_to_exchange → confirmed (in pipeline)
+     available/collected                           → delivered (realised)
+     returned1/2, ask_to_return, returned_exchange,
+       declined1/2                                 → returned                     */
+const SAFQA_STATUS_CLASS = {
+  pending:           'pending',
+  skip:              'pending',
+  preparing:         'confirmed',
+  printing:          'confirmed',
+  shipped:           'confirmed',
+  holding:           'confirmed',
+  ask_to_exchange:   'confirmed',
+  available:         'delivered',
+  collected:         'delivered',
+  returned1:         'returned',
+  returned2:         'returned',
+  ask_to_return:     'returned',
+  returned_exchange: 'returned',
+  declined1:         'returned',
+  declined2:         'returned',
+};
+function classifySafqaStatus(status) {
+  return SAFQA_STATUS_CLASS[String(status || '').trim().toLowerCase()] || 'pending';
+}
+
+/**
+ * Upsert ONE Safqa order (from an `order.status.updated` webhook) for a tenant.
+ * Idempotent on (network, external_id, business_id) — status updates overwrite.
+ * Returns { ok, inserted?, externalId?, statusClass?, reason? }.
+ */
+async function recordSafqaOrder(order, businessId) {
+  const externalId = String(order?._id ?? order?.id ?? '').trim();
+  if (!externalId) return { ok: false, reason: 'missing order _id' };
+  if (businessId == null) return { ok: false, reason: 'missing tenant' };
+
+  const status      = String(order?.status ?? '').trim().toLowerCase();
+  const statusAr    = order?.status_ar != null ? String(order.status_ar) : null;
+  const statusClass = classifySafqaStatus(status);
+  const total       = num(order?.total);
+  const marketer    = order?.marketer != null ? String(order.marketer) : null;
+
+  const { rows } = await pool.query(
+    `INSERT INTO external_affiliate_orders
+       (network, external_id, business_id, status, status_ar, status_class, total, marketer, raw, updated_at)
+     VALUES ('safqa', $1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW())
+     ON CONFLICT (network, external_id, business_id)
+     DO UPDATE SET status       = EXCLUDED.status,
+                   status_ar    = EXCLUDED.status_ar,
+                   status_class = EXCLUDED.status_class,
+                   total        = EXCLUDED.total,
+                   marketer     = COALESCE(EXCLUDED.marketer, external_affiliate_orders.marketer),
+                   raw          = EXCLUDED.raw,
+                   updated_at   = NOW()
+     RETURNING (xmax = 0) AS inserted`,
+    [externalId, businessId, status, statusAr, statusClass, total, marketer, JSON.stringify(order ?? {})]
+  );
+  return { ok: true, inserted: rows[0]?.inserted === true, externalId, statusClass };
+}
+
+/**
+ * Aggregate the tenant's webhook-ingested Safqa orders into our dashboard stat
+ * shape. Pure DB read — NO external HTTP. `connected` is true when Safqa is
+ * configured OR any order has ever been pushed.
+ */
+async function aggregateSafqaFromDb(businessId, connected = false) {
+  if (businessId == null) return emptyStat(false);
+  const { rows } = await pool.query(
+    `SELECT
+       COUNT(*)::int                                            AS total,
+       COUNT(*) FILTER (WHERE status_class = 'delivered')::int  AS delivered,
+       COUNT(*) FILTER (WHERE status_class = 'confirmed')::int  AS confirmed_only,
+       COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0) AS revenue
+     FROM external_affiliate_orders
+     WHERE business_id = $1 AND network = 'safqa'`,
+    [businessId]
+  );
+  const r = rows[0] || {};
+  const total     = num(r.total);
+  const delivered = num(r.delivered);
+  const confirmed = delivered + num(r.confirmed_only);
+  return {
+    connected:     Boolean(connected) || total > 0,
+    revenue:       Math.round(num(r.revenue)),
+    orders:        total,
+    confirmed,
+    delivered,
+    confirmedRate: total > 0 ? Math.round((confirmed / total) * 1000) / 10 : 0,
+    deliveredRate: total > 0 ? Math.round((delivered / total) * 1000) / 10 : 0,
+  };
+}
+
 /* ── Taager orders-aggregation ───────────────────────────────────────────────
    Taager exposes a clean, paginated orders endpoint:
      GET https://merchant.api.taager.com/api/orders   (Authorization: Bearer)
@@ -568,9 +695,12 @@ async function getExternalAffiliateStats(businessId) {
 
   try {
     const creds = await loadAffiliateCreds(businessId);
+    /* Safqa is WEBHOOK-driven: aggregate from the orders it has PUSHED to us
+       (external_affiliate_orders), NOT an outbound GET (Safqa has no such API). */
+    const safqaConnected = Boolean(creds.safqa.token || creds.safqa.merchant);
     const [taager, safqa] = await Promise.all([
       fetchTaagerStats(creds.taager.url, creds.taager.merchant, creds.taager.token),
-      fetchSafqaStats(creds.safqa.url, creds.safqa.merchant, creds.safqa.token),
+      aggregateSafqaFromDb(businessId, safqaConnected),
     ]);
 
     return {
@@ -595,6 +725,11 @@ module.exports = {
   getExternalAffiliateStats,
   fetchTaagerOrders,
   fetchTaagerProducts,
+  // Safqa webhook (push) architecture:
+  recordSafqaOrder,
+  aggregateSafqaFromDb,
+  classifySafqaStatus,
+  // Legacy (Safqa has no GET API — kept only for reference, no longer called):
   fetchSafqaStats,
   withSafqaPublicBase,
 };

@@ -2,6 +2,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const pool    = require('../config/db');
 const { enrichDeliveryRate } = require('../services/bostaEnrich');
+const { recordSafqaOrder } = require('../services/externalAffiliate');
 
 const router = express.Router();
 
@@ -369,6 +370,75 @@ router.post('/easyorder', async (req, res) => {
     return res.status(status).json(payload);
   } catch (err) {
     console.error('Webhook error:', err);
+    return res.status(500).json({ error: 'Failed to process webhook' });
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SAFQA  —  orderHook (PUSH) receiver
+   ────────────────────────────────────────────────────────────────────────────
+   Safqa has no GET API; it PUSHES real-time order updates to the per-tenant URL
+   the merchant registers as their `orderHook`. We validate the tenant, then upsert
+   each pushed order into external_affiliate_orders (recordSafqaOrder), which the
+   dashboard aggregates from. Always 200 on a well-formed event so Safqa doesn't
+   retry-storm; malformed bodies get a 400.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* GET — browser health check (confirms THIS build is deployed; no DB writes). */
+router.get('/safqa/:businessId', (req, res) => {
+  res.status(200).json({
+    ok: true,
+    endpoint: 'safqa-webhook',
+    business_id: req.params.businessId,
+    method_expected: 'POST',
+    message: 'Safqa orderHook endpoint is live. Register this URL as your orderHook and Safqa will POST order.status.updated events here.',
+  });
+});
+
+/* POST — Safqa orderHook. Body: { event, order: { _id, status, status_ar, total, marketer } } */
+router.post('/safqa/:businessId', async (req, res) => {
+  const businessId = parseInt(req.params.businessId, 10);
+  if (!businessId || isNaN(businessId)) {
+    return res.status(400).json({ error: 'Invalid tenant id' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT id FROM business_profile WHERE id = $1 LIMIT 1`,
+      [businessId]
+    );
+    if (!rows.length) {
+      console.warn(`⚠️  Safqa webhook: unknown tenant ${businessId}`);
+      return res.status(404).json({ error: 'Unknown tenant' });
+    }
+
+    const body  = req.body || {};
+    const event = String(body.event ?? '').trim();
+    const order = body.order ?? body.data?.order ?? body.data ?? null;
+
+    console.log(`📦 Safqa webhook (tenant ${businessId}) event="${event}":`, JSON.stringify(body).slice(0, 1000));
+
+    if (!order || typeof order !== 'object') {
+      return res.status(400).json({ error: 'Missing order object' });
+    }
+
+    /* Only order-status events mutate state; ack anything else so Safqa stops. */
+    if (event && !/^order\.(status\.)?(updated|created)$/i.test(event)) {
+      return res.status(200).json({ ok: true, ignored: true, event });
+    }
+
+    const result = await recordSafqaOrder(order, businessId);
+    if (!result.ok) {
+      return res.status(400).json({ error: result.reason || 'Could not record order' });
+    }
+    return res.status(200).json({
+      ok: true,
+      action: result.inserted ? 'created' : 'updated',
+      external_id: result.externalId,
+      status_class: result.statusClass,
+    });
+  } catch (err) {
+    console.error('Safqa webhook error:', err);
     return res.status(500).json({ error: 'Failed to process webhook' });
   }
 });

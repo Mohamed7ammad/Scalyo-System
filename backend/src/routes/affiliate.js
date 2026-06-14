@@ -23,7 +23,7 @@ const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
-const { NETWORK_KEYS, AFFILIATE_KEYS, loadAffiliateCreds, fetchSafqaStats } = require('../services/externalAffiliate');
+const { NETWORK_KEYS, AFFILIATE_KEYS, loadAffiliateCreds, aggregateSafqaFromDb } = require('../services/externalAffiliate');
 const { runTaagerSync } = require('../services/taagerSync');
 
 const router = express.Router();
@@ -183,34 +183,51 @@ router.post('/taager/sync', authenticate, requireAdmin, requireAffiliatePlan, as
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
-   POST /api/affiliate/safqa/test
-   REAL connection test — pings Safqa's official public API (api/v1/public/ +
-   api-safka-key header) with the tenant's SAVED creds and reports whether data
-   actually came back, instead of trusting that a token was merely stored.
+   GET /api/affiliate/safqa/webhook  — the orderHook URL to register in Safqa
+   ─────────────────────────────────────────────────────────────────────────
+   Safqa is WEBHOOK-driven (it pushes; we never GET). This returns the exact
+   per-tenant URL the merchant must paste into Safqa's `orderHook` field, plus a
+   snapshot of what we've ingested so far so they can confirm pushes are arriving.
    ══════════════════════════════════════════════════════════════════════════ */
+router.get('/safqa/webhook', authenticate, requireAdmin, requireAffiliatePlan, async (req, res) => {
+  const businessId = req.user.business_id;
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+  const host  = req.get('host');
+  const path  = `/api/webhooks/safqa/${businessId}`;
+  const webhookUrl = host ? `${proto}://${host}${path}` : path;
+
+  let stat = null;
+  try { stat = await aggregateSafqaFromDb(businessId, false); } catch { /* non-fatal */ }
+
+  return res.json({
+    webhookUrl,
+    path,
+    instructions: 'سجّل هذا الرابط في حقل orderHook داخل لوحة تحكم Safqa لاستقبال تحديثات الطلبات تلقائياً.',
+    ingested: stat ? { orders: stat.orders, delivered: stat.delivered, revenue: stat.revenue } : null,
+  });
+});
+
+/* POST /api/affiliate/safqa/test — report ingestion status (Safqa pushes; nothing
+   to ping). Confirms whether any order has been received via the webhook yet. */
 router.post('/safqa/test', authenticate, requireAdmin, requireAffiliatePlan, async (req, res) => {
   try {
-    const creds = await loadAffiliateCreds(req.user.business_id);
-    if (!creds.safqa.token && !creds.safqa.merchant) {
-      return res.status(400).json({ ok: false, error: 'لم يتم حفظ بيانات Safqa بعد' });
-    }
-    const stat = await fetchSafqaStats(creds.safqa.url, creds.safqa.merchant, creds.safqa.token);
-    if (stat.error) {
-      return res.status(502).json({
+    const stat = await aggregateSafqaFromDb(req.user.business_id, false);
+    if (stat.orders === 0) {
+      return res.status(200).json({
         ok: false,
-        error: 'تعذّر الاتصال بـ Safqa — تحقق من المفتاح (api-safka-key) والرابط (api/v1/public)',
+        pending: true,
+        error: 'لم تصل أي طلبات من Safqa بعد — تأكد من تسجيل رابط orderHook في لوحة Safqa.',
         ...stat,
       });
     }
     return res.json({
       ok: true,
-      message: `تم الاتصال بنجاح — ${stat.orders} طلب، إيراد ${stat.revenue} ج.م`,
+      message: `تم استقبال ${stat.orders} طلب من Safqa عبر الـ webhook، إيراد ${stat.revenue} ج.م`,
       ...stat,
     });
   } catch (err) {
-    const status = err.response?.status;
-    console.error('[affiliate/safqa/test POST] Error:', status ? `HTTP ${status}` : '', err.message);
-    return res.status(502).json({ ok: false, error: 'تعذّر اختبار اتصال Safqa' });
+    console.error('[affiliate/safqa/test POST] Error:', err.message);
+    return res.status(500).json({ ok: false, error: 'تعذّر قراءة بيانات Safqa' });
   }
 });
 
