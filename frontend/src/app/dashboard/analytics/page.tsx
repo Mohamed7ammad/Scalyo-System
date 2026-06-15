@@ -662,6 +662,13 @@ export default function AnalyticsDashboard() {
      plan tenants with connected keys. Undefined for every other plan. */
   const extStats = dashStats?.externalStats;
 
+  /* ── STRICT DASHBOARD ISOLATION ─────────────────────────────────────────
+     Mode A (affiliate view): the tenant is on the affiliate plan OR has Safqa
+     connected → render ONLY the 20-metric Safqa grid, nothing else.
+     Mode B (e-commerce view): everyone else → the full original dashboard
+     (Champions League, product/governorate tables, etc.), and NO Safqa grid. */
+  const affiliateView = isAffiliate || Boolean(extStats?.safqa.connected);
+
   /* Affiliate aggregates (Taager + Safqa). For an affiliate-plan tenant these
      REPLACE the local ERP/product figures, so every downstream KPI (rates, CPA,
      net profit) is computed from the real external-platform data. */
@@ -1129,6 +1136,55 @@ export default function AnalyticsDashboard() {
           </div>
         </div>
 
+        {/* ═══════════════════════════════════════════════════════════
+            STRICT DASHBOARD ISOLATION
+            • Mode A (affiliateView): render ONLY the 20-metric Safqa grid.
+            • Mode B (e-commerce): the full original dashboard below.
+            ═══════════════════════════════════════════════════════════ */}
+        {affiliateView ? (
+          <div className="space-y-6">
+            {extStats?.safqa.connected ? (
+              <div className="space-y-3">
+                <SectionLabel>لوحة أداء صفقة (Safqa)</SectionLabel>
+                <SafqaAffiliateGrid s={extStats.safqa} loading={loadingDash} />
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700
+                bg-white dark:bg-slate-900 p-10 text-center">
+                <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                  لم يتم ربط منصة صفقة بعد
+                </p>
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1.5">
+                  اربط حسابك على صفقة من صفحة «الربط مع منصات الأفليت» لعرض لوحة الأداء.
+                </p>
+              </div>
+            )}
+
+            {/* Taager (real GET integration) — kept as compact revenue cards. */}
+            {extStats?.taager.connected && (
+              <div className="space-y-3">
+                <SectionLabel>أرباح منصة تاجر</SectionLabel>
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                  <KPICard
+                    label="أرباح منصة تاجر"
+                    value={loadingDash ? '...' : fmtEGP(Math.round(extStats.taagerRevenue))}
+                    subValue={loadingDash ? '' :
+                      `${fmt(extStats.taager.orders)} طلب · تأكيد ${fmtPct(extStats.taager.confirmedRate)} · توصيل ${fmtPct(extStats.taager.deliveredRate)}`}
+                    accent="text-orange-600 dark:text-orange-400"
+                  />
+                  <KPICard
+                    label="إجمالي أرباح الأفليت"
+                    value={loadingDash ? '...' : fmtEGP(Math.round(extStats.totalRevenue))}
+                    subValue={`${fmt(extStats.totalOrders)} طلب من المنصات المتصلة`}
+                    accent="text-violet-600 dark:text-violet-400"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+        <>
+
         {/* ══════════════════════════════════════════════════════════
             SECTION 2 — KPI Cards
             ══════════════════════════════════════════════════════════ */}
@@ -1183,43 +1239,6 @@ export default function AnalyticsDashboard() {
             />
           </div>
         </div>
-
-        {/* Row 1.5: External Affiliate Networks — affiliate-plan exclusive.
-            DYNAMIC: only renders connected platforms + the combined total.
-            A disconnected platform's card is never shown (no empty platforms). */}
-        {extStats?.enabled && (
-          <div className="space-y-3">
-            {/* Safqa — full 20-metric affiliate dashboard (webhook data + ad spend) */}
-            {extStats.safqa.connected && (
-              <div className="space-y-3">
-                <SectionLabel>لوحة أداء صفقة (Safqa)</SectionLabel>
-                <SafqaAffiliateGrid s={extStats.safqa} loading={loadingDash} />
-              </div>
-            )}
-
-            {/* Taager (real GET integration) — kept as compact revenue cards. */}
-            {extStats.taager.connected && (
-              <div className="space-y-3">
-                <SectionLabel>أرباح منصة تاجر</SectionLabel>
-                <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-                  <KPICard
-                    label="أرباح منصة تاجر"
-                    value={loadingDash ? '...' : fmtEGP(Math.round(extStats.taagerRevenue))}
-                    subValue={loadingDash ? '' :
-                      `${fmt(extStats.taager.orders)} طلب · تأكيد ${fmtPct(extStats.taager.confirmedRate)} · توصيل ${fmtPct(extStats.taager.deliveredRate)}`}
-                    accent="text-orange-600 dark:text-orange-400"
-                  />
-                  <KPICard
-                    label="إجمالي أرباح الأفليت"
-                    value={loadingDash ? '...' : fmtEGP(Math.round(extStats.totalRevenue))}
-                    subValue={`${fmt(extStats.totalOrders)} طلب من المنصات المتصلة`}
-                    accent="text-violet-600 dark:text-violet-400"
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-        )}
 
         {/* Row 2: Operations & Rates */}
         <div className="space-y-3">
@@ -2378,6 +2397,10 @@ export default function AnalyticsDashboard() {
             </div>
           </div>
         </div>
+
+        </>
+        )}
+        {/* ═══ end STRICT DASHBOARD ISOLATION ═══ */}
 
       </div>
     </div>

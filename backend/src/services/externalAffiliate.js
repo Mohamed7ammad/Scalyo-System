@@ -218,8 +218,16 @@ async function recordSafqaOrder(order, businessId) {
  * Commission/Profits = Σ Safqa `total` of DELIVERED orders (Safqa sends the
  * marketer's earnings inside `total`; there is NO separate commission field).
  */
-async function aggregateSafqaFromDb(businessId, connected = false) {
+async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   if (businessId == null) return emptyStat(false);
+
+  /* Optional date-range filter (global Date Picker). Only accept strict
+     YYYY-MM-DD; anything else → null (skips that bound). Both the Safqa orders
+     (created_at) AND the Meta ad spend (expense_date) honour the same window so
+     ADS/CPP/Net react to the selected range exactly like the rest of the page. */
+  const DATE_RE   = /^\d{4}-\d{2}-\d{2}$/;
+  const startDate = DATE_RE.test(String(opts.startDate || '')) ? opts.startDate : null;
+  const endDate   = DATE_RE.test(String(opts.endDate   || '')) ? opts.endDate   : null;
 
   /* Two tenant-scoped reads in parallel:
        1) the pure Safqa-order buckets (counts + revenue by status_class)
@@ -239,14 +247,18 @@ async function aggregateSafqaFromDb(businessId, connected = false) {
          COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0)     AS revenue_confirmed,
          COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0)                    AS revenue_delivered
        FROM external_affiliate_orders
-       WHERE business_id = $1 AND network = 'safqa'`,
-      [businessId]
+       WHERE business_id = $1 AND network = 'safqa'
+         AND ($2::date IS NULL OR created_at::date >= $2::date)
+         AND ($3::date IS NULL OR created_at::date <= $3::date)`,
+      [businessId, startDate, endDate]
     ),
     pool.query(
       `SELECT COALESCE(SUM(amount), 0) AS ad_spend
          FROM expenses
-        WHERE business_id = $1::integer AND meta_sync = TRUE`,
-      [businessId]
+        WHERE business_id = $1::integer AND meta_sync = TRUE
+          AND ($2::date IS NULL OR expense_date >= $2::date)
+          AND ($3::date IS NULL OR expense_date <= $3::date)`,
+      [businessId, startDate, endDate]
     ).catch(() => ({ rows: [{ ad_spend: 0 }] })),   // non-fatal: degrade ADS to 0
   ]);
 
@@ -785,7 +797,7 @@ async function fetchSafqaStats(apiUrl, merchantId, apiToken) {
  * Always resolves (never throws) so a flaky external network can't break the
  * core dashboard — failures degrade to zeros.
  */
-async function getExternalAffiliateStats(businessId) {
+async function getExternalAffiliateStats(businessId, opts = {}) {
   const empty = {
     enabled:       false,
     taagerRevenue: 0,
@@ -799,11 +811,13 @@ async function getExternalAffiliateStats(businessId) {
   try {
     const creds = await loadAffiliateCreds(businessId);
     /* Safqa is WEBHOOK-driven: aggregate from the orders it has PUSHED to us
-       (external_affiliate_orders), NOT an outbound GET (Safqa has no such API). */
+       (external_affiliate_orders), NOT an outbound GET (Safqa has no such API).
+       The Safqa grid honours the global Date Picker (opts.startDate/endDate);
+       Taager's lightweight stats remain all-time (its own paginated API). */
     const safqaConnected = Boolean(creds.safqa.token || creds.safqa.merchant);
     const [taager, safqa] = await Promise.all([
       fetchTaagerStats(creds.taager.url, creds.taager.merchant, creds.taager.token),
-      aggregateSafqaFromDb(businessId, safqaConnected),
+      aggregateSafqaFromDb(businessId, safqaConnected, opts),
     ]);
 
     return {

@@ -859,7 +859,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
           in_transit_count: 0, outstanding_cash: 0,
         },
         daily_chart_stats: [], governorates_stats: [], rejection_reasons: [],
-        externalStats: await getExternalAffiliateStats(req.user.business_id),
+        externalStats: await getExternalAffiliateStats(req.user.business_id, { startDate, endDate }),
       });
     }
 
@@ -1367,7 +1367,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
        Pulls Taager / Safqa revenue when the tenant has saved API keys. Mock
        service for now; resolves to zeros when no keys are configured, so this
        is always safe to include in the payload for any plan. */
-    const externalStats = await getExternalAffiliateStats(req.user.business_id);
+    const externalStats = await getExternalAffiliateStats(req.user.business_id, { startDate, endDate });
 
     res.json({ overview, daily_chart_stats, governorates_stats, rejection_reasons, externalStats });
 
