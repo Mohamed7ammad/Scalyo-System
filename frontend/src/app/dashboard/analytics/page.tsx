@@ -662,13 +662,6 @@ export default function AnalyticsDashboard() {
      plan tenants with connected keys. Undefined for every other plan. */
   const extStats = dashStats?.externalStats;
 
-  /* ── STRICT DASHBOARD ISOLATION ─────────────────────────────────────────
-     Mode A (affiliate view): the tenant is on the affiliate plan OR has Safqa
-     connected → render ONLY the 20-metric Safqa grid, nothing else.
-     Mode B (e-commerce view): everyone else → the full original dashboard
-     (Champions League, product/governorate tables, etc.), and NO Safqa grid. */
-  const affiliateView = isAffiliate || Boolean(extStats?.safqa.connected);
-
   /* Affiliate aggregates (Taager + Safqa). For an affiliate-plan tenant these
      REPLACE the local ERP/product figures, so every downstream KPI (rates, CPA,
      net profit) is computed from the real external-platform data. */
@@ -1137,28 +1130,28 @@ export default function AnalyticsDashboard() {
         </div>
 
         {/* ═══════════════════════════════════════════════════════════
-            STRICT DASHBOARD ISOLATION
-            • Mode A (affiliateView): render ONLY the 20-metric Safqa grid.
-            • Mode B (e-commerce): the full original dashboard below.
+            TOP SECTION — driven STRICTLY by isAffiliate.
+            • isAffiliate  → the 20-metric Safqa grid (replaces the KPI cards).
+            • !isAffiliate → the original e-commerce financial KPI cards.
+            Everything BELOW this block renders for EVERYONE (both systems):
+            Operations, Costs, charts, Champions League, Rejection Reasons,
+            Product tables and Governorate tables.
             ═══════════════════════════════════════════════════════════ */}
-        {affiliateView ? (
+        {isAffiliate ? (
           <div className="space-y-6">
-            {extStats?.safqa.connected ? (
-              <div className="space-y-3">
-                <SectionLabel>لوحة أداء صفقة (Safqa)</SectionLabel>
+            <div className="space-y-3">
+              <SectionLabel>لوحة أداء صفقة (Safqa)</SectionLabel>
+              {extStats?.safqa ? (
                 <SafqaAffiliateGrid s={extStats.safqa} loading={loadingDash} />
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700
-                bg-white dark:bg-slate-900 p-10 text-center">
-                <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
-                  لم يتم ربط منصة صفقة بعد
-                </p>
-                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1.5">
-                  اربط حسابك على صفقة من صفحة «الربط مع منصات الأفليت» لعرض لوحة الأداء.
-                </p>
-              </div>
-            )}
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700
+                  bg-white dark:bg-slate-900 p-10 text-center">
+                  <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+                    {loadingDash ? 'جارٍ تحميل بيانات صفقة…' : 'لا توجد بيانات من صفقة بعد'}
+                  </p>
+                </div>
+              )}
+            </div>
 
             {/* Taager (real GET integration) — kept as compact revenue cards. */}
             {extStats?.taager.connected && (
@@ -1183,15 +1176,9 @@ export default function AnalyticsDashboard() {
             )}
           </div>
         ) : (
-        <>
-
-        {/* ══════════════════════════════════════════════════════════
-            SECTION 2 — KPI Cards
-            ══════════════════════════════════════════════════════════ */}
-
-        {/* Row 1: The Money (5 cards — incl. forecasted net profit) */}
-        <div className="space-y-3">
-          <SectionLabel>الأرقام المالية الرئيسية</SectionLabel>
+          /* ══ E-commerce TOP: original financial KPI cards (5 cards) ══ */
+          <div className="space-y-3">
+            <SectionLabel>الأرقام المالية الرئيسية</SectionLabel>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <KPICard
               label="إجمالي الطلبات"
@@ -1237,8 +1224,10 @@ export default function AnalyticsDashboard() {
               trend={20}
               accent="text-indigo-600 dark:text-indigo-400"
             />
+            </div>
           </div>
-        </div>
+        )}
+        {/* ═══ end TOP SECTION — BELOW renders for EVERYONE ═══ */}
 
         {/* Row 2: Operations & Rates */}
         <div className="space-y-3">
@@ -1465,7 +1454,8 @@ export default function AnalyticsDashboard() {
             Hidden for affiliate tenants UNTIL they have product data
             (e.g. after a Taager sync populates the profitability rows).
             ══════════════════════════════════════════════════════════ */}
-        {(!isAffiliate || profitability.length > 0) && (
+        {/* visible for EVERYONE — e-commerce & affiliate alike */}
+        {true && (
         <div className="space-y-3">
           <SectionLabel>توصيات ذكية — AI Insights</SectionLabel>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1707,10 +1697,11 @@ export default function AnalyticsDashboard() {
 
         {/* ══════════════════════════════════════════════════════════
             SECTION 4.5 — Product Champions League
-            Hidden for affiliate tenants UNTIL they have product data
-            (e.g. after a Taager sync populates the profitability rows).
+            Visible for EVERYONE (e-commerce & affiliate). Renders its own
+            empty state when there is no product-profitability data yet.
             ══════════════════════════════════════════════════════════ */}
-        {(!isAffiliate || profitability.length > 0) && (
+        {/* visible for EVERYONE — e-commerce & affiliate alike */}
+        {true && (
         <div className="space-y-3">
           <SectionLabel>دوري أبطال المنتجات</SectionLabel>
 
@@ -2073,7 +2064,8 @@ export default function AnalyticsDashboard() {
             Hidden for affiliate tenants UNTIL they have product data
             (e.g. after a Taager sync populates the profitability rows).
             ══════════════════════════════════════════════════════════ */}
-        {(!isAffiliate || profitability.length > 0) && (
+        {/* visible for EVERYONE — e-commerce & affiliate alike */}
+        {true && (
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-4 flex-wrap gap-y-2">
             <SectionLabel>أداء المنتجات التفصيلي</SectionLabel>
@@ -2397,10 +2389,6 @@ export default function AnalyticsDashboard() {
             </div>
           </div>
         </div>
-
-        </>
-        )}
-        {/* ═══ end STRICT DASHBOARD ISOLATION ═══ */}
 
       </div>
     </div>
