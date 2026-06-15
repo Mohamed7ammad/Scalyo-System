@@ -1140,7 +1140,7 @@ export default function AnalyticsDashboard() {
         {isAffiliate ? (
           <div className="space-y-6">
             <div className="space-y-3">
-              <SectionLabel>لوحة أداء صفقة (Safqa)</SectionLabel>
+              <SectionLabel>لوحة أداء الأفيليت</SectionLabel>
               {extStats?.safqa ? (
                 <SafqaAffiliateGrid s={extStats.safqa} loading={loadingDash} />
               ) : (
@@ -1229,6 +1229,11 @@ export default function AnalyticsDashboard() {
         )}
         {/* ═══ end TOP SECTION — BELOW renders for EVERYONE ═══ */}
 
+        {/* Operations & Rates + Costs & Averages — hidden in the affiliate view
+            (these legacy KPI rows are redundant with the 20-metric grid above).
+            Visible ONLY for e-commerce accounts (!isAffiliate). */}
+        {!isAffiliate && (
+        <>
         {/* Row 2: Operations & Rates */}
         <div className="space-y-3">
           <SectionLabel>العمليات والمعدلات</SectionLabel>
@@ -1365,6 +1370,9 @@ export default function AnalyticsDashboard() {
             />
           </div>
         </div>
+        </>
+        )}
+        {/* ═══ end Operations & Costs (affiliate-hidden) ═══ */}
 
         {/* ══════════════════════════════════════════════════════════
             SECTION 2.5 — Delivered Orders (detailed, per delivery day)
