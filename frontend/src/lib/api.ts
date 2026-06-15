@@ -638,6 +638,12 @@ export interface ExternalNetworkStat {
   confirmedRate: number;
   /** Delivery percentage (0–100). */
   deliveredRate: number;
+  /** Rejected/returned order count (Safqa: returned1/2, declined, ask_to_return…). */
+  returned?:     number;
+  /** Affiliate commission/profits — Safqa = Σ `total` of delivered orders. */
+  commission?:   number;
+  /** Non-Delivery Rate = returned ÷ (delivered + returned) × 100. */
+  ndr?:          number;
   /** True when the live API call failed (numbers degraded to zero). */
   error?:        boolean;
 }

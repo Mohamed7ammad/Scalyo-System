@@ -391,7 +391,7 @@ router.get('/safqa/:businessId', (req, res) => {
     endpoint: 'safqa-webhook',
     business_id: req.params.businessId,
     method_expected: 'POST',
-    message: 'Safqa orderHook endpoint is live. Register this URL as your orderHook and Safqa will POST order.status.updated events here.',
+    message: 'Safqa orderHook endpoint is live. Register this URL as your orderHook; any pushed order (created or status-updated) is ingested.',
   });
 });
 
@@ -414,17 +414,22 @@ router.post('/safqa/:businessId', async (req, res) => {
 
     const body  = req.body || {};
     const event = String(body.event ?? '').trim();
-    const order = body.order ?? body.data?.order ?? body.data ?? null;
 
-    console.log(`📦 Safqa webhook (tenant ${businessId}) event="${event}":`, JSON.stringify(body).slice(0, 1000));
+    /* Locate the order object anywhere Safqa might put it. We INGEST ANY payload
+       that carries a valid order — regardless of the `event` string (created /
+       updated / status.updated / anything) — so the very first push (order
+       creation) is never dropped. */
+    const order =
+      (body.order && typeof body.order === 'object')                                   ? body.order
+      : (body.data?.order && typeof body.data.order === 'object')                      ? body.data.order
+      : (body.data && typeof body.data === 'object' && (body.data._id || body.data.id)) ? body.data
+      : (body._id || body.id)                                                          ? body
+      : null;
 
-    if (!order || typeof order !== 'object') {
-      return res.status(400).json({ error: 'Missing order object' });
-    }
+    console.log(`📦 Safqa webhook (tenant ${businessId}) event="${event || '(none)'}":`, JSON.stringify(body).slice(0, 1000));
 
-    /* Only order-status events mutate state; ack anything else so Safqa stops. */
-    if (event && !/^order\.(status\.)?(updated|created)$/i.test(event)) {
-      return res.status(200).json({ ok: true, ignored: true, event });
+    if (!order || typeof order !== 'object' || !(order._id || order.id)) {
+      return res.status(400).json({ error: 'Missing or invalid order object' });
     }
 
     const result = await recordSafqaOrder(order, businessId);

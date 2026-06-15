@@ -187,8 +187,14 @@ async function recordSafqaOrder(order, businessId) {
 
 /**
  * Aggregate the tenant's webhook-ingested Safqa orders into our dashboard stat
- * shape. Pure DB read — NO external HTTP. `connected` is true when Safqa is
- * configured OR any order has ever been pushed.
+ * shape. STRICT ISOLATION: reads ONLY external_affiliate_orders for this tenant
+ * (network='safqa') — zero mixing with ad accounts, Meta spend, or pixels. Every
+ * metric (Total Orders, Confirmed, Delivered, Rejected, Commission, NDR) is a
+ * pure mirror of the Safqa rows. `connected` is true when Safqa is configured OR
+ * any order has ever been pushed.
+ *
+ * Commission/Profits = Σ Safqa `total` of DELIVERED orders (Safqa sends the
+ * marketer's earnings inside `total`; there is NO separate commission field).
  */
 async function aggregateSafqaFromDb(businessId, connected = false) {
   if (businessId == null) return emptyStat(false);
@@ -197,6 +203,7 @@ async function aggregateSafqaFromDb(businessId, connected = false) {
        COUNT(*)::int                                            AS total,
        COUNT(*) FILTER (WHERE status_class = 'delivered')::int  AS delivered,
        COUNT(*) FILTER (WHERE status_class = 'confirmed')::int  AS confirmed_only,
+       COUNT(*) FILTER (WHERE status_class = 'returned')::int   AS returned,
        COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0) AS revenue
      FROM external_affiliate_orders
      WHERE business_id = $1 AND network = 'safqa'`,
@@ -205,15 +212,22 @@ async function aggregateSafqaFromDb(businessId, connected = false) {
   const r = rows[0] || {};
   const total     = num(r.total);
   const delivered = num(r.delivered);
+  const returned  = num(r.returned);
   const confirmed = delivered + num(r.confirmed_only);
+  const revenue   = Math.round(num(r.revenue));
+  /* NDR = returned ÷ (delivered + returned) × 100 (returns vs resolved shipments). */
+  const resolved  = delivered + returned;
   return {
     connected:     Boolean(connected) || total > 0,
-    revenue:       Math.round(num(r.revenue)),
+    revenue,
+    commission:    revenue,        // Safqa earnings live in `total` of delivered orders
     orders:        total,
     confirmed,
     delivered,
+    returned,                      // "Rejected" / المرتجعات
     confirmedRate: total > 0 ? Math.round((confirmed / total) * 1000) / 10 : 0,
     deliveredRate: total > 0 ? Math.round((delivered / total) * 1000) / 10 : 0,
+    ndr:           resolved > 0 ? Math.round((returned / resolved) * 1000) / 10 : 0,
   };
 }
 

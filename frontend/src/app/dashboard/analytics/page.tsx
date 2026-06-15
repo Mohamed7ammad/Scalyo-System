@@ -1084,7 +1084,7 @@ export default function AnalyticsDashboard() {
                   value={loadingDash ? '...' : fmtEGP(Math.round(extStats.safqaRevenue))}
                   subValue={loadingDash ? '' : (extStats.safqa.error
                     ? '⚠️ تعذّر الوصول لـ API صفقة'
-                    : `${fmt(extStats.safqa.orders)} طلب · تأكيد ${fmtPct(extStats.safqa.confirmedRate)} · توصيل ${fmtPct(extStats.safqa.deliveredRate)}`)}
+                    : `${fmt(extStats.safqa.orders)} طلب · تأكيد ${fmtPct(extStats.safqa.confirmedRate)} · توصيل ${fmtPct(extStats.safqa.deliveredRate)} · مرتجع ${fmt(extStats.safqa.returned ?? 0)} · NDR ${fmtPct(extStats.safqa.ndr ?? 0)}`)}
                   accent="text-teal-600 dark:text-teal-400"
                 />
               )}
