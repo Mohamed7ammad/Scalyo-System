@@ -138,6 +138,16 @@ pool.query(`
     updated_at    TIMESTAMPTZ   DEFAULT NOW()
   )
 `)
+  /* Back-fill columns on tables created by EARLIER builds that predate them.
+     CREATE TABLE IF NOT EXISTS never adds columns to an existing table, so a
+     live `external_affiliate_orders` from before created_at/updated_at existed
+     would be MISSING those columns. The date-range filter references
+     created_at — without this ALTER the aggregation query throws, which
+     getExternalAffiliateStats swallows → every metric silently reads 0.
+     Existing rows get NOW() (the migration instant), so they stay visible in
+     recent date ranges. */
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`))
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`))
   .then(() => pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS external_affiliate_orders_uidx
       ON external_affiliate_orders (network, external_id, business_id)
@@ -248,8 +258,8 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
          COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0)                    AS revenue_delivered
        FROM external_affiliate_orders
        WHERE business_id = $1 AND network = 'safqa'
-         AND ($2::date IS NULL OR created_at::date >= $2::date)
-         AND ($3::date IS NULL OR created_at::date <= $3::date)`,
+         AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
+         AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)`,
       [businessId, startDate, endDate]
     ),
     pool.query(
