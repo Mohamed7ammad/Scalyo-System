@@ -550,25 +550,43 @@ export default function AnalyticsDashboard() {
     if (fromDate || toDate) {
       return { startDate: fromDate || undefined, endDate: toDate || undefined };
     }
-    const today  = new Date();
-    const pad    = (d: Date) => d.toISOString().split('T')[0];
+    /* Format a Date as YYYY-MM-DD in EGYPT local time (Africa/Cairo), NOT UTC.
+       The old `d.toISOString()` shifted the date back by the UTC offset, so in
+       the early hours of an Egypt day "today" became yesterday and "This Month"
+       started on the previous month's last day (e.g. 2026-06-16 → 2026-06-15 and
+       2026-06-01 → 2026-05-31). formatToParts keeps it deterministic across
+       browsers regardless of the user's own timezone. */
+    const pad = (d: Date) => {
+      const p = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(d).reduce((acc, part) => {
+        acc[part.type] = part.value; return acc;
+      }, {} as Record<string, string>);
+      return `${p.year}-${p.month}-${p.day}`;
+    };
+
+    /* Anchor all date math to Egypt's calendar "today" (parts derived above),
+       using a noon-UTC pivot so ±day arithmetic never crosses an offset/DST edge.
+       We only ever read these back through pad(), so the value stays Egypt-local. */
+    const todayStr = pad(new Date());                       // e.g. "2026-06-16"
+    const [ty, tm, td] = todayStr.split('-').map(Number);
+    const noonPivot = (y: number, m: number, day: number) => new Date(Date.UTC(y, m - 1, day, 12));
+
     switch (activeRange) {
       case 'today':
-        return { startDate: pad(today), endDate: pad(today) };
+        return { startDate: todayStr, endDate: todayStr };
       case 'yesterday': {
-        const y = new Date(today);
-        y.setDate(y.getDate() - 1);
-        return { startDate: pad(y), endDate: pad(y) };
+        const y = noonPivot(ty, tm, td); y.setUTCDate(y.getUTCDate() - 1);
+        const s = pad(y);
+        return { startDate: s, endDate: s };
       }
       case '7d': {
-        const w = new Date(today);
-        w.setDate(w.getDate() - 6);
-        return { startDate: pad(w), endDate: pad(today) };
+        const w = noonPivot(ty, tm, td); w.setUTCDate(w.getUTCDate() - 6);
+        return { startDate: pad(w), endDate: todayStr };
       }
-      case 'month': {
-        const ms = new Date(today.getFullYear(), today.getMonth(), 1);
-        return { startDate: pad(ms), endDate: pad(today) };
-      }
+      case 'month':
+        /* First day of Egypt's current month → strictly through today. */
+        return { startDate: `${todayStr.slice(0, 7)}-01`, endDate: todayStr };
       default:
         return { startDate: undefined, endDate: undefined };
     }
