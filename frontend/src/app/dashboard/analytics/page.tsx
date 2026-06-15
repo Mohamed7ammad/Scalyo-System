@@ -23,6 +23,7 @@ import type {
   DashboardStats,
   ProductProfitability,
   BusinessProfile,
+  ExternalNetworkStat,
 } from '@/lib/api';
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -253,6 +254,127 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
         {children}
       </h2>
       <span className="flex-1 h-px bg-slate-200 dark:bg-slate-800" />
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SAFQA AFFILIATE DASHBOARD — 5×4 colored metric grid (20 cards)
+   ───────────────────────────────────────────────────────────────────
+   A pure mirror of the Safqa webhook data + Meta ad spend. Order matches
+   the design left→right, top→bottom across four rows of five.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/** Money with up to 2 decimals + EGP suffix (matches the design's "EGP"). */
+const fmtMoney = (n: number) =>
+  `${(Number.isFinite(n) ? n : 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} EGP`;
+/** Percentage with 2 decimals (e.g. 63.64%). */
+const fmtPct2 = (n: number) => `${(Number.isFinite(n) ? n : 0).toFixed(2)}%`;
+
+/** A few gentle sparkline paths (viewBox 0 0 100 24) reused decoratively. */
+const SPARKS = [
+  'M0,18 L14,16 L28,17 L42,9 L56,4 L70,11 L84,9 L100,14',
+  'M0,14 L16,15 L32,10 L48,13 L64,6 L80,12 L100,8',
+  'M0,16 L20,12 L36,17 L52,8 L68,14 L84,7 L100,12',
+  'M0,12 L14,13 L30,8 L46,15 L62,11 L78,5 L100,13',
+];
+
+interface SafqaCard {
+  title: string;
+  value: string;
+  sub:   string;
+  /** Tailwind gradient classes for the card background. */
+  grad:  string;
+  /** Optional tone for the sub-caption (positive / negative coloring). */
+  tone?: 'pos' | 'neg';
+}
+
+function SafqaMetricCard({ card, idx, loading }: { card: SafqaCard; idx: number; loading: boolean }) {
+  return (
+    <div className={`relative overflow-hidden rounded-2xl px-4 pt-3.5 pb-6 shadow-md
+      bg-gradient-to-br ${card.grad} ring-1 ring-white/10`}>
+      {/* Title */}
+      <p className="relative z-10 text-center text-[10px] font-bold uppercase tracking-widest
+        text-white/85 leading-tight min-h-[26px] flex items-center justify-center">
+        {card.title}
+      </p>
+      {/* Main value */}
+      <div className="relative z-10 text-center mt-0.5">
+        <span className="text-2xl font-extrabold text-white tracking-tight drop-shadow-sm">
+          {loading ? '…' : card.value}
+        </span>
+      </div>
+      {/* Trend / sub indicator */}
+      <p className={`relative z-10 text-center text-[11px] font-semibold mt-1.5 leading-snug
+        ${card.tone === 'neg' ? 'text-rose-100' : card.tone === 'pos' ? 'text-emerald-100' : 'text-white/75'}`}>
+        {loading ? '' : card.sub}
+      </p>
+      {/* Decorative sparkline */}
+      <svg className="pointer-events-none absolute bottom-0 left-0 w-full h-7 opacity-25"
+        viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+        <path d={SPARKS[idx % SPARKS.length]} fill="none" stroke="white" strokeWidth="1.6"
+          strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </div>
+  );
+}
+
+function SafqaAffiliateGrid({ s, loading }: { s: ExternalNetworkStat; loading: boolean }) {
+  /* Safe reads — every field defaults to 0 (disconnected → clean zero grid). */
+  const orders          = s.orders               ?? 0;
+  const profit          = s.profit               ?? 0;
+  const confirmed       = s.confirmed            ?? 0;
+  const profitConfirmed = s.profitConfirmed      ?? 0;
+  const delivered       = s.delivered            ?? 0;
+  const profitDelivered = s.profitDelivered      ?? 0;
+  const inProgress      = s.inProgressOrders     ?? 0;
+  const pending         = s.pending              ?? 0;
+  const onHold          = s.onHold               ?? 0;
+  const profitInProg    = s.profitInProgress     ?? 0;
+  const futureBalance   = s.futureBalance        ?? 0;
+  const cr              = s.cr                    ?? 0;
+  const dr              = s.dr                    ?? 0;
+  const ndr             = s.ndr                   ?? 0;
+  const avgProfit       = s.avgProfit            ?? 0;
+  const maxCpp          = s.maxCpp               ?? 0;
+  const ads             = s.ads                   ?? 0;
+  const cpp             = s.cpp                   ?? 0;
+  const netProfit       = s.netProfit            ?? 0;
+  const forecasted      = s.forecastedNetProfit  ?? 0;
+  const returned        = s.returned             ?? 0;
+
+  const cards: SafqaCard[] = [
+    /* ── Row 1 ─────────────────────────────────────────────────────────── */
+    { title: 'ORDERS',            value: fmt(orders),             sub: 'إجمالي الطلبات',          grad: 'from-sky-500 to-blue-600' },
+    { title: 'PROFIT',            value: fmtMoney(profit),        sub: 'إجمالي الأرباح',          grad: 'from-indigo-500 to-violet-600' },
+    { title: 'ORDERS CONFIRMED',  value: fmt(confirmed),          sub: `معدل التأكيد ${fmtPct2(cr)}`, grad: 'from-orange-500 to-amber-600' },
+    { title: 'PROFIT (CONFIRMED)',value: fmtMoney(profitConfirmed), sub: 'أرباح الطلبات المؤكدة', grad: 'from-orange-500 to-orange-700' },
+    { title: 'ORDERS DELIVERED',  value: fmt(delivered),          sub: `معدل التسليم ${fmtPct2(dr)}`, grad: 'from-emerald-500 to-green-600' },
+    /* ── Row 2 ─────────────────────────────────────────────────────────── */
+    { title: 'PROFIT (DELIVERED)',value: fmtMoney(profitDelivered), sub: 'الأرباح المُحقّقة',     grad: 'from-green-500 to-emerald-700' },
+    { title: 'ORDERS (IN PROGRESS)', value: fmt(inProgress),      sub: 'قيد التنفيذ والشحن',      grad: 'from-purple-500 to-fuchsia-600' },
+    { title: 'PENDING CONFIRMATION', value: fmt(pending),         sub: 'بانتظار التأكيد',          grad: 'from-blue-500 to-indigo-600' },
+    { title: 'معلق مؤقتاً',        value: fmt(onHold),             sub: 'طلبات معلّقة مؤقتاً',      grad: 'from-violet-500 to-purple-700' },
+    { title: 'PROFIT (IN PROGRESS)', value: fmtMoney(profitInProg), sub: 'أرباح قيد التنفيذ',     grad: 'from-fuchsia-500 to-purple-600' },
+    /* ── Row 3 ─────────────────────────────────────────────────────────── */
+    { title: 'F.B (IN PROGRESS)', value: fmtMoney(futureBalance), sub: 'رصيد مستقبلي متوقّع',     grad: 'from-purple-500 to-violet-700' },
+    { title: 'CR',                value: fmtPct2(cr),             sub: 'نسبة التأكيد',             grad: 'from-amber-500 to-yellow-600' },
+    { title: 'DR',                value: fmtPct2(dr),             sub: 'نسبة التسليم',             grad: 'from-teal-500 to-cyan-600' },
+    { title: 'NDR',               value: fmtPct2(ndr),            sub: `مرتجع ${fmt(returned)}`,    grad: 'from-emerald-500 to-teal-600', tone: ndr > 40 ? 'neg' : undefined },
+    { title: 'AVG PROFIT',        value: fmtMoney(avgProfit),     sub: 'ربح لكل طلب مُسلَّم',      grad: 'from-cyan-500 to-sky-600' },
+    /* ── Row 4 ─────────────────────────────────────────────────────────── */
+    { title: 'MAX CPP',           value: fmtMoney(maxCpp),        sub: 'أقصى تكلفة آمنة للطلب',    grad: 'from-rose-500 to-red-600' },
+    { title: 'CPP',               value: fmtMoney(cpp),           sub: 'تكلفة الطلب الفعلية',      grad: 'from-red-500 to-rose-600' },
+    { title: 'ADS',               value: fmtMoney(ads),           sub: 'إجمالي الإنفاق الإعلاني',  grad: 'from-red-500 to-red-700' },
+    { title: 'NET PROFIT',        value: fmtMoney(netProfit),     sub: netProfit >= 0 ? 'ربح صافٍ' : 'خسارة صافية', grad: 'from-amber-500 to-yellow-600', tone: netProfit >= 0 ? 'pos' : 'neg' },
+    { title: 'FORECASTED NET PROFIT', value: fmtMoney(forecasted), sub: 'بعد وصول الطلبات الجارية', grad: 'from-yellow-500 to-amber-600', tone: forecasted >= 0 ? 'pos' : 'neg' },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3" dir="ltr">
+      {cards.map((card, idx) => (
+        <SafqaMetricCard key={card.title} card={card} idx={idx} loading={loading} />
+      ))}
     </div>
   );
 }
@@ -1067,34 +1189,35 @@ export default function AnalyticsDashboard() {
             A disconnected platform's card is never shown (no empty platforms). */}
         {extStats?.enabled && (
           <div className="space-y-3">
-            <SectionLabel>أرباح منصات الأفليت الخارجية</SectionLabel>
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-              {extStats.taager.connected && (
-                <KPICard
-                  label="أرباح منصة تاجر"
-                  value={loadingDash ? '...' : fmtEGP(Math.round(extStats.taagerRevenue))}
-                  subValue={loadingDash ? '' :
-                    `${fmt(extStats.taager.orders)} طلب · تأكيد ${fmtPct(extStats.taager.confirmedRate)} · توصيل ${fmtPct(extStats.taager.deliveredRate)}`}
-                  accent="text-orange-600 dark:text-orange-400"
-                />
-              )}
-              {extStats.safqa.connected && (
-                <KPICard
-                  label="أرباح منصة صفقة"
-                  value={loadingDash ? '...' : fmtEGP(Math.round(extStats.safqaRevenue))}
-                  subValue={loadingDash ? '' : (extStats.safqa.error
-                    ? '⚠️ تعذّر الوصول لـ API صفقة'
-                    : `${fmt(extStats.safqa.orders)} طلب · تأكيد ${fmtPct(extStats.safqa.confirmedRate)} · توصيل ${fmtPct(extStats.safqa.deliveredRate)} · مرتجع ${fmt(extStats.safqa.returned ?? 0)} · NDR ${fmtPct(extStats.safqa.ndr ?? 0)}`)}
-                  accent="text-teal-600 dark:text-teal-400"
-                />
-              )}
-              <KPICard
-                label="إجمالي أرباح الأفليت"
-                value={loadingDash ? '...' : fmtEGP(Math.round(extStats.totalRevenue))}
-                subValue={`${fmt(extStats.totalOrders)} طلب من المنصات المتصلة`}
-                accent="text-violet-600 dark:text-violet-400"
-              />
-            </div>
+            {/* Safqa — full 20-metric affiliate dashboard (webhook data + ad spend) */}
+            {extStats.safqa.connected && (
+              <div className="space-y-3">
+                <SectionLabel>لوحة أداء صفقة (Safqa)</SectionLabel>
+                <SafqaAffiliateGrid s={extStats.safqa} loading={loadingDash} />
+              </div>
+            )}
+
+            {/* Taager (real GET integration) — kept as compact revenue cards. */}
+            {extStats.taager.connected && (
+              <div className="space-y-3">
+                <SectionLabel>أرباح منصة تاجر</SectionLabel>
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                  <KPICard
+                    label="أرباح منصة تاجر"
+                    value={loadingDash ? '...' : fmtEGP(Math.round(extStats.taagerRevenue))}
+                    subValue={loadingDash ? '' :
+                      `${fmt(extStats.taager.orders)} طلب · تأكيد ${fmtPct(extStats.taager.confirmedRate)} · توصيل ${fmtPct(extStats.taager.deliveredRate)}`}
+                    accent="text-orange-600 dark:text-orange-400"
+                  />
+                  <KPICard
+                    label="إجمالي أرباح الأفليت"
+                    value={loadingDash ? '...' : fmtEGP(Math.round(extStats.totalRevenue))}
+                    subValue={`${fmt(extStats.totalOrders)} طلب من المنصات المتصلة`}
+                    accent="text-violet-600 dark:text-violet-400"
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
 

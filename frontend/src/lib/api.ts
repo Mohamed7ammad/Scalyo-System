@@ -646,6 +646,42 @@ export interface ExternalNetworkStat {
   ndr?:          number;
   /** True when the live API call failed (numbers degraded to zero). */
   error?:        boolean;
+
+  /* ── 20-metric affiliate dashboard contract (Safqa) ─────────────────────
+     All "profit" fields are Σ Safqa `total` over the relevant status bucket.
+     Money rounded to whole EGP; CPP/MAX CPP/AVG PROFIT to 2 decimals; rates %. */
+  /** PROFIT — Σ total of ALL orders. */
+  profit?:               number;
+  /** PROFIT (CONFIRMED) — Σ total of confirmed (incl. delivered) orders. */
+  profitConfirmed?:      number;
+  /** PROFIT (DELIVERED) — Σ total of delivered orders. */
+  profitDelivered?:      number;
+  /** ORDERS (IN PROGRESS) — confirmed − delivered − returned. */
+  inProgressOrders?:     number;
+  /** PENDING CONFIRMATION — status_class = 'pending'. */
+  pending?:              number;
+  /** معلق مؤقتاً (On Hold) — raw status = 'holding'. */
+  onHold?:               number;
+  /** PROFIT (IN PROGRESS) — Σ total of confirmed-not-delivered orders. */
+  profitInProgress?:     number;
+  /** CR — confirmation rate % (confirmed ÷ orders × 100). */
+  cr?:                   number;
+  /** DR — delivery rate % (100 − NDR). */
+  dr?:                   number;
+  /** F.B (IN PROGRESS) — Future Balance = profitInProgress × DR. */
+  futureBalance?:        number;
+  /** AVG PROFIT — profitDelivered ÷ delivered. */
+  avgProfit?:            number;
+  /** MAX CPP — max allowable cost-per-purchase = avgProfit × DR. */
+  maxCpp?:               number;
+  /** ADS — total Meta ad spend (expenses.meta_sync). */
+  ads?:                  number;
+  /** CPP — ads ÷ orders. */
+  cpp?:                  number;
+  /** NET PROFIT — profitDelivered − ads. */
+  netProfit?:            number;
+  /** FORECASTED NET PROFIT — netProfit + Future Balance. */
+  forecastedNetProfit?:  number;
 }
 
 export interface ExternalStats {

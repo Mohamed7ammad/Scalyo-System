@@ -49,7 +49,9 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Empty/disconnected stat shape — single source of truth for the contract. */
+/** Empty/disconnected stat shape — single source of truth for the contract.
+ *  Carries the full 20-metric affiliate-dashboard contract so a disconnected
+ *  network still renders a clean zeroed grid. */
 function emptyStat(connected = false) {
   return {
     connected,
@@ -59,6 +61,26 @@ function emptyStat(connected = false) {
     delivered:     0,
     confirmedRate: 0,   // %
     deliveredRate: 0,   // %
+    returned:      0,
+    commission:    0,
+    ndr:           0,
+    /* ── 20-metric affiliate dashboard contract ─────────────────────────── */
+    profit:               0,   // Σ total of ALL orders
+    profitConfirmed:      0,   // Σ total of confirmed (incl. delivered) orders
+    profitDelivered:      0,   // Σ total of delivered orders
+    inProgressOrders:     0,   // confirmed − delivered − returned
+    pending:              0,   // status_class = 'pending'
+    onHold:               0,   // raw status = 'holding'
+    profitInProgress:     0,   // Σ total of confirmed-not-delivered orders
+    cr:                   0,   // confirmation rate %
+    dr:                   0,   // delivery rate %
+    futureBalance:        0,   // F.B = profitInProgress × DR
+    avgProfit:            0,   // profitDelivered ÷ delivered
+    maxCpp:               0,   // avgProfit × DR
+    ads:                  0,   // total Meta ad spend
+    cpp:                  0,   // ads ÷ orders
+    netProfit:            0,   // profitDelivered − ads
+    forecastedNetProfit:  0,   // netProfit + F.B
   };
 }
 
@@ -198,36 +220,103 @@ async function recordSafqaOrder(order, businessId) {
  */
 async function aggregateSafqaFromDb(businessId, connected = false) {
   if (businessId == null) return emptyStat(false);
-  const { rows } = await pool.query(
-    `SELECT
-       COUNT(*)::int                                            AS total,
-       COUNT(*) FILTER (WHERE status_class = 'delivered')::int  AS delivered,
-       COUNT(*) FILTER (WHERE status_class = 'confirmed')::int  AS confirmed_only,
-       COUNT(*) FILTER (WHERE status_class = 'returned')::int   AS returned,
-       COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0) AS revenue
-     FROM external_affiliate_orders
-     WHERE business_id = $1 AND network = 'safqa'`,
-    [businessId]
-  );
-  const r = rows[0] || {};
-  const total     = num(r.total);
-  const delivered = num(r.delivered);
-  const returned  = num(r.returned);
-  const confirmed = delivered + num(r.confirmed_only);
-  const revenue   = Math.round(num(r.revenue));
-  /* NDR = returned ÷ (delivered + returned) × 100 (returns vs resolved shipments). */
-  const resolved  = delivered + returned;
+
+  /* Two tenant-scoped reads in parallel:
+       1) the pure Safqa-order buckets (counts + revenue by status_class)
+       2) total Meta ad spend (expenses.meta_sync = TRUE) — drives ADS/CPP/Net.
+     Safqa pushes the marketer's earnings inside `total`, so every "profit" here
+     is a sum of `total` over the relevant status bucket (no separate field). */
+  const [aggRes, adsRes] = await Promise.all([
+    pool.query(
+      `SELECT
+         COUNT(*)::int                                            AS total,
+         COUNT(*) FILTER (WHERE status_class = 'delivered')::int  AS delivered,
+         COUNT(*) FILTER (WHERE status_class = 'confirmed')::int  AS confirmed_only,
+         COUNT(*) FILTER (WHERE status_class = 'returned')::int   AS returned,
+         COUNT(*) FILTER (WHERE status_class = 'pending')::int    AS pending,
+         COUNT(*) FILTER (WHERE LOWER(status) = 'holding')::int   AS on_hold,
+         COALESCE(SUM(total), 0)                                                              AS revenue_all,
+         COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0)     AS revenue_confirmed,
+         COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0)                    AS revenue_delivered
+       FROM external_affiliate_orders
+       WHERE business_id = $1 AND network = 'safqa'`,
+      [businessId]
+    ),
+    pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS ad_spend
+         FROM expenses
+        WHERE business_id = $1::integer AND meta_sync = TRUE`,
+      [businessId]
+    ).catch(() => ({ rows: [{ ad_spend: 0 }] })),   // non-fatal: degrade ADS to 0
+  ]);
+
+  const r = aggRes.rows[0] || {};
+  const r0 = (x) => Math.round(num(x));
+  const r1 = (x) => Math.round(num(x) * 10) / 10;
+  const r2 = (x) => Math.round(num(x) * 100) / 100;
+
+  /* ── Raw buckets ─────────────────────────────────────────────────────── */
+  const orders        = num(r.total);
+  const delivered     = num(r.delivered);
+  const returned      = num(r.returned);                 // returned AFTER shipping
+  const confirmedOnly = num(r.confirmed_only);
+  const pending       = num(r.pending);
+  const onHold        = num(r.on_hold);                  // raw status = 'holding'
+  const confirmed     = delivered + confirmedOnly;       // delivered is a subset of confirmed
+
+  /* ── Profits (Σ Safqa `total`) ───────────────────────────────────────── */
+  const profit          = r0(r.revenue_all);                              // PROFIT
+  const profitConfirmed = r0(r.revenue_confirmed);                        // PROFIT (CONFIRMED)
+  const profitDelivered = r0(r.revenue_delivered);                        // PROFIT (DELIVERED)
+  const profitInProgress = r0(num(r.revenue_confirmed) - num(r.revenue_delivered)); // confirmed − delivered
+
+  /* ── Pipeline counts ─────────────────────────────────────────────────── */
+  const inProgressOrders = Math.max(0, confirmed - delivered - returned); // ORDERS (IN PROGRESS)
+
+  /* ── Rates ───────────────────────────────────────────────────────────── */
+  const resolved = delivered + returned;                 // shipments with a final outcome
+  const cr  = orders   > 0 ? r2((confirmed / orders) * 100)   : 0;        // CR
+  const ndr = resolved > 0 ? r2((returned / resolved) * 100)  : 0;        // NDR (returns)
+  const dr  = resolved > 0 ? r2((delivered / resolved) * 100) : 0;        // DR = 100 − NDR
+
+  /* ── Derived money metrics (global DR; Safqa has no product-level data) ── */
+  const futureBalance = r0(profitInProgress * (dr / 100));               // F.B (IN PROGRESS)
+  const avgProfit     = delivered > 0 ? r2(profitDelivered / delivered) : 0; // AVG PROFIT
+  const maxCpp        = r2(avgProfit * (dr / 100));                      // MAX CPP
+  const ads           = r0(adsRes.rows[0]?.ad_spend);                    // ADS (Meta spend)
+  const cpp           = orders > 0 ? r2(ads / orders) : 0;               // CPP
+  const netProfit     = r0(profitDelivered - ads);                      // NET PROFIT
+  const forecastedNetProfit = r0(netProfit + futureBalance);            // FORECASTED NET PROFIT
+
   return {
-    connected:     Boolean(connected) || total > 0,
-    revenue,
-    commission:    revenue,        // Safqa earnings live in `total` of delivered orders
-    orders:        total,
+    connected:     Boolean(connected) || orders > 0,
+    /* ── Legacy contract (kept for existing cards / aggregates) ─────────── */
+    revenue:       profitDelivered,   // realised earnings = Σ total of delivered
+    commission:    profitDelivered,
+    orders,
     confirmed,
     delivered,
-    returned,                      // "Rejected" / المرتجعات
-    confirmedRate: total > 0 ? Math.round((confirmed / total) * 1000) / 10 : 0,
-    deliveredRate: total > 0 ? Math.round((delivered / total) * 1000) / 10 : 0,
-    ndr:           resolved > 0 ? Math.round((returned / resolved) * 1000) / 10 : 0,
+    returned,                          // "Rejected" / المرتجعات
+    confirmedRate: cr,
+    deliveredRate: orders > 0 ? r1((delivered / orders) * 100) : 0,
+    ndr,
+    /* ── 20-metric affiliate dashboard contract ────────────────────────── */
+    profit,                            // ORDERS-wide profit
+    profitConfirmed,
+    profitDelivered,
+    inProgressOrders,
+    pending,
+    onHold,
+    profitInProgress,
+    cr,
+    dr,
+    futureBalance,
+    avgProfit,
+    maxCpp,
+    ads,
+    cpp,
+    netProfit,
+    forecastedNetProfit,
   };
 }
 
