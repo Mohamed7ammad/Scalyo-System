@@ -799,11 +799,22 @@ export default function AnalyticsDashboard() {
   const trueCPA = totalDelivered > 0 ? metaSpend / totalDelivered : 0;
   const avgProfit = totalDelivered > 0 ? netProfit / totalDelivered : 0;
 
-  /* Max CPA across products (worst-case cost per acquisition) */
-  const maxCpp = useMemo(
-    () => Math.max(0, ...profitability.map((p) => p.cpa ?? 0)),
-    [profitability]
-  );
+  /* Global Break-Even CPP (نقطة التعادل) — the absolute maximum a media buyer can
+     spend to ACQUIRE one order before the store loses money, using the real
+     blended unit economics:
+       Net Profit BEFORE Ads = delivered revenue − COGS − Bosta shipping − OPEX
+       Break-Even MAX CPP    = Net Profit Before Ads ÷ Total Orders (DB count)
+     Divided by total PLACED orders (DB count) so it is 1:1 comparable with the
+     live CPP, which is also per placed order. (Affiliate view has its own MAX
+     CPP inside SafqaAffiliateGrid — this only drives the e-commerce card.) */
+  const maxCpp = useMemo(() => {
+    const netProfitBeforeAds =
+        (Number.isFinite(totalRevenue)      ? totalRevenue      : 0)
+      - (Number.isFinite(effectiveCogs)     ? effectiveCogs     : 0)
+      - (Number.isFinite(effectiveShipping) ? effectiveShipping : 0)
+      - (Number.isFinite(effectiveOpex)     ? effectiveOpex     : 0);
+    return totalOrders > 0 ? netProfitBeforeAds / totalOrders : 0;
+  }, [totalRevenue, effectiveCogs, effectiveShipping, effectiveOpex, totalOrders]);
 
   /* ── Chart data — maps daily_chart_stats to Recharts shape ─────── */
   const chartData = useMemo(() => {
@@ -1301,7 +1312,7 @@ export default function AnalyticsDashboard() {
               <KPICard
                 label="أقصى تكلفة للطلب (MAX CPP)"
                 value={loadingProfitability ? '...' : fmtEGP(parseFloat(maxCpp.toFixed(2)))}
-                subValue="أعلى CPA عبر المنتجات"
+                subValue="نقطة التعادل (Break-Even) للمتجر"
                 trend={41.5}
                 trendGood={false}
                 accent="text-red-600 dark:text-red-400"
