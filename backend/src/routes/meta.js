@@ -805,13 +805,17 @@ async function syncSingleAccount(acct, startDate, endDate) {
         console.log(`[meta/runSync] ⏭️  Skipping zero-spend key: ${g.rowDate} | "${g.campaignName}"`);
         continue;
       }
-      /* extractSku returns null when the campaign name has no recognisable SKU
-         tag → store 'UNATTRIBUTED' so spend + purchases still reach the totals
-         (the expSql aggregate has no SKU filter) while staying out of per-product
-         profitability (which joins on UPPER(p.sku)). Same name → same SKU, so
-         merging same-named campaigns never crosses SKU boundaries.             */
+      /* STRICT SKU GATE — product campaigns MUST carry a SKU tag (SKU-<code> in
+         the name, or a manual override). When extractSku returns null the
+         campaign is NOT a product campaign (brand / awareness / generic), so we
+         IGNORE it entirely: no spend, no purchases, no row written to the DB.
+         This keeps non-product spend out of the financial totals and CPA/CPP. */
       const skuRaw = extractSku(g.campaignName);
-      const sku    = skuRaw !== null ? skuRaw : 'UNATTRIBUTED';
+      if (skuRaw === null) {
+        console.log(`[meta/runSync] ⏭️  Ignoring non-product campaign (no SKU): ${g.rowDate} | "${g.campaignName}" (spend ${spend} dropped)`);
+        continue;
+      }
+      const sku = skuRaw;
 
       console.log('[SYNC DEBUG] Upserting row:', JSON.stringify({ date: g.rowDate, campaign: g.campaignName, sku, spend, metaPurchases: g.metaPurchases }));
 

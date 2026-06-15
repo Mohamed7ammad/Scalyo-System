@@ -555,10 +555,12 @@ export const getDashboardOverview = (startDate?: string, endDate?: string) =>
 /* ── Unified Dashboard Stats (new) ──────────────────────────────────── */
 
 export interface DashboardOverviewStats {
-  /** Meta-reported purchases (SUM of meta_purchases from expenses where meta_sync=true).
-   *  This is the authoritative order count — it bypasses the ERP orders table so that
-   *  manual orders not logged in the ERP are still counted. */
+  /** Authoritative Total Orders — a direct COUNT of the internal `orders` table for
+   *  the selected date range (includes manual orders; NOT pixel-dependent). */
   total_orders:    number;
+  /** Meta-reported purchases (SUM of meta_purchases where meta_sync=true). Used ONLY
+   *  for ad-efficiency metrics (CPP/CPA) — never the Total Orders KPI. */
+  meta_orders?:    number;
   /** Orders that reached تم التأكيد or beyond. */
   total_confirmed: number;
   /** Orders in status تم التوصيل. */

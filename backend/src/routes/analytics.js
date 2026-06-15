@@ -1262,13 +1262,15 @@ router.get('/dashboard', authenticate, async (req, res) => {
     }
 
     const overview = {
-      /* total_orders = Meta-reported purchases (authoritative) — NOT the ERP row count.
-         Source: SUM(meta_purchases) FILTER (WHERE meta_sync = true) from expenses,
-         bounded strictly to the requested date window via hardcoded $1/$2 params.
-         REMOVED: metaDailyTotal fallback — it was summing dayExpRes.rows (potentially
-         the entire 30-day table when the filter was empty) and producing 1384 regardless
-         of the active date filter.  Now if meta_total_orders = 0 we show 0. */
-      total_orders:    parseInt(ex.meta_total_orders, 10) || 0,
+      /* total_orders = AUTHORITATIVE direct COUNT of the internal `orders` table
+         for the selected window (ov.total_orders = COUNT(id) FILTER (WHERE ${CR})).
+         The Meta pixel misses events and never sees manually-added orders, so its
+         purchase count is NOT the source of truth for this KPI. The Meta purchase
+         count is preserved separately as `meta_orders` for ad-efficiency metrics
+         (CPP/CPA) which must stay Meta-attributed. */
+      total_orders:    parseInt(ov.total_orders, 10) || 0,
+      /* Meta-reported purchases (SUM meta_purchases WHERE meta_sync) — ads CPP/CPA only. */
+      meta_orders:     parseInt(ex.meta_total_orders, 10) || 0,
       total_confirmed: parseInt(ov.total_confirmed, 10) || 0,
       total_delivered: parseInt(ov.total_delivered, 10) || 0,
       total_rejected:  parseInt(ov.total_rejected,  10) || 0,

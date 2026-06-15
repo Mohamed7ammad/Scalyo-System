@@ -684,6 +684,9 @@ export default function AnalyticsDashboard() {
   const totalRevenue   = isAffiliate ? affRevenue   : (ov?.total_revenue   ?? 0);
   const totalExpenses  = ov?.total_expenses  ?? 0;
   const metaSpend      = ov?.meta_spend      ?? 0;
+  /* Meta-attributed purchases — used ONLY for ad-efficiency (CPP/CPA), NOT the
+     Total Orders KPI (which is now the authoritative DB count above). */
+  const metaOrders     = ov?.meta_orders     ?? 0;
 
   /* COGS summed from per-product profitability (most accurate source).
      RESPECTS the product dropdown: when a specific product is selected we sum
@@ -792,7 +795,7 @@ export default function AnalyticsDashboard() {
   const cr    = totalOrders    > 0 ? totalConfirmed / totalOrders    * 100 : 0;
   const dr    = totalConfirmed > 0 ? totalDelivered / totalConfirmed * 100 : 0;
   const ndr   = totalOrders    > 0 ? totalDelivered / totalOrders    * 100 : 0;
-  const cpp   = totalOrders    > 0 ? metaSpend / totalOrders    : 0;
+  const cpp   = metaOrders     > 0 ? metaSpend / metaOrders     : 0;
   const trueCPA = totalDelivered > 0 ? metaSpend / totalDelivered : 0;
   const avgProfit = totalDelivered > 0 ? netProfit / totalDelivered : 0;
 
@@ -1183,7 +1186,7 @@ export default function AnalyticsDashboard() {
             <KPICard
               label="إجمالي الطلبات"
               value={loadingDash ? '...' : fmt(totalOrders)}
-              subValue={loadingDash ? '...' : (isAffiliate ? 'إجمالي طلبات منصات الأفليت ✓' : 'بيانات حقيقية من Meta Ads ✓')}
+              subValue={loadingDash ? '...' : (isAffiliate ? 'إجمالي طلبات منصات الأفليت ✓' : 'عدد الطلبات الفعلي من قاعدة البيانات ✓')}
               trend={12}
               accent="text-slate-800 dark:text-white"
             />
