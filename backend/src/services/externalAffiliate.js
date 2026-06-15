@@ -239,40 +239,73 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   const startDate = DATE_RE.test(String(opts.startDate || '')) ? opts.startDate : null;
   const endDate   = DATE_RE.test(String(opts.endDate   || '')) ? opts.endDate   : null;
 
-  /* Two tenant-scoped reads in parallel:
+  /* Two tenant-scoped reads:
        1) the pure Safqa-order buckets (counts + revenue by status_class)
        2) total Meta ad spend (expenses.meta_sync = TRUE) — drives ADS/CPP/Net.
      Safqa pushes the marketer's earnings inside `total`, so every "profit" here
      is a sum of `total` over the relevant status bucket (no separate field). */
-  const [aggRes, adsRes] = await Promise.all([
-    pool.query(
-      `SELECT
-         COUNT(*)::int                                            AS total,
-         COUNT(*) FILTER (WHERE status_class = 'delivered')::int  AS delivered,
-         COUNT(*) FILTER (WHERE status_class = 'confirmed')::int  AS confirmed_only,
-         COUNT(*) FILTER (WHERE status_class = 'returned')::int   AS returned,
-         COUNT(*) FILTER (WHERE status_class = 'pending')::int    AS pending,
-         COUNT(*) FILTER (WHERE LOWER(status) = 'holding')::int   AS on_hold,
-         COALESCE(SUM(total), 0)                                                              AS revenue_all,
-         COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0)     AS revenue_confirmed,
-         COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0)                    AS revenue_delivered
-       FROM external_affiliate_orders
-       WHERE business_id = $1 AND network = 'safqa'
+  const ORDER_AGG_SELECT = `
+    SELECT
+      COUNT(*)::int                                            AS total,
+      COUNT(*) FILTER (WHERE status_class = 'delivered')::int  AS delivered,
+      COUNT(*) FILTER (WHERE status_class = 'confirmed')::int  AS confirmed_only,
+      COUNT(*) FILTER (WHERE status_class = 'returned')::int   AS returned,
+      COUNT(*) FILTER (WHERE status_class = 'pending')::int    AS pending,
+      COUNT(*) FILTER (WHERE LOWER(status) = 'holding')::int   AS on_hold,
+      COALESCE(SUM(total), 0)                                                          AS revenue_all,
+      COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0) AS revenue_confirmed,
+      COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0)                AS revenue_delivered
+    FROM external_affiliate_orders
+    WHERE business_id = $1 AND network = 'safqa'`;
+
+  /* The order-bucket read is the single most likely silent failure point (e.g. a
+     live external_affiliate_orders table created BEFORE the created_at column
+     existed → the date predicate throws). Run it explicitly so we can LOG the
+     full error AND degrade gracefully to an UNFILTERED read, so the grid shows
+     the tenant's real orders instead of a misleading 0. */
+  let aggRes;
+  try {
+    aggRes = await pool.query(
+      `${ORDER_AGG_SELECT}
          AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
          AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)`,
       [businessId, startDate, endDate]
-    ),
-    pool.query(
-      `SELECT COALESCE(SUM(amount), 0) AS ad_spend
-         FROM expenses
-        WHERE business_id = $1::integer AND meta_sync = TRUE
-          AND ($2::date IS NULL OR expense_date >= $2::date)
-          AND ($3::date IS NULL OR expense_date <= $3::date)`,
-      [businessId, startDate, endDate]
-    ).catch(() => ({ rows: [{ ad_spend: 0 }] })),   // non-fatal: degrade ADS to 0
-  ]);
+    );
+  } catch (err) {
+    console.error(
+      `[aggregateSafqaFromDb] ❌ date-filtered order query FAILED for business ${businessId} ` +
+      `(range ${startDate || '—'}..${endDate || '—'}). This is the swallowed error that ` +
+      `zeroes the grid. Most likely the created_at column is missing — restart the backend ` +
+      `to run the boot migration. Falling back to an UNFILTERED read so data still renders.\n`,
+      err
+    );
+    aggRes = await pool.query(ORDER_AGG_SELECT, [businessId]);   // no date bounds → all-time
+  }
+
+  /* Ad spend is non-fatal: degrade ADS to 0 on any error, but LOG it (no longer silent). */
+  const adsRes = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0) AS ad_spend
+       FROM expenses
+      WHERE business_id = $1::integer AND meta_sync = TRUE
+        AND ($2::date IS NULL OR expense_date >= $2::date)
+        AND ($3::date IS NULL OR expense_date <= $3::date)`,
+    [businessId, startDate, endDate]
+  ).catch((err) => {
+    console.error(`[aggregateSafqaFromDb] ⚠️  ad-spend query failed for business ${businessId} (ADS→0):`, err.message);
+    return { rows: [{ ad_spend: 0 }] };
+  });
 
   const r = aggRes.rows[0] || {};
+
+  /* Lightweight diagnostic (gate off with SAFQA_DEBUG=false): confirms whether
+     rows actually matched for this tenant + range, so a "0" can be traced to
+     either no data (check the webhook URL's businessId) or a date exclusion. */
+  if (process.env.SAFQA_DEBUG !== 'false') {
+    console.log(
+      `[aggregateSafqaFromDb] business ${businessId} | range ${startDate || 'all'}..${endDate || 'all'} ` +
+      `→ ${num(r.total)} order(s) matched, revenue_all=${num(r.revenue_all)}`
+    );
+  }
   const r0 = (x) => Math.round(num(x));
   const r1 = (x) => Math.round(num(x) * 10) / 10;
   const r2 = (x) => Math.round(num(x) * 100) / 100;
@@ -840,7 +873,9 @@ async function getExternalAffiliateStats(businessId, opts = {}) {
       safqa,
     };
   } catch (err) {
-    console.warn('[externalAffiliate] stats fetch failed:', err.message);
+    /* Log the FULL error (stack + SQL detail), not just .message — this catch
+       previously hid the real cause behind an all-zero `empty` object. */
+    console.error('[externalAffiliate] ❌ stats fetch failed — returning empty (all-zero) stats:', err);
     return empty;
   }
 }
