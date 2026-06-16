@@ -748,7 +748,11 @@ export interface ProductProfitability {
   /** Exact per-AWB Bosta shipping (Σ orders.actual_shipping_fee) for delivered
    *  orders — the real shipping cost folded into this product's margin. */
   shipping_cost?:      number;
-  /** delivered_revenue − cogs − attributed_ad_spend − shipping_cost */
+  /** Path A+ OPEX allocated to this product (exact commission + shared OPEX split
+   *  by delivered-order count) — folded into net_profit, mirroring the dashboard. */
+  opex_allocated?:     number;
+  /** delivered_revenue − cogs − attributed_ad_spend − shipping_cost − opex_allocated.
+   *  Matches the top KPI Net Profit card for the same product/date range. */
   net_profit:          number;
   /** attributed_ad_spend / total_orders  (null when no Meta orders) */
   cpa:                 number | null;

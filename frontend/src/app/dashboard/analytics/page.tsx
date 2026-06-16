@@ -951,7 +951,8 @@ export default function AnalyticsDashboard() {
         orders:          dbOrders,
         confirmed:       confirmedOrds,
         delivered:       safe(item.units_delivered),
-        grossProfit:     safe(item.delivered_revenue),
+        /* Gross Profit = delivered revenue − COGS (NOT raw revenue). */
+        grossProfit:     safe(item.delivered_revenue) - safe(item.cogs),
         adsSpend:        safe(item.attributed_ad_spend),
         cogs:            safe(item.cogs),
         cr:              crPct,

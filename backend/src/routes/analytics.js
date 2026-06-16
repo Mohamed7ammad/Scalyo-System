@@ -683,6 +683,69 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       throw err;   // re-throw so the outer catch sends the 500 with details
     });
 
+    /* ── OPEX allocation (Path A+) — IDENTICAL model to /api/analytics/dashboard
+       so the lower sections' Net Profit matches the top KPI cards exactly.
+         • COMMISSIONS (source LIKE 'comm_%') → attributed EXACTLY per product by
+           joining the treasury row's order to its product (same SKU→name fallback
+           as the profitability CTE).
+         • SHARED OPEX (everything else, AD_SPEND excluded) → one business-wide
+           lump split by DELIVERED-ORDER COUNT across all products.
+       Date-scoped by transaction_date with the SAME validated YYYY-MM-DD bounds
+       ($1 start / $2 end) already used by this route. Mirrors opexSql /
+       opexCommByProductSql in the dashboard route verbatim, so the two endpoints
+       can never drift in how OPEX is computed.                                  */
+    const opexParams = [req.user.business_id, params[0], params[1]];
+    const [opexRes, opexCommRes] = await Promise.all([
+      pool.query(`
+        SELECT source, COALESCE(SUM(amount), 0) AS amount
+        FROM   treasury_transactions
+        WHERE  business_id = $1::integer
+          AND  type = 'expense'
+          AND  source <> 'AD_SPEND'
+          AND  ($2::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') >= $2)
+          AND  ($3::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') <= $3)
+        GROUP  BY source
+      `, opexParams).catch((err) => { console.error('[products-profitability/opex] failed:', err.message); return { rows: [] }; }),
+      pool.query(`
+        SELECT p.name AS product_name, COALESCE(SUM(tt.amount), 0) AS commission
+        FROM   treasury_transactions tt
+        JOIN   orders   o ON o.id = tt.order_id AND o.business_id = $1::integer
+        JOIN   products p ON p.business_id = $1::integer
+          AND (
+            ( COALESCE(o.sku, '') <> '' AND UPPER(o.sku) = UPPER(p.sku) )
+            OR
+            ( UPPER(TRIM(COALESCE(o."ProductName", ''))) = UPPER(TRIM(p.name))
+              AND NOT EXISTS (
+                SELECT 1 FROM products px
+                WHERE px.business_id = $1::integer
+                  AND COALESCE(o.sku, '') <> ''
+                  AND UPPER(px.sku) = UPPER(o.sku)
+              ) )
+          )
+        WHERE  tt.business_id = $1::integer
+          AND  tt.type = 'expense'
+          AND  tt.source LIKE 'comm\\_%'
+          AND  ($2::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') >= $2)
+          AND  ($3::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') <= $3)
+        GROUP  BY p.id, p.name
+      `, opexParams).catch((err) => { console.error('[products-profitability/opex-comm] failed:', err.message); return { rows: [] }; }),
+    ]);
+
+    /* Split OPEX into commissions (exact per product) vs shared (count-split). */
+    let opexShsTotal = 0, opexCommTotal = 0;
+    for (const o of (opexRes.rows ?? [])) {
+      const amt = parseFloat(o.amount) || 0;
+      if (String(o.source).startsWith('comm_')) opexCommTotal += amt;
+      else                                      opexShsTotal  += amt;
+    }
+    const commissionByProduct = {};
+    for (const c of (opexCommRes.rows ?? [])) {
+      commissionByProduct[c.product_name] = parseFloat(c.commission) || 0;
+    }
+    /* Shared OPEX is split by delivered-order COUNT across ALL products (the same
+       denominator the frontend uses: Σ units_delivered over the full catalogue). */
+    const totalDeliveredAll = rows.reduce((s, r) => s + (parseInt(r.units_delivered, 10) || 0), 0);
+
     /* Compute derived metrics in JS to keep the SQL readable */
     const result = rows.map((r) => {
       const costPrice        = parseFloat(r.cost_price)          || 0;
@@ -716,7 +779,17 @@ router.get('/products-profitability', authenticate, async (req, res) => {
          Folded into the product margin so net_profit reflects the TRUE cost of
          selling this product: revenue − COGS − ad spend − real shipping. */
       const shippingCost = parseFloat((parseFloat(r.shipping_cost) || 0).toFixed(2));
-      const netProfit   = parseFloat((deliveredRevenue - cogs - attributedSpend - shippingCost).toFixed(2));
+      /* Path A+ OPEX for THIS product = exact commission + shared × (units ÷ total).
+         Identical to the dashboard's effectiveOpex for a selected product, so this
+         row's net profit equals the top KPI Net Profit card when filtered to it. */
+      const opexCommission = commissionByProduct[r.product_name] || 0;
+      const opexShared     = totalDeliveredAll > 0
+        ? opexShsTotal * (unitsDelivered / totalDeliveredAll)
+        : 0;
+      const opexAllocated  = parseFloat((opexCommission + opexShared).toFixed(2));
+      /* TRUE net profit — now includes OPEX, matching /dashboard exactly:
+         revenue − COGS − ad spend − per-AWB shipping − allocated OPEX. */
+      const netProfit   = parseFloat((deliveredRevenue - cogs - attributedSpend - shippingCost - opexAllocated).toFixed(2));
       const cpa         = metaOrders > 0
         ? parseFloat((attributedSpend / metaOrders).toFixed(2))
         : null;
@@ -736,6 +809,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         attributed_ad_spend: attributedSpend,
         cogs,
         shipping_cost:       shippingCost,       // exact per-AWB Bosta fee (Option C)
+        opex_allocated:      opexAllocated,      // Path A+ OPEX folded into net_profit
         net_profit:          netProfit,
         cpa,
         meta_orders:         metaOrders,          // backward-compat alias (identical to total_orders)
