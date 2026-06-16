@@ -730,11 +730,14 @@ export interface ProductProfitability {
   units_shipped:       number;
   /** Product Delivery Rate = units_delivered ÷ units_shipped × 100 (0 when none shipped). */
   delivery_rate:       number;
-  /** Meta-reported purchases for this product (authoritative order count, CPA denominator).
-   *  Sourced from SUM(meta_purchases) in expenses where sku matches. */
+  /** Authoritative DB order count for this product — a COUNT of the internal
+   *  orders table (ALL statuses) for the selected date range. Matches the
+   *  dashboard total_orders source; NOT the Meta pixel count. */
   total_orders:        number;
-  /** ERP-internal confirmed order count for this product.
-   *  Used for pixel efficiency: erp_orders / total_orders × 100. */
+  /** Confirmed-and-beyond order count (CR numerator) for this product. */
+  confirmed_orders?:   number;
+  /** ERP-internal confirmed order count (alias of confirmed_orders) — kept for
+   *  the pixel-efficiency calc: erp_orders / meta_orders × 100. */
   erp_orders?:         number;
   /** Sum of ProductPrice for delivered orders. */
   delivered_revenue:   number;

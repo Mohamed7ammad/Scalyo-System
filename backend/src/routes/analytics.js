@@ -563,6 +563,10 @@ router.get('/products-profitability', authenticate, async (req, res) => {
          a single order.  Date filter uses "createdAt" (placement date).          */
       SELECT
         p.id                                                                AS product_id,
+        /* Authoritative DB order count for this product — ALL statuses, on the
+           SAME createdAt date cohort. This is the order-count source of truth
+           (matches the dashboard's total_orders), NOT the Meta pixel count. */
+        COUNT(DISTINCT o.id)                                                AS db_order_count,
         COUNT(DISTINCT o.id) FILTER (WHERE o."Status" = 'تم التوصيل')     AS units_delivered,
         /* DR denominator — orders that actually LEFT the warehouse to the courier.
            Deliberately EXCLUDES 'تم التأكيد' (confirmed but not yet shipped) and
@@ -651,6 +655,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       COALESCE(os.units_delivered,      0)     AS units_delivered,
       COALESCE(os.units_shipped,        0)     AS units_shipped,
       COALESCE(os.total_confirmed,      0)     AS erp_order_count,
+      COALESCE(os.db_order_count,       0)     AS db_order_count,
       COALESCE(os.delivered_revenue,    0)     AS delivered_revenue,
       COALESCE(os.cogs,                 0)     AS cogs,
       COALESCE(os.shipping_cost,        0)     AS shipping_cost,
@@ -693,6 +698,9 @@ router.get('/products-profitability', authenticate, async (req, res) => {
          Column was renamed from total_orders → erp_order_count in the SQL above
          to prevent confusion with the authoritative Meta-sourced total_orders.    */
       const erpOrderCount    = parseInt(r.erp_order_count,  10)  || 0;
+      /* Authoritative DB order count (all statuses, date-filtered) — the order
+         total-of-truth for this product, mirroring the dashboard total_orders. */
+      const dbOrderCount     = parseInt(r.db_order_count,   10)  || 0;
       const deliveredRevenue = parseFloat(r.delivered_revenue)   || 0;
       const attributedSpend  = parseFloat(r.attributed_ad_spend) || 0;
 
@@ -721,8 +729,9 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         units_delivered:     unitsDelivered,
         units_shipped:       unitsShipped,        // DR denominator (orders sent to courier)
         delivery_rate:       deliveryRate,        // delivered ÷ shipped × 100
-        total_orders:        metaOrders,          // Meta-reported (authoritative) — from meta_orders_total
-        erp_orders:          erpOrderCount,       // ERP internal count — for pixel efficiency calculation
+        total_orders:        dbOrderCount,        // AUTHORITATIVE DB order count (all statuses, date-filtered)
+        confirmed_orders:    erpOrderCount,       // confirmed+ statuses — CR numerator
+        erp_orders:          erpOrderCount,       // alias kept for pixel-efficiency calc
         delivered_revenue:   deliveredRevenue,
         attributed_ad_spend: attributedSpend,
         cogs,

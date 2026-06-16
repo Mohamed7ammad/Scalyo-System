@@ -937,17 +937,24 @@ export default function AnalyticsDashboard() {
       /* Bulletproof numeric coercion — product stubs (e.g. from a Taager sync)
          may carry 0 / null costs, so every value falls back to a finite number. */
       const safe = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+      /* DB-sourced counts (date-filtered): total = all statuses, confirmed = confirmed+.
+         CR% = confirmed ÷ total DB orders × 100 (null only when there are no orders). */
+      const dbOrders      = safe(item.total_orders);
+      const confirmedOrds = safe(item.confirmed_orders ?? item.erp_orders);
+      const crPct         = dbOrders > 0
+        ? parseFloat(((confirmedOrds / dbOrders) * 100).toFixed(1))
+        : null;
       return {
         name:            item.product_name ?? '—',
         sku:             item.sku ?? '',
         stock:           safe(stockMatch?.stock_quantity),
-        orders:          safe(item.total_orders),
-        confirmed:       null,
+        orders:          dbOrders,
+        confirmed:       confirmedOrds,
         delivered:       safe(item.units_delivered),
         grossProfit:     safe(item.delivered_revenue),
         adsSpend:        safe(item.attributed_ad_spend),
         cogs:            safe(item.cogs),
-        cr:              null,
+        cr:              crPct,
         /* Product Delivery Rate = delivered ÷ shipped (from the backend).
            null (→ "—") only when nothing was shipped yet, so the rate is N/A. */
         dr:              item.units_shipped > 0 ? safe(item.delivery_rate) : null,
@@ -2131,7 +2138,7 @@ export default function AnalyticsDashboard() {
                   border-slate-200 dark:border-slate-700">
                   <tr>
                     {['المنتج', 'SKU', 'المخزون', 'الطلبات', 'المؤكد', 'المُسلَّم',
-                      'طلبات ميتا', 'الربح الإجمالي', 'الإنفاق الإعلاني', 'تكلفة البضاعة',
+                      'الربح الإجمالي', 'الإنفاق الإعلاني', 'تكلفة البضاعة',
                       'CR%', 'DR%', 'NDR%', 'صافي الربح',
                     ].map((h) => (
                       <th key={h} className="px-4 py-3.5 text-right text-[11px] font-bold uppercase
@@ -2146,14 +2153,14 @@ export default function AnalyticsDashboard() {
                   {loadingProfitability ? (
                     [...Array(4)].map((_, i) => (
                       <tr key={i}>
-                        <td colSpan={14} className="px-4 py-2.5">
+                        <td colSpan={13} className="px-4 py-2.5">
                           <div className="h-9 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse" />
                         </td>
                       </tr>
                     ))
                   ) : tableProductData.length === 0 ? (
                     <tr>
-                      <td colSpan={14} className="py-14 text-center">
+                      <td colSpan={13} className="py-14 text-center">
                         <p className="text-sm text-slate-400 dark:text-slate-600">
                           لا توجد بيانات للفترة المحددة
                         </p>
@@ -2196,31 +2203,6 @@ export default function AnalyticsDashboard() {
                           {p.confirmed !== null ? fmt(p.confirmed) : <span className="text-slate-300 dark:text-slate-600">—</span>}
                         </td>
                         <td className="px-4 py-3.5 font-medium text-teal-600 dark:text-teal-400">{fmt(p.delivered)}</td>
-                        <td className="px-4 py-3.5">
-                          {p.metaOrders > 0 ? (
-                            <div className="flex flex-col gap-1">
-                              <span className="inline-flex items-center gap-1 font-semibold text-violet-600 dark:text-violet-400 tabular-nums">
-                                <span className="text-[10px]">📘</span>
-                                {fmt(p.metaOrders)}
-                              </span>
-                              {/* Only show pixel efficiency when we have actual ERP orders to compare.
-                                  If erpOrders === 0 (historical data before ERP went live, or
-                                  no matching SKU in orders), showing 0% red would be misleading. */}
-                              {p.pixelEfficiency !== null && p.erpOrders > 0 && (
-                                <span className={`self-start text-[10px] font-bold px-1.5 py-0.5 rounded-md whitespace-nowrap
-                                  ${p.pixelEfficiency >= 80
-                                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400'
-                                    : p.pixelEfficiency >= 50
-                                      ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400'
-                                      : 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'}`}>
-                                  {p.pixelEfficiency}% pixel
-                                </span>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-slate-300 dark:text-slate-600 text-xs">—</span>
-                          )}
-                        </td>
                         <td className="px-4 py-3.5 font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtEGP(p.grossProfit)}</td>
                         <td className="px-4 py-3.5 font-medium text-rose-600 dark:text-rose-400 whitespace-nowrap">{fmtEGP(p.adsSpend)}</td>
                         <td className="px-4 py-3.5 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtEGP(p.cogs)}</td>
