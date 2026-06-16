@@ -888,11 +888,23 @@ router.get('/dashboard', authenticate, async (req, res) => {
   const productSel = typeof req.query.product === 'string' ? req.query.product.trim() : '';
   const hasProduct = productSel && productSel !== 'كل المنتجات';
   let prodSku = null;
+  /* ALIAS-AWARE match set: an order belongs to the selected product when its sku
+     OR ProductName matches the product's sku, its canonical name, OR ANY of its
+     aliases (case-insensitive, trimmed) — the same resolution used everywhere
+     else (resolveProductForOrder). prodSku stays the canonical SKU for ad-spend
+     attribution ($5), which is keyed on the catalogue SKU. */
+  let prodTokens = [];
   if (hasProduct) {
     const pr = await pool.query(
-      `SELECT sku FROM products WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) AND business_id = $2::integer LIMIT 1`,
+      `SELECT sku, name, COALESCE(aliases, '{}'::text[]) AS aliases
+         FROM products
+        WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) AND business_id = $2::integer LIMIT 1`,
       [productSel, req.user.business_id]);
-    prodSku = pr.rows[0]?.sku ? String(pr.rows[0].sku).toUpperCase() : null;
+    const prow = pr.rows[0];
+    prodSku = prow?.sku ? String(prow.sku).toUpperCase() : null;
+    prodTokens = [prow?.sku, prow?.name, ...(prow?.aliases || []), productSel]
+      .map((t) => String(t ?? '').trim().toUpperCase())
+      .filter((t) => t !== '');
   }
 
   /* ── Expense date boundaries — plain string params ($1 / $2) ────────────────
@@ -985,12 +997,13 @@ router.get('/dashboard', authenticate, async (req, res) => {
     }
   }
 
-  /* Product filter clause (admin dropdown) — composes (AND) with any role scope. */
-  if (hasProduct) {
-    ordParams.push(prodSku ?? '');  const pSkuIdx  = ordParams.length;
-    ordParams.push(productSel);     const pNameIdx = ordParams.length;
-    ordFilter += ` AND ( ($${pSkuIdx} <> '' AND UPPER(COALESCE(sku,'')) = $${pSkuIdx})
-                         OR (UPPER(COALESCE("ProductName",'')) = UPPER($${pNameIdx})) )`;
+  /* Product filter clause (admin dropdown) — composes (AND) with any role scope.
+     ALIAS-AWARE: matches the order's sku OR ProductName against the product's
+     sku/name/aliases token set, so orders tagged with an alias still count. */
+  if (hasProduct && prodTokens.length > 0) {
+    ordParams.push(prodTokens);   const pTokIdx = ordParams.length;
+    ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))           = ANY($${pTokIdx}::text[])
+                      OR UPPER(TRIM(COALESCE("ProductName",'')))  = ANY($${pTokIdx}::text[]) )`;
   }
 
   /* Expense scope param is ALWAYS $3 (null for admin → no-op via IS NULL OR). */

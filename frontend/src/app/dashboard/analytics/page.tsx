@@ -914,7 +914,12 @@ export default function AnalyticsDashboard() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tableProductData: any[] = useMemo(() => {
     if (profitability.length === 0) return [];
-    return profitability.map((item) => {
+    /* GLOBAL PRODUCT FILTER: when a product is selected, the detailed table shows
+       ONLY that product's row (the dropdown value is the product_name). */
+    const scoped = (product && product !== 'كل المنتجات')
+      ? profitability.filter((p) => p.product_name === product)
+      : profitability;
+    return scoped.map((item) => {
       const stockMatch = products.find(
         (p) =>
           (p.sku && item.sku && p.sku.toUpperCase() === item.sku.toUpperCase()) ||
@@ -924,16 +929,6 @@ export default function AnalyticsDashboard() {
         item.total_orders > 0
           ? parseFloat(((item.units_delivered / item.total_orders) * 100).toFixed(1))
           : 0;
-      const metaOrders = item.meta_orders ?? 0;
-      /* Pixel efficiency = ERP orders ÷ Meta-reported purchases × 100.
-         After Round 3, item.total_orders IS meta_orders (they're the same value).
-         We must use item.erp_orders (raw ERP confirmed count) as the numerator so
-         the ratio is meaningful: < 100% → pixel over-counts, > 100% → under-counts. */
-      const erpOrdersForPixel = item.erp_orders ?? 0;
-      const pixelEfficiency =
-        metaOrders > 0
-          ? parseFloat(((erpOrdersForPixel / metaOrders) * 100).toFixed(1))
-          : null;
       /* Bulletproof numeric coercion — product stubs (e.g. from a Taager sync)
          may carry 0 / null costs, so every value falls back to a finite number. */
       const safe = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -951,22 +946,21 @@ export default function AnalyticsDashboard() {
         orders:          dbOrders,
         confirmed:       confirmedOrds,
         delivered:       safe(item.units_delivered),
-        /* Gross Profit = delivered revenue − COGS (NOT raw revenue). */
-        grossProfit:     safe(item.delivered_revenue) - safe(item.cogs),
+        /* RAW delivered revenue — every deduction is now its own column. */
+        revenue:         safe(item.delivered_revenue),
         adsSpend:        safe(item.attributed_ad_spend),
         cogs:            safe(item.cogs),
+        shipping:        safe(item.shipping_cost),     // per-product Bosta shipping
+        opex:            safe(item.opex_allocated),    // Path A+ allocated OPEX
         cr:              crPct,
         /* Product Delivery Rate = delivered ÷ shipped (from the backend).
            null (→ "—") only when nothing was shipped yet, so the rate is N/A. */
         dr:              item.units_shipped > 0 ? safe(item.delivery_rate) : null,
         ndr:             safe(itemNdr),
         netProfit:       safe(item.net_profit),
-        metaOrders:      safe(metaOrders),
-        erpOrders:       safe(erpOrdersForPixel),   // raw ERP count — gates the pixel badge
-        pixelEfficiency,                            // may be null by design (no Meta orders)
       };
     });
-  }, [profitability, products]);
+  }, [profitability, products, product]);
 
   /* ── PRODUCTS dropdown (built from real profitability data) ────── */
   const PRODUCTS = useMemo(
@@ -2133,13 +2127,14 @@ export default function AnalyticsDashboard() {
           <div className="bg-white dark:bg-slate-900 rounded-2xl border
             border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
             <div className="overflow-x-auto overflow-y-auto max-h-[460px]">
-              <table className="w-full text-sm" style={{ minWidth: '1220px' }}>
+              <table className="w-full text-sm" style={{ minWidth: '1420px' }}>
 
                 <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-900 border-b
                   border-slate-200 dark:border-slate-700">
                   <tr>
                     {['المنتج', 'SKU', 'المخزون', 'الطلبات', 'المؤكد', 'المُسلَّم',
-                      'الربح الإجمالي', 'الإنفاق الإعلاني', 'تكلفة البضاعة',
+                      'إجمالي الإيرادات', 'الإنفاق الإعلاني', 'تكلفة البضاعة',
+                      'مصاريف الشحن', 'المصاريف التشغيلية',
                       'CR%', 'DR%', 'NDR%', 'صافي الربح',
                     ].map((h) => (
                       <th key={h} className="px-4 py-3.5 text-right text-[11px] font-bold uppercase
@@ -2154,14 +2149,14 @@ export default function AnalyticsDashboard() {
                   {loadingProfitability ? (
                     [...Array(4)].map((_, i) => (
                       <tr key={i}>
-                        <td colSpan={13} className="px-4 py-2.5">
+                        <td colSpan={15} className="px-4 py-2.5">
                           <div className="h-9 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse" />
                         </td>
                       </tr>
                     ))
                   ) : tableProductData.length === 0 ? (
                     <tr>
-                      <td colSpan={13} className="py-14 text-center">
+                      <td colSpan={15} className="py-14 text-center">
                         <p className="text-sm text-slate-400 dark:text-slate-600">
                           لا توجد بيانات للفترة المحددة
                         </p>
@@ -2204,9 +2199,12 @@ export default function AnalyticsDashboard() {
                           {p.confirmed !== null ? fmt(p.confirmed) : <span className="text-slate-300 dark:text-slate-600">—</span>}
                         </td>
                         <td className="px-4 py-3.5 font-medium text-teal-600 dark:text-teal-400">{fmt(p.delivered)}</td>
-                        <td className="px-4 py-3.5 font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtEGP(p.grossProfit)}</td>
+                        {/* RAW revenue, then each deduction in its own column */}
+                        <td className="px-4 py-3.5 font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtEGP(p.revenue)}</td>
                         <td className="px-4 py-3.5 font-medium text-rose-600 dark:text-rose-400 whitespace-nowrap">{fmtEGP(p.adsSpend)}</td>
                         <td className="px-4 py-3.5 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtEGP(p.cogs)}</td>
+                        <td className="px-4 py-3.5 text-amber-600 dark:text-amber-400 whitespace-nowrap">{fmtEGP(p.shipping)}</td>
+                        <td className="px-4 py-3.5 text-orange-600 dark:text-orange-400 whitespace-nowrap">{fmtEGP(p.opex)}</td>
                         <td className="px-4 py-3.5">
                           {p.cr !== null
                             ? <RatePill value={p.cr} thresholds={[50, 70]} />
@@ -2237,11 +2235,16 @@ export default function AnalyticsDashboard() {
                     ? null
                     : tableProductData.reduce((s: number, p: {confirmed: number | null}) => s + (p.confirmed ?? 0), 0);
                   const totDelivered  = tableProductData.reduce((s: number, p: {delivered: number}) => s + p.delivered, 0);
-                  const totMetaOrders = tableProductData.reduce((s: number, p: {metaOrders: number}) => s + (p.metaOrders ?? 0), 0);
-                  const totGross      = tableProductData.reduce((s: number, p: {grossProfit: number}) => s + p.grossProfit, 0);
+                  const totRevenue    = tableProductData.reduce((s: number, p: {revenue: number}) => s + p.revenue, 0);
                   const totAds        = tableProductData.reduce((s: number, p: {adsSpend: number}) => s + p.adsSpend, 0);
                   const totCogs       = tableProductData.reduce((s: number, p: {cogs: number}) => s + p.cogs, 0);
+                  const totShipping   = tableProductData.reduce((s: number, p: {shipping: number}) => s + p.shipping, 0);
+                  const totOpex       = tableProductData.reduce((s: number, p: {opex: number}) => s + p.opex, 0);
                   const totNet        = tableProductData.reduce((s: number, p: {netProfit: number}) => s + p.netProfit, 0);
+                  /* 15 columns: المنتج | SKU | المخزون | الطلبات | المؤكد | المُسلَّم |
+                     إجمالي الإيرادات | الإنفاق الإعلاني | تكلفة البضاعة | مصاريف الشحن |
+                     المصاريف التشغيلية | CR% | DR% | NDR% | صافي الربح
+                     Footer span: 1 + 2 + 1+1+1 + 1+1+1+1+1 + 3 + 1 = 15. */
                   return (
                     <tfoot>
                       <tr className="bg-slate-100 dark:bg-slate-800/80
@@ -2253,21 +2256,11 @@ export default function AnalyticsDashboard() {
                           {totConfirmed !== null ? fmt(totConfirmed) : <span className="text-slate-400">—</span>}
                         </td>
                         <td className="px-4 py-3.5 font-bold text-teal-600 dark:text-teal-400">{fmt(totDelivered)}</td>
-                        <td className="px-4 py-3.5 font-bold text-violet-600 dark:text-violet-400">
-                          {totMetaOrders > 0 ? (
-                            <div className="flex flex-col gap-0.5">
-                              <span className="tabular-nums">{fmt(totMetaOrders)}</span>
-                              {totOrders > 0 && (
-                                <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 whitespace-nowrap">
-                                  {(totOrders / totMetaOrders * 100).toFixed(1)}% coverage
-                                </span>
-                              )}
-                            </div>
-                          ) : <span className="text-slate-400 dark:text-slate-600">—</span>}
-                        </td>
-                        <td className="px-4 py-3.5 font-bold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtEGP(totGross)}</td>
+                        <td className="px-4 py-3.5 font-bold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtEGP(totRevenue)}</td>
                         <td className="px-4 py-3.5 font-bold text-rose-600 dark:text-rose-400 whitespace-nowrap">{fmtEGP(totAds)}</td>
                         <td className="px-4 py-3.5 font-bold text-slate-600 dark:text-slate-300 whitespace-nowrap">{fmtEGP(totCogs)}</td>
+                        <td className="px-4 py-3.5 font-bold text-amber-600 dark:text-amber-400 whitespace-nowrap">{fmtEGP(totShipping)}</td>
+                        <td className="px-4 py-3.5 font-bold text-orange-600 dark:text-orange-400 whitespace-nowrap">{fmtEGP(totOpex)}</td>
                         <td colSpan={3} />
                         <td className={`px-4 py-3.5 font-bold whitespace-nowrap
                           ${totNet >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
