@@ -304,6 +304,19 @@ async function applyPhysicalReturn(order) {
     restocked = r.rowCount > 0;
   }
 
+  // 4. Ground-truth restock marker. Stamp reconciled_at ONLY when stock was
+  //    actually incremented (restocked === true), so the returns reconciliation
+  //    (Error Check modal) excludes this row. If no product resolved (restocked
+  //    === false) we leave it NULL → it stays flagged as a genuine discrepancy.
+  //    This replaces the old approach of re-guessing restock status from a
+  //    sku-first heuristic that didn't match this alias-aware restock.
+  if (restocked) {
+    await pool.query(
+      `UPDATE product_returns SET reconciled_at = NOW() WHERE id = $1 AND reconciled_at IS NULL`,
+      [claim.rows[0].id]
+    );
+  }
+
   return { statusUpdated: true, alreadyLogged: false, restocked, qty: orderQty };
 }
 
@@ -359,6 +372,14 @@ pool.query(`
   .then(() =>
     /* order_id — ties each webhook return to its exact source order */
     pool.query(`ALTER TABLE product_returns ADD COLUMN IF NOT EXISTS order_id INTEGER`)
+  )
+  .then(() =>
+    /* reconciled_at — GROUND-TRUTH "units are back in stock" marker. Set by
+       applyPhysicalReturn the moment a return actually restocks, so the returns
+       reconciliation (Error Check) excludes it instead of re-guessing via the
+       stale sku-first heuristic. Ensured here too (not only in returns.js) so it
+       exists regardless of module require order. */
+    pool.query(`ALTER TABLE product_returns ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMPTZ`)
   )
   .then(() =>
     /* Partial unique index: prevents the same order from creating two

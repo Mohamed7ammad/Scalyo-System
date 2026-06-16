@@ -14,7 +14,35 @@ const router = express.Router();
                    same discrepancy can never be auto-corrected twice.          */
 pool.query(`ALTER TABLE product_returns ADD COLUMN IF NOT EXISTS note TEXT`)
   .then(() => pool.query(`ALTER TABLE product_returns ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMPTZ`))
-  .then(() => console.log('✅  product_returns: note + reconciled_at columns ready'))
+  /* ── One-time backfill of the ground-truth restock marker ──────────────────
+     Order-linked returns logged BEFORE the reconciled_at marker existed have it
+     NULL even though applyPhysicalReturn DID restock them (alias-aware). The
+     Error Check modal therefore re-flagged already-restocked items (the log
+     shows them green) and "تصحيح الكمية" would DOUBLE-restock them. Mark every
+     such row whose product still resolves by sku / name / alias (the SAME match
+     applyPhysicalReturn uses to restock) as reconciled. Self-limiting (only
+     touches reconciled_at IS NULL); genuinely-unresolvable returns (no product
+     match → never restocked) keep reconciled_at NULL and stay flagged. */
+  .then(() => pool.query(`
+    UPDATE product_returns r
+       SET reconciled_at = NOW()
+     WHERE r.order_id IS NOT NULL
+       AND r.reconciled_at IS NULL
+       AND EXISTS (
+         SELECT 1 FROM products p
+          WHERE p.business_id = r.business_id
+            AND (
+                  LOWER(TRIM(p.sku))  = LOWER(NULLIF(TRIM(r.sku), ''))
+               OR LOWER(TRIM(p.name)) = LOWER(NULLIF(TRIM(r.product_name), ''))
+               OR EXISTS (
+                    SELECT 1 FROM unnest(COALESCE(p.aliases, '{}'::text[])) AS a
+                     WHERE LOWER(TRIM(a)) = LOWER(NULLIF(TRIM(r.sku), ''))
+                        OR LOWER(TRIM(a)) = LOWER(NULLIF(TRIM(r.product_name), ''))
+                  )
+            )
+       )
+  `))
+  .then((res) => console.log(`✅  product_returns: note + reconciled_at ready; back-filled ${res.rowCount ?? 0} already-restocked return(s)`))
   .catch((err) => console.warn('⚠️   product_returns reconciliation columns:', err.message));
 
 /* ── Shared product-matching helpers (used by reconciliation report + fix) ────
