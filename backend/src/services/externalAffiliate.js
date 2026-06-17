@@ -293,6 +293,11 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   const DATE_RE   = /^\d{4}-\d{2}-\d{2}$/;
   const startDate = DATE_RE.test(String(opts.startDate || '')) ? opts.startDate : null;
   const endDate   = DATE_RE.test(String(opts.endDate   || '')) ? opts.endDate   : null;
+  /* Global Product Filter — the dropdown passes the product_name; we match it
+     against product_name OR sku. NULL = all products. */
+  const product   = (opts.product && opts.product !== 'كل المنتجات') ? String(opts.product).trim() : null;
+  /* Reusable product predicate; $n is the product param position in each call. */
+  const prodPred  = (n) => ` AND ($${n}::text IS NULL OR product_name = $${n} OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($${n})))`;
 
   /* Two tenant-scoped reads:
        1) the pure Safqa-order buckets (counts + revenue by status_class)
@@ -323,8 +328,9 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
     aggRes = await pool.query(
       `${ORDER_AGG_SELECT}
          AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
-         AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)`,
-      [businessId, startDate, endDate]
+         AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
+         ${prodPred(4)}`,
+      [businessId, startDate, endDate, product]
     );
   } catch (err) {
     console.error(
@@ -334,17 +340,28 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
       `to run the boot migration. Falling back to an UNFILTERED read so data still renders.\n`,
       err
     );
-    aggRes = await pool.query(ORDER_AGG_SELECT, [businessId]);   // no date bounds → all-time
+    /* Fallback: drop the date bounds but KEEP the product filter ($2 here). */
+    aggRes = await pool.query(`${ORDER_AGG_SELECT}${prodPred(2)}`, [businessId, product]);
   }
 
-  /* Ad spend is non-fatal: degrade ADS to 0 on any error, but LOG it (no longer silent). */
+  /* Ad spend is non-fatal: degrade ADS to 0 on any error, but LOG it (no longer
+     silent). When a product is selected, narrow spend to THAT product's SKUs
+     (resolved from the Safqa orders) so CPP / NET PROFIT match the filtered
+     orders; a product with no SKU → no attributable ad spend (0). */
   const adsRes = await pool.query(
     `SELECT COALESCE(SUM(amount), 0) AS ad_spend
        FROM expenses
       WHERE business_id = $1::integer AND meta_sync = TRUE
         AND ($2::date IS NULL OR expense_date >= $2::date)
-        AND ($3::date IS NULL OR expense_date <= $3::date)`,
-    [businessId, startDate, endDate]
+        AND ($3::date IS NULL OR expense_date <= $3::date)
+        AND ($4::text IS NULL OR UPPER(TRIM(COALESCE(sku,''))) IN (
+              SELECT UPPER(TRIM(COALESCE(o.sku,'')))
+                FROM external_affiliate_orders o
+               WHERE o.business_id = $1::integer AND o.network = 'safqa'
+                 AND COALESCE(o.sku,'') <> ''
+                 AND (o.product_name = $4 OR UPPER(TRIM(COALESCE(o.sku,''))) = UPPER(TRIM($4)))
+            ))`,
+    [businessId, startDate, endDate, product]
   ).catch((err) => {
     console.error(`[aggregateSafqaFromDb] ⚠️  ad-spend query failed for business ${businessId} (ADS→0):`, err.message);
     return { rows: [{ ad_spend: 0 }] };
