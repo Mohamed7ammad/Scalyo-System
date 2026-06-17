@@ -30,6 +30,10 @@
       re-run --dry until nothing is unmapped.
    4) Run for real:
         node src/scripts/syncHistoricalSafqa.js ./safqa_export.csv 5
+   5) Make the table hold EXACTLY the CSV (drop webhook-only orders not in it):
+        node src/scripts/syncHistoricalSafqa.js ./safqa_export.csv 5 --replace
+      (--replace imports first, then deletes any business-5 Safqa rows whose
+       order id is absent from the CSV — never an empty-table window.)
    ───────────────────────────────────────────────────────────────────────── */
 
 require('dotenv').config();
@@ -162,6 +166,10 @@ async function main() {
   const flags   = rawArgs.filter((a) => a.startsWith('--'));
   const args    = rawArgs.filter((a) => !a.startsWith('--'));
   const DRY     = flags.includes('--dry');
+  /* --replace: after importing, DELETE any business_id Safqa rows NOT present in
+     the CSV, so the table ends up holding EXACTLY the CSV's orders (drops
+     webhook-only orders the CSV — the ground truth — doesn't contain). */
+  const REPLACE = flags.includes('--replace');
 
   const file       = args[0] || './safqa_export.csv';
   const businessId = args[1] ? Number(args[1]) : 5;
@@ -210,11 +218,13 @@ async function main() {
 
   const statusHistogram = {};   // raw status value → count
   const unmapped = {};          // unrecognised raw status → count
+  const csvIds = [];            // every valid order id seen in the CSV (for --replace prune)
   let ok = 0, inserted = 0, updated = 0, skippedNoId = 0, failed = 0, dated = 0;
 
   for (const r of dataRows) {
     const rawId = String(r[cols.id] ?? '').trim();
     if (!rawId) { skippedNoId++; continue; }
+    csvIds.push(rawId);
 
     const rawStatus = r[cols.status];
     statusHistogram[rawStatus] = (statusHistogram[rawStatus] || 0) + 1;
@@ -257,6 +267,27 @@ async function main() {
     }
   }
 
+  /* ── --replace: prune webhook-only orders not in the CSV (CSV = ground truth) ──
+     Runs AFTER the upserts so there is never an empty-table window: every CSV row
+     is already present, then we delete only the rows whose external_id is absent
+     from the CSV. Scoped strictly to (network='safqa', business_id). */
+  let pruned = 0;
+  if (!DRY && REPLACE) {
+    if (csvIds.length === 0) {
+      console.warn('⚠️  --replace skipped: no valid CSV ids parsed (refusing to wipe the table).');
+    } else {
+      const del = await pool.query(
+        `DELETE FROM external_affiliate_orders
+          WHERE network = 'safqa'
+            AND business_id = $1
+            AND NOT (external_id = ANY($2::text[]))
+          RETURNING id`,
+        [businessId, csvIds]
+      );
+      pruned = del.rowCount || 0;
+    }
+  }
+
   /* ── Report ── */
   console.log('📊 Status values found (raw → count):');
   Object.entries(statusHistogram)
@@ -279,6 +310,7 @@ async function main() {
     console.log(`   Updated (existing)   : ${updated}`);
     console.log(`   created_at back-dated: ${dated}`);
     console.log(`   Failed               : ${failed}`);
+    if (REPLACE) console.log(`   Pruned (not in CSV)  : ${pruned}`);
   }
   console.log('────────────────────────────────────────────');
 
