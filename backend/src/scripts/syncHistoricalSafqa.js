@@ -58,12 +58,18 @@ const STATUS_OVERRIDES = {
 /* ── Column auto-detection. Each logical field maps to a list of header aliases
    (normalised: trimmed + lowercased). First matching header in the CSV wins. ── */
 const COLUMN_ALIASES = {
-  id:        ['_id', 'id', 'order id', 'orderid', 'order_id', 'order number', 'order no', 'رقم الطلب', 'رقم', 'الطلب'],
+  id:        ['_id', 'id', 'order id', 'orderid', 'order_id', 'order number', 'order no', 'كود الطلب', 'رقم الطلب', 'رقم', 'الطلب'],
   status:    ['status', 'order status', 'state', 'الحالة', 'الحاله', 'حالة الطلب', 'حالة'],
   status_ar: ['status_ar', 'arabic status', 'الحالة بالعربية', 'الحالة العربية'],
-  total:     ['total', 'commission', 'earnings', 'profit', 'amount', 'net', 'الإجمالي', 'الاجمالي', 'العمولة', 'العموله', 'الربح', 'المبلغ', 'صافي', 'صافي الربح'],
-  marketer:  ['marketer', 'affiliate', 'publisher', 'seller', 'المسوق', 'المسوّق', 'الناشر', 'البائع'],
-  date:      ['created_at', 'createdat', 'created', 'date', 'order date', 'order_date', 'التاريخ', 'تاريخ الطلب', 'تاريخ الإنشاء', 'تاريخ'],
+  /* total = the marketer's EARNINGS (commission) — this mirrors the live Safqa
+     webhook, which puts the affiliate's earnings in `total` (NOT the gross order
+     value). The export carries BOTH "العمولة" (commission/earnings) and
+     "الإجمالي" (gross); we deliberately map to "العمولة" so backfilled PROFIT is
+     consistent with the orders already ingested via the webhook. The gross-total
+     aliases are intentionally omitted to avoid grabbing the wrong column. */
+  total:     ['commission', 'earnings', 'profit', 'net', 'العمولة', 'العموله', 'الربح', 'صافي الربح', 'صافي'],
+  marketer:  ['marketer', 'moderator', 'affiliate', 'publisher', 'seller', 'موديريتور', 'المسوق', 'المسوّق', 'الناشر', 'البائع'],
+  date:      ['created_at', 'createdat', 'created', 'date', 'order date', 'order_date', 'تاريخ الإنشاء', 'التاريخ', 'تاريخ الطلب', 'تاريخ'],
 };
 
 /* ── Minimal RFC-4180-ish CSV parser (handles quotes, commas/newlines in quotes,
