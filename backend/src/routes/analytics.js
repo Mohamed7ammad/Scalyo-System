@@ -2,7 +2,7 @@ const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
-const { getExternalAffiliateStats } = require('../services/externalAffiliate');
+const { getExternalAffiliateStats, aggregateSafqaBreakdowns } = require('../services/externalAffiliate');
 const { EARNED_COMMISSION_SQL } = require('../utils/commission');
 
 const router = express.Router();
@@ -478,6 +478,16 @@ router.get('/products-profitability', authenticate, async (req, res) => {
   }
 
   const { startDate, endDate } = req.query;
+
+  /* ── Affiliate plan: products come from external_affiliate_orders (the local
+     orders/products tables are empty for affiliate tenants). Return the Safqa
+     per-product breakdown directly, respecting the date + product filter. */
+  if (req.user.plan_type === 'affiliate') {
+    const bd = await aggregateSafqaBreakdowns(req.user.business_id, {
+      startDate, endDate, product: req.query.product,
+    });
+    return res.json(bd.products);
+  }
 
   /* ── EXPENSE DATE PARAMS: hardcoded as $1 / $2 ──────────────────────────────
      Expense dates MUST occupy the first two positions so the expense_stats CTE
@@ -1467,7 +1477,21 @@ router.get('/dashboard', authenticate, async (req, res) => {
        is always safe to include in the payload for any plan. */
     const externalStats = await getExternalAffiliateStats(req.user.business_id, { startDate, endDate });
 
-    res.json({ overview, daily_chart_stats, governorates_stats, rejection_reasons, externalStats });
+    /* ── Affiliate plan: the lower widgets (daily chart, governorates, rejection
+       reasons) aggregate from external_affiliate_orders, since the local orders
+       table is empty for affiliate tenants. Override with Safqa breakdowns,
+       respecting the global date range AND the product filter. */
+    let dailyOut = daily_chart_stats, govOut = governorates_stats, rejOut = rejection_reasons;
+    if (req.user.plan_type === 'affiliate') {
+      const bd = await aggregateSafqaBreakdowns(req.user.business_id, {
+        startDate, endDate, product: req.query.product,
+      });
+      dailyOut = bd.daily;
+      govOut   = bd.governorates;
+      rejOut   = bd.rejections;
+    }
+
+    res.json({ overview, daily_chart_stats: dailyOut, governorates_stats: govOut, rejection_reasons: rejOut, externalStats });
 
   } catch (error) {
     /* Log the FULL error object so PostgreSQL detail / hint are visible in the terminal */

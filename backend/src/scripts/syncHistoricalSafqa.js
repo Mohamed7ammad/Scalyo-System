@@ -84,6 +84,12 @@ const COLUMN_ALIASES = {
   total:     ['commission', 'earnings', 'profit', 'net', 'العمولة', 'العموله', 'الربح', 'صافي الربح', 'صافي'],
   marketer:  ['marketer', 'moderator', 'affiliate', 'publisher', 'seller', 'موديريتور', 'المسوق', 'المسوّق', 'الناشر', 'البائع'],
   date:      ['created_at', 'createdat', 'created', 'date', 'order date', 'order_date', 'تاريخ الإنشاء', 'التاريخ', 'تاريخ الطلب', 'تاريخ'],
+  /* Product / logistics fields → feed the affiliate dashboard's lower widgets. */
+  products:    ['products', 'product', 'product_name', 'اسم المنتج', 'المنتجات', 'المنتج'],
+  sku:         ['sku', 'كود المنتج', 'الكود'],
+  governorate: ['governorate', 'province', 'city', 'state', 'المحافظة', 'المدينة'],
+  note:        ['note', 'notes', 'rejection reason', 'الملاحظة', 'الملاحظه', 'ملاحظة', 'ملاحظات', 'سبب الرفض'],
+  qty:         ['qty', 'quantity', 'الكمية', 'العدد'],
 };
 
 /* ── Minimal RFC-4180-ish CSV parser (handles quotes, commas/newlines in quotes,
@@ -276,11 +282,17 @@ async function main() {
     /* Pass the resolved internal key as `status` so classifySafqaStatus maps it
        correctly. Unresolved → pass the raw value (classify defaults to pending). */
     const order = {
-      _id:       rawId,
-      status:    resolved ?? rawStatus,
-      status_ar: cols.status_ar != null ? r[cols.status_ar] : undefined,
-      total:     cols.total != null ? parseMoney(r[cols.total]) : 0,
-      marketer:  cols.marketer != null ? r[cols.marketer] : undefined,
+      _id:          rawId,
+      status:       resolved ?? rawStatus,
+      status_ar:    cols.status_ar != null ? r[cols.status_ar] : undefined,
+      total:        cols.total != null ? parseMoney(r[cols.total]) : 0,
+      marketer:     cols.marketer != null ? r[cols.marketer] : undefined,
+      /* Product / logistics fields for the affiliate dashboard's lower widgets. */
+      product_name: cols.products != null ? r[cols.products] : undefined,
+      sku:          cols.sku != null ? r[cols.sku] : undefined,
+      governorate:  cols.governorate != null ? r[cols.governorate] : undefined,
+      note:         cols.note != null ? r[cols.note] : undefined,
+      quantity:     cols.qty != null ? r[cols.qty] : undefined,
     };
 
     const isoDate = cols.date != null ? parseDate(r[cols.date], dayFirst) : null;

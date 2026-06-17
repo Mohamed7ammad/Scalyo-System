@@ -148,6 +148,15 @@ pool.query(`
      recent date ranges. */
   .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`))
   .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`))
+  /* Product / logistics fields captured from BOTH the webhook payload and the CSV
+     backfill, so the affiliate dashboard's lower widgets (products table, AI
+     insights, governorates, rejection reasons, daily chart) can aggregate from
+     this table the same way the e-commerce dashboard does off the orders table. */
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS product_name TEXT`))
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS sku          VARCHAR(120)`))
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS governorate  VARCHAR(120)`))
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS note         TEXT`))
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS quantity     INTEGER DEFAULT 1`))
   .then(() => pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS external_affiliate_orders_uidx
       ON external_affiliate_orders (network, external_id, business_id)
@@ -198,21 +207,43 @@ async function recordSafqaOrder(order, businessId) {
   const statusClass = classifySafqaStatus(status);
   const total       = num(order?.total);
   const marketer    = order?.marketer != null ? String(order.marketer) : null;
+  /* Product / logistics fields — tolerant of the various keys Safqa (webhook) and
+     the CSV backfill use. Feed the affiliate dashboard's lower widgets. */
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = order?.[k];
+      if (v != null && String(v).trim() !== '') return String(v).trim();
+    }
+    return null;
+  };
+  const productName = pick('product_name', 'products', 'product', 'productName');
+  const sku         = pick('sku', 'SKU');
+  const governorate = pick('governorate', 'city', 'province', 'state');
+  const note        = pick('note', 'rejection_reason', 'rejectionReason', 'notes');
+  const qtyRaw      = order?.quantity ?? order?.qty ?? order?.Qty;
+  const quantity    = Number.isFinite(parseInt(qtyRaw, 10)) ? parseInt(qtyRaw, 10) : null;
 
   const { rows } = await pool.query(
     `INSERT INTO external_affiliate_orders
-       (network, external_id, business_id, status, status_ar, status_class, total, marketer, raw, updated_at)
-     VALUES ('safqa', $1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW())
+       (network, external_id, business_id, status, status_ar, status_class, total, marketer,
+        product_name, sku, governorate, note, quantity, raw, updated_at)
+     VALUES ('safqa', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, NOW())
      ON CONFLICT (network, external_id, business_id)
      DO UPDATE SET status       = EXCLUDED.status,
                    status_ar    = EXCLUDED.status_ar,
                    status_class = EXCLUDED.status_class,
                    total        = EXCLUDED.total,
-                   marketer     = COALESCE(EXCLUDED.marketer, external_affiliate_orders.marketer),
+                   marketer     = COALESCE(EXCLUDED.marketer,     external_affiliate_orders.marketer),
+                   product_name = COALESCE(EXCLUDED.product_name, external_affiliate_orders.product_name),
+                   sku          = COALESCE(EXCLUDED.sku,          external_affiliate_orders.sku),
+                   governorate  = COALESCE(EXCLUDED.governorate,  external_affiliate_orders.governorate),
+                   note         = COALESCE(EXCLUDED.note,         external_affiliate_orders.note),
+                   quantity     = COALESCE(EXCLUDED.quantity,     external_affiliate_orders.quantity),
                    raw          = EXCLUDED.raw,
                    updated_at   = NOW()
      RETURNING (xmax = 0) AS inserted`,
-    [externalId, businessId, status, statusAr, statusClass, total, marketer, JSON.stringify(order ?? {})]
+    [externalId, businessId, status, statusAr, statusClass, total, marketer,
+     productName, sku, governorate, note, quantity, JSON.stringify(order ?? {})]
   );
   return { ok: true, inserted: rows[0]?.inserted === true, externalId, statusClass };
 }
@@ -373,6 +404,130 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
     netProfit,
     forecastedNetProfit,
   };
+}
+
+/**
+ * Per-dimension breakdowns of the tenant's Safqa orders, in the SAME shapes the
+ * e-commerce dashboard produces off the `orders` table — so the affiliate
+ * dashboard's lower widgets (daily chart, governorates, rejection reasons,
+ * products table → which also feeds AI Insights & Champions League) render with
+ * real data. Respects the global date range AND the product filter.
+ *
+ * Returns { daily, governorates, rejections, products }.
+ */
+async function aggregateSafqaBreakdowns(businessId, opts = {}) {
+  const empty = { daily: [], governorates: [], rejections: [], products: [] };
+  if (businessId == null) return empty;
+
+  const DATE_RE   = /^\d{4}-\d{2}-\d{2}$/;
+  const startDate = DATE_RE.test(String(opts.startDate || '')) ? opts.startDate : null;
+  const endDate   = DATE_RE.test(String(opts.endDate   || '')) ? opts.endDate   : null;
+  const product   = (opts.product && opts.product !== 'كل المنتجات') ? String(opts.product).trim() : null;
+
+  /* $1 tenant · $2 start · $3 end · $4 product (NULL = all). created_at is the
+     order-placement date (back-dated from the CSV / set by the webhook). */
+  const params = [businessId, startDate, endDate, product];
+  const where = `
+    FROM external_affiliate_orders
+    WHERE network = 'safqa' AND business_id = $1
+      AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
+      AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
+      AND ($4::text IS NULL OR product_name = $4 OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($4)))`;
+
+  const CONF = `status_class IN ('confirmed','delivered')`;
+  const DELV = `status_class = 'delivered'`;
+  const RET  = `status_class = 'returned'`;
+  const REV  = `COALESCE(SUM(total) FILTER (WHERE ${DELV}), 0)`;
+
+  try {
+    const [dailyR, govR, rejR, prodR] = await Promise.all([
+      pool.query(`
+        SELECT TO_CHAR(COALESCE(created_at, updated_at)::date, 'YYYY-MM-DD') AS date,
+               COUNT(*)::int                              AS orders,
+               COUNT(*) FILTER (WHERE ${CONF})::int       AS confirmed,
+               COUNT(*) FILTER (WHERE ${DELV})::int       AS delivered,
+               ${REV}                                     AS revenue
+        ${where}
+        GROUP BY 1 ORDER BY 1 ASC`, params),
+      pool.query(`
+        SELECT COALESCE(NULLIF(TRIM(governorate), ''), 'غير محدد') AS governorate,
+               COUNT(*)::int                              AS total_orders,
+               COUNT(*) FILTER (WHERE ${CONF})::int       AS confirmed,
+               COUNT(*) FILTER (WHERE ${DELV})::int       AS delivered,
+               COUNT(*) FILTER (WHERE ${RET})::int        AS returned,
+               ${REV}                                     AS revenue
+        ${where}
+        GROUP BY 1 ORDER BY delivered DESC, total_orders DESC LIMIT 50`, params),
+      pool.query(`
+        SELECT COALESCE(NULLIF(TRIM(note), ''), 'غير محدد')        AS reason,
+               COUNT(*)::int                              AS count
+        ${where} AND ${RET}
+        GROUP BY 1 ORDER BY count DESC`, params),
+      pool.query(`
+        SELECT COALESCE(NULLIF(TRIM(product_name), ''), 'غير محدد') AS product_name,
+               MAX(COALESCE(NULLIF(TRIM(sku), ''), ''))   AS sku,
+               COUNT(*)::int                              AS total_orders,
+               COUNT(*) FILTER (WHERE ${CONF})::int       AS confirmed,
+               COUNT(*) FILTER (WHERE ${DELV})::int       AS delivered,
+               COUNT(*) FILTER (WHERE ${RET})::int        AS returned,
+               ${REV}                                     AS delivered_revenue
+        ${where}
+        GROUP BY 1 ORDER BY delivered_revenue DESC`, params),
+    ]);
+
+    const daily = dailyR.rows.map((r) => ({
+      date:       r.date,
+      orders:     num(r.orders),
+      erp_orders: num(r.orders),
+      confirmed:  num(r.confirmed),
+      delivered:  num(r.delivered),
+      revenue:    Math.round(num(r.revenue)),
+      ads_spend:  0,                        // affiliate ad spend is shown in the 20-grid (ADS), not per-day here
+    }));
+
+    const governorates = govR.rows.map((r) => ({
+      governorate:  r.governorate,
+      total_orders: num(r.total_orders),
+      confirmed:    num(r.confirmed),
+      delivered:    num(r.delivered),
+      returned:     num(r.returned),
+      revenue:      Math.round(num(r.revenue)),
+    }));
+
+    const rejections = rejR.rows.map((r) => ({ reason: r.reason, count: num(r.count) }));
+
+    const products = prodR.rows.map((r) => {
+      const delivered = num(r.delivered);
+      const returned  = num(r.returned);
+      const resolved  = delivered + returned;
+      const revenue   = Math.round(num(r.delivered_revenue));   // commission realised on delivery
+      return {
+        product_id:          r.sku || r.product_name,
+        product_name:        r.product_name,
+        sku:                 r.sku || '',
+        cost_price:          0,
+        units_delivered:     delivered,
+        units_shipped:       resolved,                                   // DR denominator (resolved shipments)
+        delivery_rate:       resolved > 0 ? Math.round((delivered / resolved) * 1000) / 10 : 0,
+        total_orders:        num(r.total_orders),
+        confirmed_orders:    num(r.confirmed),
+        erp_orders:          num(r.confirmed),
+        delivered_revenue:   revenue,
+        attributed_ad_spend: 0,             // affiliate: no per-product ad attribution (no local SKU bridge)
+        cogs:                0,             // affiliate holds no stock
+        shipping_cost:       0,
+        opex_allocated:      0,
+        net_profit:          revenue,       // affiliate profit = commission of delivered orders
+        cpa:                 null,
+        meta_orders:         0,
+      };
+    });
+
+    return { daily, governorates, rejections, products };
+  } catch (err) {
+    console.error('[aggregateSafqaBreakdowns] failed for business', businessId, '—', err.message);
+    return empty;
+  }
 }
 
 /* ── Taager orders-aggregation ───────────────────────────────────────────────
@@ -890,6 +1045,7 @@ module.exports = {
   // Safqa webhook (push) architecture:
   recordSafqaOrder,
   aggregateSafqaFromDb,
+  aggregateSafqaBreakdowns,
   classifySafqaStatus,
   // Legacy (Safqa has no GET API — kept only for reference, no longer called):
   fetchSafqaStats,
