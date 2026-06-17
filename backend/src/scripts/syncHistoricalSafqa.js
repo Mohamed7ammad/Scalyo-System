@@ -52,7 +52,17 @@ const KNOWN_STATUS_KEYS = [
      'تم التوصيل': 'collected',   'مرتجع': 'returned1',   'قيد الشحن': 'shipped',
    Keys are matched case-insensitively after trimming. */
 const STATUS_OVERRIDES = {
-  // 'your label here': 'collected',
+  /* Real Safqa Arabic export labels → internal status keys (note the CSV's exact
+     spelling, incl. the double ي in 'جار التحضيير'). Matched case-insensitively
+     after trimming. */
+  'معلق':            'pending',        // on hold / awaiting
+  'جار التحضيير':    'preparing',      // being prepared (CSV's exact spelling)
+  'في الشحن':        'shipped',        // in shipping
+  'تم التوصيل':      'collected',      // delivered  → delivered class
+  'تم التحصيل':      'collected',      // cash collected → delivered class
+  'جار الاسترجاع':   'ask_to_return',  // return in progress → returned class
+  'مرتجع':           'returned1',      // returned → returned class
+  'ملغي':            'declined1',      // cancelled → returned class
 };
 
 /* ── Column auto-detection. Each logical field maps to a list of header aliases
@@ -282,7 +292,13 @@ async function main() {
     console.log(`\n✅ Import complete. external_affiliate_orders now holds ${rows[0].n} Safqa order(s) for business ${businessId}.`);
   }
 
-  await pool.end();
+  /* Exit cleanly WITHOUT pool.end(). Requiring ../services/externalAffiliate runs
+     its fire-and-forget boot migrations (CREATE TABLE / ALTER) at import time;
+     those can still be in flight when we finish (especially on a fast --dry run),
+     and calling pool.end() first makes them error with "Cannot use a pool after
+     calling end on the pool". process.exit terminates everything once all of our
+     awaited work is done — no stray query, no warning. */
+  process.exit(0);
 }
 
 main().catch((err) => {
