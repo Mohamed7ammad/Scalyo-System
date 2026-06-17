@@ -40,7 +40,7 @@ require('dotenv').config();
 const fs   = require('fs');
 const path = require('path');
 const pool = require('../config/db');
-const { recordSafqaOrder, classifySafqaStatus } = require('../services/externalAffiliate');
+const { recordSafqaOrder, classifySafqaStatus, primarySku, primaryProductName } = require('../services/externalAffiliate');
 
 /* The 15 internal Safqa status keys recordSafqaOrder/classifySafqaStatus knows.
    A CSV status is "recognised" when (lowercased) it is one of these. */
@@ -263,6 +263,18 @@ async function main() {
     if (preview.length) console.log('   sample dates:\n     ' + preview.join('\n     ') + '\n');
   }
 
+  /* PRIMARY product attribution preview — show how concatenated multi-item
+     strings collapse to a single hero product/SKU, so it's verifiable up front. */
+  if (cols.products != null || cols.sku != null) {
+    console.log('🏷️  Primary product attribution (multi-item orders → first/hero item):');
+    const pv = dataRows.slice(0, 5).map((r) => {
+      const rawP = cols.products != null ? r[cols.products] : '';
+      const rawS = cols.sku != null ? r[cols.sku] : '';
+      return `"${rawP}" / "${rawS}"  →  "${primaryProductName(rawP) ?? ''}" / "${primarySku(rawS) ?? ''}"`;
+    });
+    if (pv.length) console.log('     ' + pv.join('\n     ') + '\n');
+  }
+
   const statusHistogram = {};   // raw status value → count
   const unmapped = {};          // unrecognised raw status → count
   const csvIds = [];            // every valid order id seen in the CSV (for --replace prune)
@@ -287,9 +299,12 @@ async function main() {
       status_ar:    cols.status_ar != null ? r[cols.status_ar] : undefined,
       total:        cols.total != null ? parseMoney(r[cols.total]) : 0,
       marketer:     cols.marketer != null ? r[cols.marketer] : undefined,
-      /* Product / logistics fields for the affiliate dashboard's lower widgets. */
-      product_name: cols.products != null ? r[cols.products] : undefined,
-      sku:          cols.sku != null ? r[cols.sku] : undefined,
+      /* Product / logistics fields for the affiliate dashboard's lower widgets.
+         PRIMARY-product attribution: Safqa concatenates multi-item orders, so we
+         keep only the FIRST sku / product (the hook the ad targeted). This is also
+         enforced in recordSafqaOrder, so the result is identical for the webhook. */
+      product_name: cols.products != null ? primaryProductName(r[cols.products]) : undefined,
+      sku:          cols.sku != null ? primarySku(r[cols.sku]) : undefined,
       governorate:  cols.governorate != null ? r[cols.governorate] : undefined,
       note:         cols.note != null ? r[cols.note] : undefined,
       quantity:     cols.qty != null ? r[cols.qty] : undefined,

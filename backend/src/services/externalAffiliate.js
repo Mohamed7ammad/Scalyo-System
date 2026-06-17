@@ -192,6 +192,27 @@ function classifySafqaStatus(status) {
   return SAFQA_STATUS_CLASS[String(status || '').trim().toLowerCase()] || 'pending';
 }
 
+/* ── Primary ("hero/hook") product attribution ──────────────────────────────
+   Safqa concatenates multi-item orders — SKUs as "A, B" and product names as
+   "(1) Product A -- (1) Product B" — yet bills ONE commission per ORDER (no
+   per-item split). Splitting an order across items would force us to invent a
+   commission allocation AND double-count order counts/revenue, breaking the
+   invariant that Σ per-product revenue == Σ order revenue (== the top KPI). So
+   we attribute the WHOLE order to its FIRST item (the product the ad targeted).
+   The full original strings stay in `raw` for any future upsell analysis. */
+function primarySku(s) {
+  if (s == null) return null;
+  const first = String(s).split(',')[0].trim();          // SKUs are comma-separated
+  return first || null;
+}
+function primaryProductName(s) {
+  if (s == null) return null;
+  /* Item separator is "--" / "—" (NOT a single hyphen, so "IPL-PRO-01" survives). */
+  let first = String(s).split(/\s*(?:--+|—)\s*/)[0];
+  first = first.replace(/^\s*\(\s*\d+\s*\)\s*/, '').trim();   // strip a leading "(n) " qty prefix
+  return first || null;
+}
+
 /**
  * Upsert ONE Safqa order (from an `order.status.updated` webhook) for a tenant.
  * Idempotent on (network, external_id, business_id) — status updates overwrite.
@@ -216,8 +237,11 @@ async function recordSafqaOrder(order, businessId) {
     }
     return null;
   };
-  const productName = pick('product_name', 'products', 'product', 'productName');
-  const sku         = pick('sku', 'SKU');
+  /* PRIMARY product attribution: reduce concatenated multi-item strings to their
+     first ("hero") item so the products table has one clean row per base product
+     and per-product revenue still sums to the order total. raw keeps the full strings. */
+  const productName = primaryProductName(pick('product_name', 'products', 'product', 'productName'));
+  const sku         = primarySku(pick('sku', 'SKU'));
   const governorate = pick('governorate', 'city', 'province', 'state');
   const note        = pick('note', 'rejection_reason', 'rejectionReason', 'notes');
   const qtyRaw      = order?.quantity ?? order?.qty ?? order?.Qty;
@@ -1047,6 +1071,8 @@ module.exports = {
   aggregateSafqaFromDb,
   aggregateSafqaBreakdowns,
   classifySafqaStatus,
+  primarySku,
+  primaryProductName,
   // Legacy (Safqa has no GET API — kept only for reference, no longer called):
   fetchSafqaStats,
   withSafqaPublicBase,
