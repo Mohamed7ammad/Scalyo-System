@@ -143,21 +143,50 @@ function parseMoney(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-/* Parse an order date → ISO string, or null. Native parse first (ISO / yyyy-mm-dd
-   / "yyyy-mm-dd hh:mm:ss"), then DD/MM/YYYY (Egypt convention) as a fallback. */
-function parseDate(v) {
+/* Detect whether ambiguous slash/dash dates are DAY-first (DD/MM/YYYY, Egyptian)
+   or MONTH-first (MM/DD/YYYY, American), by scanning the actual values: if any
+   first component is > 12 it can only be the day → day-first; if any second
+   component is > 12 it can only be the month → month-first. Defaults to day-first
+   (Safqa is Egyptian) when every row is ambiguous. ISO (YYYY-…) rows are skipped. */
+function detectDayFirst(samples) {
+  for (const s of samples) {
+    const str = String(s ?? '').trim();
+    if (/^\d{4}[-/.]/.test(str)) continue;
+    const m = str.match(/^(\d{1,2})[\/\-.](\d{1,2})/);
+    if (!m) continue;
+    if (+m[1] > 12) return true;    // first comp can't be a month → day-first
+    if (+m[2] > 12) return false;   // second comp can't be a month → month-first
+  }
+  return true;
+}
+
+/* Parse a date → "YYYY-MM-DDT12:00:00.000Z" (NOON UTC of the calendar date).
+   Built from the date COMPONENTS and anchored at noon — NEVER toISOString() on a
+   parsed local/zoned datetime — so the stored value's ::date can't drift by a
+   timezone offset (the bug that pushed near-midnight June dates back into May,
+   excluding them from the June filter). `dayFirst` picks DD/MM vs MM/DD for
+   ambiguous slash/dash formats (auto-detected from the file). */
+function parseDate(v, dayFirst = true) {
   const s = String(v ?? '').trim();
   if (!s) return null;
-  let d = new Date(s);
-  if (!isNaN(d.getTime()) && /^\d{4}-\d{2}-\d{2}/.test(s)) return d.toISOString();
-  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  const noonUTC = (y, mo, d) => {
+    if (!(y >= 1970 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
+    const dt = new Date(Date.UTC(y, mo - 1, d, 12));
+    return isNaN(dt.getTime()) ? null : dt.toISOString();
+  };
+  /* 1) ISO-like: YYYY-MM-DD or YYYY/MM/DD (optionally followed by a time). */
+  let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (m) return noonUTC(+m[1], +m[2], +m[3]);
+  /* 2) DD/MM/YYYY or MM/DD/YYYY (slash, dash, or dot). */
+  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
   if (m) {
-    let [, dd, mm, yy] = m;
+    let [, a, b, yy] = m;
     if (yy.length === 2) yy = '20' + yy;
-    d = new Date(Date.UTC(+yy, +mm - 1, +dd, 12));
-    if (!isNaN(d.getTime())) return d.toISOString();
+    return noonUTC(+yy, dayFirst ? +b : +a, dayFirst ? +a : +b);
   }
-  if (!isNaN(d.getTime())) return d.toISOString();   // last resort: whatever native parsed
+  /* 3) Fallback: let JS parse, then anchor ITS calendar date at noon UTC. */
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return noonUTC(d.getFullYear(), d.getMonth() + 1, d.getDate());
   return null;
 }
 
@@ -216,6 +245,18 @@ async function main() {
     console.warn('⚠️  No order-date column detected — created_at will default to NOW(), so historical orders will all land in the CURRENT month for date-filtered views. Add your date header to COLUMN_ALIASES.date to preserve real dates.\n');
   }
 
+  /* Auto-detect DD/MM vs MM/DD from the data, then show a sample so the mapping
+     is verifiable BEFORE writing (this is what was silently wrong before). */
+  const dayFirst = cols.date != null
+    ? detectDayFirst(dataRows.map((r) => r[cols.date]))
+    : true;
+  if (cols.date != null) {
+    console.log(`🗓️  Date format: ${dayFirst ? 'DAY-first (DD/MM/YYYY)' : 'MONTH-first (MM/DD/YYYY)'} — created_at stored at NOON UTC of the calendar date.`);
+    const preview = dataRows.slice(0, 5)
+      .map((r) => `"${r[cols.date]}" → ${parseDate(r[cols.date], dayFirst) ?? '(unparsed → NOW())'}`);
+    if (preview.length) console.log('   sample dates:\n     ' + preview.join('\n     ') + '\n');
+  }
+
   const statusHistogram = {};   // raw status value → count
   const unmapped = {};          // unrecognised raw status → count
   const csvIds = [];            // every valid order id seen in the CSV (for --replace prune)
@@ -242,7 +283,7 @@ async function main() {
       marketer:  cols.marketer != null ? r[cols.marketer] : undefined,
     };
 
-    const isoDate = cols.date != null ? parseDate(r[cols.date]) : null;
+    const isoDate = cols.date != null ? parseDate(r[cols.date], dayFirst) : null;
 
     if (DRY) { ok++; continue; }
 
