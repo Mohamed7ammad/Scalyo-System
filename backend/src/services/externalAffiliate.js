@@ -219,8 +219,16 @@ function primaryProductName(s) {
  * Returns { ok, inserted?, externalId?, statusClass?, reason? }.
  */
 async function recordSafqaOrder(order, businessId) {
-  const externalId = String(order?._id ?? order?.id ?? '').trim();
-  if (!externalId) return { ok: false, reason: 'missing order _id' };
+  /* STABLE external key — duplicate-proofing for live traffic:
+     Safqa's `serial_number` ("sk-…") is the SAME order code the CSV export uses
+     ("كود الطلب"), whereas the webhook's `_id` is a Mongo ObjectId. Keying on the
+     serial makes every webhook status push (pending→confirmed→delivered…) UPSERT
+     onto the one existing row instead of inserting an ObjectId-keyed duplicate.
+     Falls back to _id/id when no serial is present. */
+  const externalId = String(
+    order?.serial_number ?? order?.serialNumber ?? order?.serial ?? order?._id ?? order?.id ?? ''
+  ).trim();
+  if (!externalId) return { ok: false, reason: 'missing order serial/_id' };
   if (businessId == null) return { ok: false, reason: 'missing tenant' };
 
   const status      = String(order?.status ?? '').trim().toLowerCase();
