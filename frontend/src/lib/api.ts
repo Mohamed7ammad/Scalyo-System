@@ -1258,6 +1258,39 @@ export const syncTaagerOrders = () =>
     timeout: 120_000, // 2 min — overrides the instance default for this long-running op
   });
 
+/* ── Safqa historical CSV import (affiliate plan, self-serve upload) ── */
+export interface SafqaImportResult {
+  ok:              boolean;
+  dryRun:          boolean;
+  detectedColumns: Record<string, string | null>;
+  dateColumnFound: boolean;
+  dayFirst:        boolean;
+  sampleDates:     { raw: string; parsed: string | null }[];
+  statusHistogram: Record<string, number>;
+  unmapped:        Record<string, number>;
+  dataRowCount:    number;
+  processed:       number;
+  inserted:        number;
+  updated:         number;
+  skippedNoId:     number;
+  failed:          number;
+  dated:           number;
+  pruned:          number;
+  totalAfter:      number | null;
+}
+
+/** Upload a Safqa CSV export. Multipart field name is "file". Pass dryRun=true to
+ *  preview (column detection + counts) without writing. */
+export const importSafqaCsv = (file: File, dryRun = false) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  return api.post<SafqaImportResult>(
+    `/api/safqa/import-csv${dryRun ? '?dry=1' : ''}`,
+    fd,
+    { timeout: 120_000 }, // large exports — allow up to 2 min
+  );
+};
+
 /* ── Bulk CSV Import ─────────────────────────────────────────────── */
 export interface BulkImportResult {
   success:       boolean;

@@ -55,6 +55,7 @@ const treasuryRoutes        = require('./routes/treasury');
 const metaRoutes            = require('./routes/meta');
 const bostaRoutes           = require('./routes/bosta');
 const affiliateRoutes       = require('./routes/affiliate');
+const safqaRoutes           = require('./routes/safqa');
 const easyorderRoutes       = require('./routes/easyorder');
 
 const app = express();
@@ -87,6 +88,7 @@ app.use('/api/treasury',        treasuryRoutes);
 app.use('/api/meta',            metaRoutes);
 app.use('/api/bosta',           bostaRoutes); // live wallet + follow-ups
 app.use('/api/affiliate',       affiliateRoutes); // external affiliate networks (affiliate plan)
+app.use('/api/safqa',           safqaRoutes); // Safqa CSV self-serve import (affiliate plan)
 app.use('/api/integrations/easyorder', easyorderRoutes); // EasyOrder per-tenant settings
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));

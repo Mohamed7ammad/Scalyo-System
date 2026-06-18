@@ -25,11 +25,14 @@ function isAffiliateBlocked(path: string): boolean {
   return AFFILIATE_BLOCKED_PREFIXES.some((p) => path === p || path.startsWith(p + '/'));
 }
 
-/* The External Affiliate integrations page is exclusive to the affiliate plan.
-   Every other plan is bounced back to their own orders dashboard. */
-const AFFILIATE_ONLY_PREFIX = '/dashboard/external-affiliate';
+/* Affiliate-plan-exclusive pages. Every other plan is bounced to their own
+   orders dashboard. */
+const AFFILIATE_ONLY_PREFIXES = [
+  '/dashboard/external-affiliate',
+  '/dashboard/import-data',
+];
 function isAffiliateOnlyRoute(path: string): boolean {
-  return path === AFFILIATE_ONLY_PREFIX || path.startsWith(AFFILIATE_ONLY_PREFIX + '/');
+  return AFFILIATE_ONLY_PREFIXES.some((p) => path === p || path.startsWith(p + '/'));
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {

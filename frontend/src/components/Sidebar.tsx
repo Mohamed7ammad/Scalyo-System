@@ -31,6 +31,7 @@ const AFFILIATE_ALLOWED = new Set<string>([
   '/dashboard/staff',
   '/dashboard/integrations/meta',
   '/dashboard/external-affiliate',
+  '/dashboard/import-data',
   '/dashboard/business-profile',
 ]);
 
@@ -144,6 +145,16 @@ const NAV_ITEMS: NavItem[] = [
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
           d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+      </svg>
+    ),
+  },
+  {
+    href: '/dashboard/import-data', label: 'استيراد الداتا التاريخية',
+    subLabel: 'Import Data', affiliateOnly: true,
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
       </svg>
     ),
   },
