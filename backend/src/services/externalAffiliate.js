@@ -489,7 +489,7 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
   const REV  = `COALESCE(SUM(total) FILTER (WHERE ${DELV}), 0)`;
 
   try {
-    const [dailyR, govR, rejR, prodR] = await Promise.all([
+    const [dailyR, govR, rejR, prodR, adR] = await Promise.all([
       pool.query(`
         SELECT TO_CHAR(COALESCE(created_at, updated_at)::date, 'YYYY-MM-DD') AS date,
                COUNT(*)::int                              AS orders,
@@ -522,6 +522,17 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
                ${REV}                                     AS delivered_revenue
         ${where}
         GROUP BY 1 ORDER BY delivered_revenue DESC`, params),
+      /* Meta campaign-level spend for THIS tenant (the affiliate's own ad spend),
+         date-filtered on expense_date. Attributed per product in JS by the
+         naming convention: campaign name CONTAINS the product SKU. Strictly
+         business-scoped + meta_sync — no overlap with any other tenant/system. */
+      pool.query(`
+        SELECT UPPER(campaign_name) AS campaign, COALESCE(SUM(amount), 0) AS spend
+          FROM expenses
+         WHERE business_id = $1::integer AND meta_sync = TRUE
+           AND ($2::date IS NULL OR expense_date >= $2::date)
+           AND ($3::date IS NULL OR expense_date <= $3::date)
+         GROUP BY UPPER(campaign_name)`, [businessId, startDate, endDate]),
     ]);
 
     const daily = dailyR.rows.map((r) => ({
@@ -545,29 +556,62 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
 
     const rejections = rejR.rows.map((r) => ({ reason: r.reason, count: num(r.count) }));
 
+    /* Naming-convention ad-spend attribution: a Meta campaign's spend links to a
+       product when the campaign NAME contains that product's SKU (uppercased). */
+    const campaigns = (adR.rows || [])
+      .map((c) => ({ name: String(c.campaign || ''), spend: num(c.spend) }))
+      .filter((c) => c.spend > 0);
+    const r2 = (x) => Math.round(num(x) * 100) / 100;
+
     const products = prodR.rows.map((r) => {
-      const delivered = num(r.delivered);
-      const returned  = num(r.returned);
-      const resolved  = delivered + returned;
-      const revenue   = Math.round(num(r.delivered_revenue));   // commission realised on delivery
+      const delivered   = num(r.delivered);
+      const returned    = num(r.returned);
+      const confirmed   = num(r.confirmed);
+      const totalOrders = num(r.total_orders);
+      const resolved    = delivered + returned;
+      const revenue     = Math.round(num(r.delivered_revenue));   // commission realised on delivery
+      const sku         = (r.sku || '').trim();
+
+      /* Product Ad Spend = Σ spend of campaigns whose name contains this SKU. */
+      let adSpend = 0;
+      if (sku) {
+        const skuU = sku.toUpperCase();
+        for (const c of campaigns) if (c.name.includes(skuU)) adSpend += c.spend;
+      }
+      adSpend = r2(adSpend);
+
+      /* Actual CPP = ad spend ÷ total orders (0 when no orders). */
+      const actualCpp = totalOrders > 0 ? r2(adSpend / totalOrders) : 0;
+
+      /* MAX CPP = avg commission × CR × DR (as decimals) — the break-even cost we
+         can pay to acquire one order. avg commission = realised commission per
+         delivered order; CR = confirmed/total; DR = delivered/resolved (the same
+         rates the table displays). */
+      const avgCommission = delivered    > 0 ? revenue / delivered    : 0;
+      const crDec         = totalOrders  > 0 ? confirmed / totalOrders : 0;
+      const drDec         = resolved     > 0 ? delivered / resolved    : 0;
+      const maxCpp        = r2(avgCommission * crDec * drDec);
+
       return {
         product_id:          r.sku || r.product_name,
         product_name:        r.product_name,
-        sku:                 r.sku || '',
+        sku,
         cost_price:          0,
         units_delivered:     delivered,
         units_shipped:       resolved,                                   // DR denominator (resolved shipments)
         delivery_rate:       resolved > 0 ? Math.round((delivered / resolved) * 1000) / 10 : 0,
-        total_orders:        num(r.total_orders),
-        confirmed_orders:    num(r.confirmed),
-        erp_orders:          num(r.confirmed),
+        total_orders:        totalOrders,
+        confirmed_orders:    confirmed,
+        erp_orders:          confirmed,
         delivered_revenue:   revenue,
-        attributed_ad_spend: 0,             // affiliate: no per-product ad attribution (no local SKU bridge)
-        cogs:                0,             // affiliate holds no stock
+        attributed_ad_spend: adSpend,            // SKU-in-campaign-name attribution
+        cogs:                0,                  // affiliate holds no stock
         shipping_cost:       0,
         opex_allocated:      0,
-        net_profit:          revenue,       // affiliate profit = commission of delivered orders
-        cpa:                 null,
+        net_profit:          Math.round(revenue - adSpend),   // commission − attributed ad spend
+        actual_cpp:          actualCpp,
+        max_cpp:             maxCpp,
+        cpa:                 actualCpp > 0 ? actualCpp : null,
         meta_orders:         0,
       };
     });

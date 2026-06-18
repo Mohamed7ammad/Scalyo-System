@@ -952,6 +952,8 @@ export default function AnalyticsDashboard() {
         cogs:            safe(item.cogs),
         shipping:        safe(item.shipping_cost),     // per-product Bosta shipping
         opex:            safe(item.opex_allocated),    // Path A+ allocated OPEX
+        actualCpp:       safe(item.actual_cpp),        // affiliate: ad spend ÷ orders
+        maxCpp:          safe(item.max_cpp),           // affiliate: break-even CPP
         cr:              crPct,
         /* Product Delivery Rate = delivered ÷ shipped (from the backend).
            null (→ "—") only when nothing was shipped yet, so the rate is N/A. */
@@ -2137,6 +2139,8 @@ export default function AnalyticsDashboard() {
                       /* COGS / Shipping / OPEX are always 0 for affiliates → hidden
                          in the affiliate view, fully kept for e-commerce. */
                       ...(!isAffiliate ? ['تكلفة البضاعة', 'مصاريف الشحن', 'المصاريف التشغيلية'] : []),
+                      /* CPP الفعلي / أقصى CPP — affiliate-only (SKU-attributed ad spend). */
+                      ...(isAffiliate ? ['CPP الفعلي', 'أقصى CPP'] : []),
                       'CR%', 'DR%', 'NDR%', 'صافي الربح',
                     ].map((h) => (
                       <th key={h} className="px-4 py-3.5 text-right text-[11px] font-bold uppercase
@@ -2151,14 +2155,14 @@ export default function AnalyticsDashboard() {
                   {loadingProfitability ? (
                     [...Array(4)].map((_, i) => (
                       <tr key={i}>
-                        <td colSpan={isAffiliate ? 12 : 15} className="px-4 py-2.5">
+                        <td colSpan={isAffiliate ? 14 : 15} className="px-4 py-2.5">
                           <div className="h-9 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse" />
                         </td>
                       </tr>
                     ))
                   ) : tableProductData.length === 0 ? (
                     <tr>
-                      <td colSpan={isAffiliate ? 12 : 15} className="py-14 text-center">
+                      <td colSpan={isAffiliate ? 14 : 15} className="py-14 text-center">
                         <p className="text-sm text-slate-400 dark:text-slate-600">
                           لا توجد بيانات للفترة المحددة
                         </p>
@@ -2208,6 +2212,18 @@ export default function AnalyticsDashboard() {
                         {!isAffiliate && <td className="px-4 py-3.5 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtEGP(p.cogs)}</td>}
                         {!isAffiliate && <td className="px-4 py-3.5 text-amber-600 dark:text-amber-400 whitespace-nowrap">{fmtEGP(p.shipping)}</td>}
                         {!isAffiliate && <td className="px-4 py-3.5 text-orange-600 dark:text-orange-400 whitespace-nowrap">{fmtEGP(p.opex)}</td>}
+                        {/* Affiliate-only: Actual CPP + MAX CPP (2-decimal currency) */}
+                        {isAffiliate && <td className="px-4 py-3.5 font-medium text-rose-600 dark:text-rose-400 whitespace-nowrap">{fmtMoney(p.actualCpp)}</td>}
+                        {isAffiliate && (
+                          <td className="px-4 py-3.5 whitespace-nowrap">
+                            {/* Green when there's headroom (MAX CPP ≥ Actual CPP), red when over budget. */}
+                            <span className={`font-bold ${p.maxCpp >= p.actualCpp
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : 'text-red-600 dark:text-red-400'}`}>
+                              {fmtMoney(p.maxCpp)}
+                            </span>
+                          </td>
+                        )}
                         <td className="px-4 py-3.5">
                           {p.cr !== null
                             ? <RatePill value={p.cr} thresholds={[50, 70]} />
@@ -2265,6 +2281,8 @@ export default function AnalyticsDashboard() {
                         {!isAffiliate && <td className="px-4 py-3.5 font-bold text-slate-600 dark:text-slate-300 whitespace-nowrap">{fmtEGP(totCogs)}</td>}
                         {!isAffiliate && <td className="px-4 py-3.5 font-bold text-amber-600 dark:text-amber-400 whitespace-nowrap">{fmtEGP(totShipping)}</td>}
                         {!isAffiliate && <td className="px-4 py-3.5 font-bold text-orange-600 dark:text-orange-400 whitespace-nowrap">{fmtEGP(totOpex)}</td>}
+                        {/* Actual CPP / MAX CPP are per-product ratios — no meaningful column total */}
+                        {isAffiliate && <td colSpan={2} />}
                         <td colSpan={3} />
                         <td className={`px-4 py-3.5 font-bold whitespace-nowrap
                           ${totNet >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>

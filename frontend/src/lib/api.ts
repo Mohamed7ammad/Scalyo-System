@@ -751,6 +751,10 @@ export interface ProductProfitability {
   /** Path A+ OPEX allocated to this product (exact commission + shared OPEX split
    *  by delivered-order count) — folded into net_profit, mirroring the dashboard. */
   opex_allocated?:     number;
+  /** Affiliate only: Actual CPP = attributed ad spend ÷ total orders. */
+  actual_cpp?:         number;
+  /** Affiliate only: MAX CPP (break-even) = avg commission × CR × DR. */
+  max_cpp?:            number;
   /** delivered_revenue − cogs − attributed_ad_spend − shipping_cost − opex_allocated.
    *  Matches the top KPI Net Profit card for the same product/date range. */
   net_profit:          number;
