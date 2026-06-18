@@ -462,42 +462,44 @@ const CAMPAIGN_OVERRIDES = {
  *
  * Resolution order:
  *   1. CAMPAIGN_OVERRIDES exact match (case-insensitive trim) → bare code
- *   2. Regex  SKU-<code>  anywhere in the name                → parsed bare code
+ *   2. Regex  (SKU|صفقة)-<code>  anywhere in the name          → parsed bare code
  *   3. null  — campaign is not attributable to any product
  *
- * Returns the bare code UPPERCASED with NO "SKU-" prefix — this matches
- * the format stored in the products table (e.g. "MASSAG", "IPL-PRO-01").
+ * Accepts BOTH the Latin "SKU-" tag (e-commerce convention) and the Arabic
+ * "صفقة-" tag (Safqa affiliate convention) before the code, case-insensitively.
+ * Returns the bare code UPPERCASED with NO prefix.
  *
  * Campaign name patterns handled:
- *   "جهاز البطن مصر - 11\4"             → "MASSAG"     (override)
- *   "مساج البطن العيد - SKU-MASSAG-5\20" → "MASSAG"     (regex + date strip)
- *   "عيدية الليزر SKU-IPL-PRO-01-20/5"  → "IPL-PRO-01" (regex + date strip)
- *   "حملة عشوائية"                       → null
+ *   "جهاز البطن مصر - 11\4"               → "MASSAG"     (override)
+ *   "مساج البطن العيد - SKU-MASSAG-5\20"   → "MASSAG"     (regex + date strip)
+ *   "عيدية الليزر SKU-IPL-PRO-01-20/5"    → "IPL-PRO-01" (regex + date strip)
+ *   "فرشة التنظيف - صفقة-yQASPqV"          → "YQASPQV"    (Safqa tag)
+ *   "حملة عشوائية"                         → null
  */
 function extractSku(campaignName) {
   if (!campaignName || typeof campaignName !== 'string') return null;
 
-  /* 1 — check manual overrides first (for campaigns without "SKU-" in name) */
+  /* 1 — check manual overrides first (for campaigns without a SKU/صفقة tag) */
   const key = campaignName.trim().toLowerCase();
   for (const [pattern, code] of Object.entries(CAMPAIGN_OVERRIDES)) {
     if (pattern.trim().toLowerCase() === key) {
-      return code.toUpperCase();   // bare code, no SKU- prefix
+      return code.toUpperCase();   // bare code, no prefix
     }
   }
 
-  /* 2 — capture everything after "SKU-" in the campaign name, then strip
-     trailing date suffixes that get appended by campaign managers:
-       formats seen: "-20/5"  "-5\20"  "20/5"  "5\20"  "_8/12"  etc.
-     The pattern [-_]?\d{1,2}[/\\]\d{1,2} matches:
-       optional separator + 1-2 digit day + forward-or-back-slash + 1-2 digit month
-     The trailing .* eats anything else after the date fragment.               */
-  const match = campaignName.match(/\bSKU[-]([A-Za-z0-9\-_]+)/i);
+  /* 2 — capture the code after EITHER "SKU-" (Latin, with a word boundary) OR
+     "صفقة-" (Arabic Safqa tag), then strip a trailing date suffix appended by
+     campaign managers (e.g. "-20/5", "-5\20", "_8/12"). Case-insensitive via /i;
+     "صفقة" needs no word boundary (Arabic word). The optional space after the
+     dash tolerates "صفقة- yQASPqV". */
+  const match = campaignName.match(/(?:\bSKU|صفقة)[-]\s*([A-Za-z0-9\-_]+)/i);
   if (!match) return null;
 
   let raw = match[1];
   raw = raw.replace(/[-_]?\d{1,2}[/\\]\d{1,2}.*$/, '').trim();
+  if (!raw) return null;
 
-  return raw.toUpperCase();   // bare code, no SKU- prefix
+  return raw.toUpperCase();   // bare code, no prefix
 }
 
 /* ── Date helpers ─────────────────────────────────────────────────────────── */
