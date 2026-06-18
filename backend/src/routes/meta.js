@@ -476,30 +476,85 @@ const CAMPAIGN_OVERRIDES = {
  *   "فرشة التنظيف - صفقة-yQASPqV"          → "YQASPQV"    (Safqa tag)
  *   "حملة عشوائية"                         → null
  */
-function extractSku(campaignName) {
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/* Find a KNOWN SKU as a standalone token anywhere in the campaign name. This is
+   the most robust matcher — it is prefix-/language-agnostic and immune to the
+   RTL marks and character-form variants that make literal "صفقة-" matching
+   fragile. knownSkus must be UPPERCASED + trimmed. Longest SKU wins (so a longer
+   SKU isn't shadowed by a shorter one that is its substring). A token boundary
+   ([^A-Z0-9] or string edge) prevents matching a SKU inside a larger code. */
+function findKnownSku(campaignName, knownSkus) {
+  if (!campaignName || !Array.isArray(knownSkus) || knownSkus.length === 0) return null;
+  const hay = campaignName.toUpperCase();
+  const sorted = knownSkus.filter((s) => s && s.length >= 2).sort((a, b) => b.length - a.length);
+  for (const sku of sorted) {
+    const re = new RegExp('(^|[^A-Z0-9])' + escapeRegex(sku) + '([^A-Z0-9]|$)');
+    if (re.test(hay)) return sku;
+  }
+  return null;
+}
+
+/**
+ * Extract a product SKU from a Meta campaign name.
+ *
+ * Resolution order:
+ *   1. CAMPAIGN_OVERRIDES exact match                         → bare code
+ *   2. KNOWN-SKU match: any catalogue/Safqa SKU present as a
+ *      standalone token anywhere in the name (prefix-agnostic) → that SKU
+ *   3. Regex  (SKU|صفقة)-<code>  fallback (for SKUs not yet
+ *      in the DB, e.g. a brand-new product)                    → parsed code
+ *   4. null  — campaign is not attributable to any product
+ *
+ * @param {string}   campaignName
+ * @param {string[]} [knownSkus]  UPPERCASED + trimmed list of valid SKUs.
+ */
+function extractSku(campaignName, knownSkus = []) {
   if (!campaignName || typeof campaignName !== 'string') return null;
 
-  /* 1 — check manual overrides first (for campaigns without a SKU/صفقة tag) */
+  /* 1 — manual overrides (exact campaign name → code) */
   const key = campaignName.trim().toLowerCase();
   for (const [pattern, code] of Object.entries(CAMPAIGN_OVERRIDES)) {
-    if (pattern.trim().toLowerCase() === key) {
-      return code.toUpperCase();   // bare code, no prefix
-    }
+    if (pattern.trim().toLowerCase() === key) return code.toUpperCase();
   }
 
-  /* 2 — capture the code after EITHER "SKU-" (Latin, with a word boundary) OR
-     "صفقة-" (Arabic Safqa tag), then strip a trailing date suffix appended by
-     campaign managers (e.g. "-20/5", "-5\20", "_8/12"). Case-insensitive via /i;
-     "صفقة" needs no word boundary (Arabic word). The optional space after the
-     dash tolerates "صفقة- yQASPqV". */
+  /* 2 — any KNOWN SKU present anywhere (prefix-agnostic, RTL-mark-proof) */
+  const known = findKnownSku(campaignName, knownSkus);
+  if (known) return known;
+
+  /* 3 — fallback regex: code after "SKU-" (word-bounded) or "صفقة-", trailing
+     date suffix stripped (e.g. "-20/5", "_8/12"). Case-insensitive. */
   const match = campaignName.match(/(?:\bSKU|صفقة)[-]\s*([A-Za-z0-9\-_]+)/i);
   if (!match) return null;
-
-  let raw = match[1];
-  raw = raw.replace(/[-_]?\d{1,2}[/\\]\d{1,2}.*$/, '').trim();
+  let raw = match[1].replace(/[-_]?\d{1,2}[/\\]\d{1,2}.*$/, '').trim();
   if (!raw) return null;
+  return raw.toUpperCase();
+}
 
-  return raw.toUpperCase();   // bare code, no prefix
+/* Load the tenant's valid SKUs (catalogue products + Safqa orders) — the
+   known-SKU set the gate matches campaign names against. UPPERCASED + trimmed. */
+async function loadKnownSkus(businessId) {
+  if (businessId == null) return [];
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT UPPER(TRIM(sku)) AS sku
+         FROM (
+           SELECT sku FROM products
+            WHERE business_id = $1::integer AND COALESCE(TRIM(sku), '') <> ''
+           UNION
+           SELECT sku FROM external_affiliate_orders
+            WHERE business_id = $1::integer AND network = 'safqa' AND COALESCE(TRIM(sku), '') <> ''
+         ) t
+        WHERE COALESCE(TRIM(sku), '') <> ''`,
+      [businessId]
+    );
+    return rows.map((r) => r.sku).filter(Boolean);
+  } catch (e) {
+    console.warn('[meta/runSync] could not load known SKUs for business', businessId, '—', e.message);
+    return [];
+  }
 }
 
 /* ── Date helpers ─────────────────────────────────────────────────────────── */
@@ -801,6 +856,12 @@ async function syncSingleAccount(acct, startDate, endDate) {
     let   insertedCount = 0;
     let   totalSpend    = 0;
 
+    /* Tenant's known SKUs (catalogue + Safqa) — the gate matches campaign names
+       against these as standalone tokens, prefix-/language-agnostic, so a SKU
+       present ANYWHERE in the name (e.g. "… - صفقة-yQASPqV") attributes correctly
+       even when the prefix/Arabic tag varies. Loaded ONCE per account. */
+    const knownSkus = await loadKnownSkus(businessId);
+
     /* Build the rows to write (past the zero-spend + strict SKU gate). */
     const rowsToWrite = [];
     for (const g of groups.values()) {
@@ -809,13 +870,10 @@ async function syncSingleAccount(acct, startDate, endDate) {
         console.log(`[meta/runSync] ⏭️  Skipping zero-spend key: ${g.rowDate} | "${g.campaignName}"`);
         continue;
       }
-      /* STRICT SKU GATE — product campaigns MUST carry a SKU tag (SKU-<code> in
-         the name, or a manual override). When extractSku returns null the
-         campaign is NOT a product campaign (brand / awareness / generic), so we
-         IGNORE it entirely. NOTE: the affiliate per-product attribution matches
-         on the FULL campaign_name, so a campaign that keeps its SKU- tag AND
-         appends the Safqa SKU is stored and matchable. */
-      const skuRaw = extractSku(g.campaignName);
+      /* STRICT SKU GATE — a campaign is a product campaign when it contains a
+         known SKU (anywhere) OR a "SKU-"/"صفقة-" tag. Otherwise (brand/awareness/
+         generic) it is IGNORED entirely. */
+      const skuRaw = extractSku(g.campaignName, knownSkus);
       if (skuRaw === null) {
         console.log(`[meta/runSync] ⏭️  Ignoring non-product campaign (no SKU): ${g.rowDate} | "${g.campaignName}" (spend ${spend} dropped)`);
         continue;
@@ -983,11 +1041,12 @@ router.get('/debug-api', authenticate, requireAdmin, async (req, res) => {
     const response = await axios.get(url, { timeout: 20_000 });
     const rows     = Array.isArray(response.data?.data) ? response.data.data : [];
 
+    const knownSkus = await loadKnownSkus(req.user.business_id);
     const summary = rows.map((r) => ({
       date_start:    r.date_start,
       campaign_name: r.campaign_name,
       spend:         r.spend,
-      sku_parsed:    extractSku(r.campaign_name) ?? '(UNATTRIBUTED)',
+      sku_parsed:    extractSku(r.campaign_name, knownSkus) ?? '(UNATTRIBUTED)',
       actions:       Array.isArray(r.actions) ? r.actions : [],
     }));
 
