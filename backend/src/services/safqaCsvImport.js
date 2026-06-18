@@ -13,6 +13,7 @@
  * (via recordSafqaOrder), and the same noon-UTC created_at back-dating.
  */
 
+const XLSX = require('xlsx');
 const pool = require('../config/db');
 const {
   recordSafqaOrder,
@@ -154,24 +155,25 @@ function parseDate(v, dayFirst = true) {
 }
 
 /**
- * Import a Safqa CSV (raw text) into external_affiliate_orders for one tenant.
- * UI-agnostic: returns a structured summary (no console output). Throws on a
- * fatal problem (empty file, missing id/status column) so callers map it to a
- * 400 / CLI error.
+ * Core import — takes a 2D grid (array of rows; row[0] = header) and upserts into
+ * external_affiliate_orders for one tenant. Both the CSV and Excel entry points
+ * normalise to this same grid, so parsing/UPSERT logic is shared. UI-agnostic:
+ * returns a structured summary; throws on a fatal problem (empty file, missing
+ * id/status column) so callers map it to a 400 / CLI error.
  *
- * @param {string}  text        full CSV text
- * @param {number}  businessId  tenant id
- * @param {object}  opts        { dryRun=false, replace=false }
- * @returns {Promise<object>}   summary (counts, detected columns, histograms…)
+ * @param {Array<Array<any>>} grid0      header row + data rows
+ * @param {number}            businessId tenant id
+ * @param {object}            opts       { dryRun=false, replace=false }
+ * @returns {Promise<object>}            summary (counts, detected columns, histograms…)
  */
-async function importSafqaCsv(text, businessId, opts = {}) {
+async function importSafqaGrid(grid0, businessId, opts = {}) {
   const { dryRun = false, replace = false } = opts;
   const bid = Number(businessId);
   if (!Number.isInteger(bid)) throw new Error('Invalid business id.');
 
-  const clean = String(text || '').replace(/^﻿/, '');
-  const grid  = parseCsv(clean).filter((r) => r.some((c) => String(c).trim() !== ''));
-  if (grid.length < 2) throw new Error('CSV has no data rows.');
+  const grid = (Array.isArray(grid0) ? grid0 : [])
+    .filter((r) => Array.isArray(r) && r.some((c) => String(c ?? '').trim() !== ''));
+  if (grid.length < 2) throw new Error('الملف لا يحتوي على صفوف بيانات.');
 
   const header   = grid[0];
   const dataRows = grid.slice(1);
@@ -284,8 +286,52 @@ async function importSafqaCsv(text, businessId, opts = {}) {
   };
 }
 
+/* ── Entry points ────────────────────────────────────────────────────────────
+   Both normalise their input to a 2D grid, then delegate to importSafqaGrid. */
+
+/** CSV text → import. (Kept for backward compatibility.) */
+async function importSafqaCsv(text, businessId, opts = {}) {
+  const clean = String(text || '').replace(/^﻿/, '');   // strip UTF-8 BOM
+  return importSafqaGrid(parseCsv(clean), businessId, opts);
+}
+
+/** Is this upload an Excel workbook? Checks the extension first, then the file's
+ *  magic bytes (XLSX = ZIP "PK"; legacy XLS = OLE2 "D0 CF 11 E0"). */
+function isExcelUpload(buffer, filename) {
+  if (/\.xlsx?$/i.test(String(filename || ''))) return true;
+  if (Buffer.isBuffer(buffer) && buffer.length >= 4) {
+    if (buffer[0] === 0x50 && buffer[1] === 0x4B) return true;                       // PK… (zip/xlsx)
+    if (buffer[0] === 0xD0 && buffer[1] === 0xCF && buffer[2] === 0x11 && buffer[3] === 0xE0) return true; // OLE2/xls
+  }
+  return false;
+}
+
+/** Read the FIRST sheet of an Excel buffer into a 2D grid (array of arrays).
+ *  raw:false → use the cell's DISPLAYED text, so Arabic strings and DD/MM date
+ *  strings are preserved exactly (no Excel date serials leaking through) and our
+ *  existing parseDate/detectColumns keep working. defval:'' keeps columns aligned. */
+function gridFromExcel(buffer) {
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) throw new Error('ملف Excel لا يحتوي على أي ورقة عمل.');
+  return XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: false, defval: '' });
+}
+
+/** Upload (CSV or Excel buffer) → import. The route uses this so clients can
+ *  drop .csv / .xlsx / .xls interchangeably; the CLI uses it too. */
+async function importSafqaFile(buffer, filename, businessId, opts = {}) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('الملف فارغ أو غير صالح.');
+  const grid = isExcelUpload(buffer, filename)
+    ? gridFromExcel(buffer)
+    : parseCsv(String(buffer.toString('utf8')).replace(/^﻿/, ''));
+  return importSafqaGrid(grid, businessId, opts);
+}
+
 module.exports = {
+  importSafqaGrid,
   importSafqaCsv,
+  importSafqaFile,
+  isExcelUpload,
   // helpers re-exported so the CLI can format its rich report from one source
   KNOWN_STATUS_KEYS, STATUS_OVERRIDES, COLUMN_ALIASES,
   parseCsv, detectColumns, resolveStatus, parseMoney, parseDate, detectDayFirst,

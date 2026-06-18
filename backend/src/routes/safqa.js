@@ -16,19 +16,19 @@ const multer  = require('multer');
 
 const authenticate     = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
-const { importSafqaCsv } = require('../services/safqaCsvImport');
+const { importSafqaFile } = require('../services/safqaCsvImport');
 
 const router = express.Router();
 
 /* In-memory upload — we only need the buffer to parse; nothing is written to disk.
-   Cap at 20 MB and accept a single .csv/text file under the field name "file". */
+   Cap at 20 MB and accept a single CSV or Excel file under the field name "file". */
 const upload = multer({
   storage: multer.memoryStorage(),
   limits:  { fileSize: 20 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const ok = /csv|excel|text|octet-stream/i.test(file.mimetype || '') ||
-               /\.csv$/i.test(file.originalname || '');
-    cb(ok ? null : new Error('الملف يجب أن يكون بصيغة CSV'), ok);
+    const ok = /csv|excel|spreadsheet|sheet|text|octet-stream/i.test(file.mimetype || '') ||
+               /\.(csv|xlsx|xls)$/i.test(file.originalname || '');
+    cb(ok ? null : new Error('الملف يجب أن يكون بصيغة CSV أو Excel'), ok);
   },
 });
 
@@ -55,11 +55,13 @@ router.post(
       if (!req.file || !req.file.buffer || req.file.buffer.length === 0) {
         return res.status(400).json({ error: 'لم يتم رفع ملف CSV' });
       }
-      const text   = req.file.buffer.toString('utf8');
       const dryRun = String(req.query.dry ?? req.body?.dry ?? '') === '1' ||
                      String(req.query.dry ?? req.body?.dry ?? '').toLowerCase() === 'true';
 
-      const summary = await importSafqaCsv(text, req.user.business_id, { dryRun });
+      /* importSafqaFile auto-detects CSV vs Excel from the buffer/filename. */
+      const summary = await importSafqaFile(
+        req.file.buffer, req.file.originalname, req.user.business_id, { dryRun },
+      );
       return res.json({ ok: true, ...summary });
     } catch (err) {
       console.error('[safqa/import-csv] failed:', err.message);

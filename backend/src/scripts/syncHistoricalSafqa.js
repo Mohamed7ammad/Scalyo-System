@@ -22,7 +22,7 @@ require('dotenv').config();
 const fs   = require('fs');
 const path = require('path');
 const {
-  importSafqaCsv, KNOWN_STATUS_KEYS, COLUMN_ALIASES,
+  importSafqaFile, KNOWN_STATUS_KEYS, COLUMN_ALIASES,
   resolveStatus, classifySafqaStatus,
 } = require('../services/safqaCsvImport');
 
@@ -47,11 +47,11 @@ async function main() {
   }
 
   console.log(`📥 [syncHistoricalSafqa] ${DRY ? 'DRY RUN — no writes. ' : ''}File: ${filePath} → business_id ${businessId}\n`);
-  const text = fs.readFileSync(filePath, 'utf8');
+  const buffer = fs.readFileSync(filePath);   // raw buffer → handles CSV and Excel
 
   let r;
   try {
-    r = await importSafqaCsv(text, businessId, { dryRun: DRY, replace: REPLACE });
+    r = await importSafqaFile(buffer, filePath, businessId, { dryRun: DRY, replace: REPLACE });
   } catch (err) {
     console.error('❌', err.message);
     process.exit(1);

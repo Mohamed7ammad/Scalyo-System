@@ -26,7 +26,7 @@ export default function ImportDataPage() {
   const pickFile = (f: File | null) => {
     setError(''); setResult(null);
     if (!f) { setFile(null); return; }
-    if (!/\.csv$/i.test(f.name)) { setError('من فضلك اختر ملف بصيغة CSV فقط.'); return; }
+    if (!/\.(csv|xlsx|xls)$/i.test(f.name)) { setError('من فضلك اختر ملف بصيغة CSV أو Excel (xlsx / xls).'); return; }
     setFile(f);
   };
 
@@ -66,7 +66,7 @@ export default function ImportDataPage() {
               استيراد الداتا التاريخية
             </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 leading-snug">
-              ارفع ملف تصدير الطلبات (CSV) من لوحة صفقة لاستيراد طلباتك التاريخية ومزامنتها مع لوحة التحليلات.
+              ارفع ملف تصدير الطلبات (CSV أو Excel) من لوحة صفقة لاستيراد طلباتك التاريخية ومزامنتها مع لوحة التحليلات.
               <span className="block text-xs text-indigo-500 dark:text-indigo-400 font-medium mt-0.5">
                 الاستيراد آمن للتكرار — يُحدّث الطلب الموجود بدل تكراره.
               </span>
@@ -90,7 +90,7 @@ export default function ImportDataPage() {
             <input
               ref={inputRef}
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="hidden"
               onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
             />
@@ -104,9 +104,12 @@ export default function ImportDataPage() {
                 <span className="text-slate-400 font-normal"> · {(file.size / 1024).toFixed(0)} KB</span>
               </p>
             ) : (
-              <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
-                اسحب ملف CSV هنا أو <span className="text-indigo-600 dark:text-indigo-400 font-semibold">اضغط للاختيار</span>
-              </p>
+              <>
+                <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                  اسحب ملف CSV أو Excel هنا أو <span className="text-indigo-600 dark:text-indigo-400 font-semibold">اضغط للاختيار</span>
+                </p>
+                <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">يدعم .csv و .xlsx و .xls</p>
+              </>
             )}
           </div>
 
@@ -209,7 +212,7 @@ export default function ImportDataPage() {
 
         {/* Help */}
         <div className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed px-1">
-          من لوحة صفقة، صدّر كل الطلبات إلى ملف CSV ثم ارفعه هنا. يتعرّف النظام تلقائياً على الأعمدة
+          من لوحة صفقة، صدّر كل الطلبات إلى ملف CSV أو Excel ثم ارفعه هنا — لا حاجة للتحويل يدوياً. يتعرّف النظام تلقائياً على الأعمدة
           (كود الطلب، الحالة، العمولة، المنتجات، المحافظة، التاريخ…). جرّب «معاينة» أولاً للتأكد من القراءة الصحيحة.
         </div>
       </div>

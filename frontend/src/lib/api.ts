@@ -1279,8 +1279,9 @@ export interface SafqaImportResult {
   totalAfter:      number | null;
 }
 
-/** Upload a Safqa CSV export. Multipart field name is "file". Pass dryRun=true to
- *  preview (column detection + counts) without writing. */
+/** Upload a Safqa export — CSV or Excel (.xlsx/.xls). Multipart field name is
+ *  "file" (the backend auto-detects the format). Pass dryRun=true to preview
+ *  (column detection + counts) without writing. */
 export const importSafqaCsv = (file: File, dryRun = false) => {
   const fd = new FormData();
   fd.append('file', file);
