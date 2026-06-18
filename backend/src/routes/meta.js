@@ -799,6 +799,8 @@ async function syncSingleAccount(acct, startDate, endDate) {
     let   insertedCount = 0;
     let   totalSpend    = 0;
 
+    /* Build the rows to write (past the zero-spend + strict SKU gate). */
+    const rowsToWrite = [];
     for (const g of groups.values()) {
       const spend = parseFloat(g.spend.toFixed(2));
       if (spend <= 0) {
@@ -808,42 +810,63 @@ async function syncSingleAccount(acct, startDate, endDate) {
       /* STRICT SKU GATE — product campaigns MUST carry a SKU tag (SKU-<code> in
          the name, or a manual override). When extractSku returns null the
          campaign is NOT a product campaign (brand / awareness / generic), so we
-         IGNORE it entirely: no spend, no purchases, no row written to the DB.
-         This keeps non-product spend out of the financial totals and CPA/CPP. */
+         IGNORE it entirely. NOTE: the affiliate per-product attribution matches
+         on the FULL campaign_name, so a campaign that keeps its SKU- tag AND
+         appends the Safqa SKU is stored and matchable. */
       const skuRaw = extractSku(g.campaignName);
       if (skuRaw === null) {
         console.log(`[meta/runSync] ⏭️  Ignoring non-product campaign (no SKU): ${g.rowDate} | "${g.campaignName}" (spend ${spend} dropped)`);
         continue;
       }
-      const sku = skuRaw;
+      rowsToWrite.push({ date: g.rowDate, name: g.campaignName, spend, purchases: g.metaPurchases, sku: skuRaw });
+    }
 
-      console.log('[SYNC DEBUG] Upserting row:', JSON.stringify({ date: g.rowDate, campaign: g.campaignName, sku, spend, metaPurchases: g.metaPurchases }));
+    /* ── REPLACE-IN-RANGE (rename-safe) ──────────────────────────────────────
+       The conflict key is (expense_date, campaign_name, business_id), so when a
+       campaign is RENAMED in Meta, a re-sync of the same date would INSERT a new
+       row under the new name and leave the OLD-name row behind (stale name +
+       double spend). To make renames take effect cleanly, we DELETE this
+       account's meta_sync rows in [startDate, endDate] and re-insert the fresh
+       set — atomically, and ONLY when Meta actually returned rows to write, so a
+       transient empty/partial response can never wipe existing data. */
+    if (allData.length > 0 && rowsToWrite.length > 0) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const del = await client.query(
+          `DELETE FROM expenses
+            WHERE meta_sync = TRUE AND business_id = $1 AND meta_account_id = $2
+              AND expense_date >= $3::date AND expense_date <= $4::date`,
+          [businessId, metaAccountId, startDate, endDate]
+        );
+        console.log(`[meta/runSync] 🔄 Replace-in-range: cleared ${del.rowCount} existing row(s) for ${startDate}→${endDate}, account #${metaAccountId}`);
 
-      /* UPSERT — conflict key (expense_date, campaign_name, business_id).
-         rowDate is the raw 'YYYY-MM-DD' string from Meta's date_start, passed
-         as-is so Postgres casts it to DATE with no JS Date conversion. Overwrite
-         (not add) keeps re-runs idempotent. No rows are ever deleted.          */
-      await pool.query(
-        `INSERT INTO expenses
-           (expense_date, campaign_name, amount, meta_purchases, meta_sync, sku, meta_account_id, business_id, category)
-         VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, 'إعلانات ميتا وتيك توك')
-         ON CONFLICT (expense_date, campaign_name, business_id)
-         DO UPDATE SET
-           amount          = EXCLUDED.amount,
-           meta_purchases  = EXCLUDED.meta_purchases,
-           sku             = EXCLUDED.sku,
-           meta_account_id = EXCLUDED.meta_account_id,
-           category        = EXCLUDED.category`,
-        [g.rowDate, g.campaignName, spend, g.metaPurchases, sku, metaAccountId, businessId]
-      );
-
-      totalSpend += spend;
-      insertedCount++;
-      insertedDates.add(g.rowDate);
-      console.log(
-        `[meta/runSync]   ✅ ${g.rowDate} | ${g.campaignName} [${sku}]` +
-        ` → spend: ${spend} | purchases: ${g.metaPurchases}`
-      );
+        for (const r of rowsToWrite) {
+          await client.query(
+            `INSERT INTO expenses
+               (expense_date, campaign_name, amount, meta_purchases, meta_sync, sku, meta_account_id, business_id, category)
+             VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, 'إعلانات ميتا وتيك توك')
+             ON CONFLICT (expense_date, campaign_name, business_id)
+             DO UPDATE SET
+               amount          = EXCLUDED.amount,
+               meta_purchases  = EXCLUDED.meta_purchases,
+               sku             = EXCLUDED.sku,
+               meta_account_id = EXCLUDED.meta_account_id,
+               category        = EXCLUDED.category`,
+            [r.date, r.name, r.spend, r.purchases, r.sku, metaAccountId, businessId]
+          );
+          totalSpend += r.spend;
+          insertedCount++;
+          insertedDates.add(r.date);
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+      console.log(`[meta/runSync] ✅ Wrote ${insertedCount} campaign-day row(s) for account #${metaAccountId}`);
     }
 
     const totalSpendRounded = parseFloat(totalSpend.toFixed(2));
