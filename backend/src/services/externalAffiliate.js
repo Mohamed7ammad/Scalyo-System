@@ -440,7 +440,12 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   /* ── Derived money metrics (global DR; Safqa has no product-level data) ── */
   const futureBalance = r0(profitInProgress * (dr / 100));               // F.B (IN PROGRESS)
   const avgProfit     = delivered > 0 ? r2(profitDelivered / delivered) : 0; // AVG PROFIT
-  const maxCpp        = r2(avgProfit * (dr / 100));                      // MAX CPP
+  /* MAX CPP = expected revenue per RAW lead = avgCommission × CR × DR. A raw
+     Meta lead must survive BOTH the call center (CR) AND the courier (DR) to
+     earn its commission. cr/dr are percentages here → divide each by 100.
+     0-safe: avgProfit=0 when delivered=0, cr=0 when orders=0, dr=0 when
+     resolved=0, so the product is 0 in any degenerate case. */
+  const maxCpp        = r2(avgProfit * (cr / 100) * (dr / 100));         // MAX CPP
   const ads           = r0(adsRes.rows[0]?.ad_spend);                    // ADS (Meta spend)
   const cpp           = orders > 0 ? r2(ads / orders) : 0;               // CPP
   const netProfit     = r0(profitDelivered - ads);                      // NET PROFIT
