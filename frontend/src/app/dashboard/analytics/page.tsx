@@ -341,7 +341,6 @@ function SafqaAffiliateGrid({ s, loading }: { s: ExternalNetworkStat; loading: b
   const cpp             = s.cpp                   ?? 0;
   const netProfit       = s.netProfit            ?? 0;
   const forecasted      = s.forecastedNetProfit  ?? 0;
-  const returned        = s.returned             ?? 0;
 
   const cards: SafqaCard[] = [
     /* ── Row 1 ─────────────────────────────────────────────────────────── */
@@ -360,7 +359,9 @@ function SafqaAffiliateGrid({ s, loading }: { s: ExternalNetworkStat; loading: b
     { title: 'F.B (IN PROGRESS)', value: fmtMoney(futureBalance), sub: 'رصيد مستقبلي متوقّع',     grad: 'from-purple-500 to-violet-700' },
     { title: 'CR',                value: fmtPct2(cr),             sub: 'نسبة التأكيد',             grad: 'from-amber-500 to-yellow-600' },
     { title: 'DR',                value: fmtPct2(dr),             sub: 'نسبة التسليم',             grad: 'from-teal-500 to-cyan-600' },
-    { title: 'NDR',               value: fmtPct2(ndr),            sub: `مرتجع ${fmt(returned)}`,    grad: 'from-emerald-500 to-teal-600', tone: ndr > 40 ? 'neg' : undefined },
+    /* NDR is now "Net Delivery Rate" (delivered/total): high = GOOD, so the sub
+       shows the delivered count and the tone flags LOW rates (not high). */
+    { title: 'NDR',               value: fmtPct2(ndr),            sub: `تسليم ${fmt(delivered)} طلب`, grad: 'from-emerald-500 to-teal-600', tone: ndr >= 50 ? 'pos' : (ndr < 35 ? 'neg' : undefined) },
     { title: 'AVG PROFIT',        value: fmtMoney(avgProfit),     sub: 'ربح لكل طلب مُسلَّم',      grad: 'from-cyan-500 to-sky-600' },
     /* ── Row 4 ─────────────────────────────────────────────────────────── */
     { title: 'MAX CPP',           value: fmtMoney(maxCpp),        sub: 'أقصى تكلفة آمنة للطلب',    grad: 'from-rose-500 to-red-600' },
