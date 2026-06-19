@@ -161,6 +161,17 @@ pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS external_affiliate_orders_uidx
       ON external_affiliate_orders (network, external_id, business_id)
   `))
+  /* Reclassify EXISTING declined ("ملغي" / cancelled) rows that were stored under
+     the old mapping (declined → 'returned'). They are call-center cancellations,
+     NOT courier returns, so they must move to the 'cancelled' class and OUT of
+     CONFIRMED/returned/NDR. Idempotent (guarded by status_class <> 'cancelled'). */
+  .then(() => pool.query(
+    `UPDATE external_affiliate_orders
+        SET status_class = 'cancelled'
+      WHERE network = 'safqa'
+        AND LOWER(TRIM(status)) IN ('declined1','declined2')
+        AND status_class <> 'cancelled'`
+  ).then((res) => { if (res.rowCount) console.log(`✅  external_affiliate_orders: reclassified ${res.rowCount} declined→cancelled row(s)`); }))
   .then(() => console.log('✅  external_affiliate_orders table ready'))
   .catch((err) => console.warn('⚠️   external_affiliate_orders migration:', err.message));
 
@@ -169,8 +180,11 @@ pool.query(`
      pending/skip                                  → pending
      preparing/printing/shipped/holding/ask_to_exchange → confirmed (in pipeline)
      available/collected                           → delivered (realised)
-     returned1/2, ask_to_return, returned_exchange,
-       declined1/2                                 → returned                     */
+     returned1/2, ask_to_return, returned_exchange → returned  (genuine COURIER
+       returns — these PASSED call-center confirmation, then failed at delivery,
+       so they count toward CONFIRMED/CR)
+     declined1/2 ("ملغي" / cancelled)              → cancelled (FAILED the call
+       center — NOT confirmed; must NOT inflate CR)                              */
 const SAFQA_STATUS_CLASS = {
   pending:           'pending',
   skip:              'pending',
@@ -185,8 +199,8 @@ const SAFQA_STATUS_CLASS = {
   returned2:         'returned',
   ask_to_return:     'returned',
   returned_exchange: 'returned',
-  declined1:         'returned',
-  declined2:         'returned',
+  declined1:         'cancelled',   // call-center cancellation — NOT confirmed
+  declined2:         'cancelled',
 };
 function classifySafqaStatus(status) {
   return SAFQA_STATUS_CLASS[String(status || '').trim().toLowerCase()] || 'pending';
