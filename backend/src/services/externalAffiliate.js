@@ -434,8 +434,10 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   /* ── Rates ───────────────────────────────────────────────────────────── */
   const resolved = delivered + returned;                 // shipments with a final outcome
   const cr  = orders   > 0 ? r2((confirmed / orders) * 100)   : 0;        // CR
-  const ndr = resolved > 0 ? r2((returned / resolved) * 100)  : 0;        // NDR (returns)
-  const dr  = resolved > 0 ? r2((delivered / resolved) * 100) : 0;        // DR = 100 − NDR
+  /* NDR = "Net Delivery Rate" = delivered ÷ TOTAL orders (unified with the
+     Detailed Products Table, which uses delivered/total). 0-safe on orders=0. */
+  const ndr = orders   > 0 ? r2((delivered / orders) * 100)  : 0;        // NDR (net delivery rate)
+  const dr  = resolved > 0 ? r2((delivered / resolved) * 100) : 0;        // DR = delivered ÷ resolved
 
   /* ── Derived money metrics (global DR; Safqa has no product-level data) ── */
   const futureBalance = r0(profitInProgress * (dr / 100));               // F.B (IN PROGRESS)
