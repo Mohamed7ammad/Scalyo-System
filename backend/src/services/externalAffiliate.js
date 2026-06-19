@@ -401,7 +401,12 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   const confirmedOnly = num(r.confirmed_only);
   const pending       = num(r.pending);
   const onHold        = num(r.on_hold);                  // raw status = 'holding'
-  const confirmed     = delivered + confirmedOnly;       // delivered is a subset of confirmed
+  /* CONFIRMED = every order that passed CALL-CENTER confirmation: the in-pipeline
+     confirmed orders, the delivered ones, AND the returned ones (a return was
+     confirmed first, then failed at shipping/delivery). Returns are added to
+     confirmed ONLY — they stay in `returned`/NDR and are NOT in `delivered`.
+     Excluding them would artificially deflate CR%. */
+  const confirmed     = delivered + confirmedOnly + returned;
 
   /* ── Profits (Σ Safqa `total`) ───────────────────────────────────────── */
   const profit          = r0(r.revenue_all);                              // PROFIT
@@ -487,7 +492,10 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
       AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
       AND ($4::text IS NULL OR product_name = $4 OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($4)))`;
 
-  const CONF = `status_class IN ('confirmed','delivered')`;
+  /* CONFIRMED includes returns: a returned order passed call-center confirmation
+     first (then failed at shipping/delivery). Returns are counted in CONFIRMED
+     and RETURNED/NDR, but NOT in DELIVERED. */
+  const CONF = `status_class IN ('confirmed','delivered','returned')`;
   const DELV = `status_class = 'delivered'`;
   const RET  = `status_class = 'returned'`;
   const REV  = `COALESCE(SUM(total) FILTER (WHERE ${DELV}), 0)`;
