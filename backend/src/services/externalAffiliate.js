@@ -352,23 +352,27 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
     aggRes = await pool.query(`${ORDER_AGG_SELECT}${prodPred(2)}`, [businessId, product]);
   }
 
-  /* Ad spend is non-fatal: degrade ADS to 0 on any error, but LOG it (no longer
-     silent). When a product is selected, narrow spend to THAT product's SKUs
-     (resolved from the Safqa orders) so CPP / NET PROFIT match the filtered
-     orders; a product with no SKU → no attributable ad spend (0). */
+  /* ADS — STRICTLY ISOLATED Safqa ad spend. Sum ONLY expenses whose campaign name
+     contains a KNOWN Safqa SKU (from external_affiliate_orders network='safqa') —
+     the SAME "campaign_name CONTAINS sku" rule the Detailed Products Table uses.
+     This excludes the tenant's standard e-commerce campaigns (e.g. MASSAG) so the
+     affiliate ADS / CPP / NET PROFIT are not polluted by non-Safqa spend. When a
+     product is selected, the EXISTS further narrows to that product's SKU.
+     Non-fatal: degrade ADS to 0 on any error, but LOG it. */
   const adsRes = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0) AS ad_spend
-       FROM expenses
-      WHERE business_id = $1::integer AND meta_sync = TRUE
-        AND ($2::date IS NULL OR expense_date >= $2::date)
-        AND ($3::date IS NULL OR expense_date <= $3::date)
-        AND ($4::text IS NULL OR UPPER(TRIM(COALESCE(sku,''))) IN (
-              SELECT UPPER(TRIM(COALESCE(o.sku,'')))
+    `SELECT COALESCE(SUM(e.amount), 0) AS ad_spend
+       FROM expenses e
+      WHERE e.business_id = $1::integer AND e.meta_sync = TRUE
+        AND ($2::date IS NULL OR e.expense_date >= $2::date)
+        AND ($3::date IS NULL OR e.expense_date <= $3::date)
+        AND EXISTS (
+              SELECT 1
                 FROM external_affiliate_orders o
                WHERE o.business_id = $1::integer AND o.network = 'safqa'
-                 AND COALESCE(o.sku,'') <> ''
-                 AND (o.product_name = $4 OR UPPER(TRIM(COALESCE(o.sku,''))) = UPPER(TRIM($4)))
-            ))`,
+                 AND COALESCE(TRIM(o.sku), '') <> ''
+                 AND UPPER(e.campaign_name) LIKE '%' || UPPER(TRIM(o.sku)) || '%'
+                 AND ($4::text IS NULL OR o.product_name = $4 OR UPPER(TRIM(COALESCE(o.sku,''))) = UPPER(TRIM($4)))
+            )`,
     [businessId, startDate, endDate, product]
   ).catch((err) => {
     console.error(`[aggregateSafqaFromDb] ⚠️  ad-spend query failed for business ${businessId} (ADS→0):`, err.message);
