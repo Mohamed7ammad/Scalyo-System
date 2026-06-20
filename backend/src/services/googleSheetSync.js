@@ -6,13 +6,17 @@ const { enrichDeliveryRate } = require('./bostaEnrich');
 const SHEET_URL =
   'https://script.google.com/macros/s/AKfycbwUsAT0ui9ZeJVXD_96V6RZAlMpSn5dQPrMhGq16zw7ezsIFoEzEqUM4q3Oug33-phP/exec';
 
+/* Google Apps Script can be slow to spin up; 10s was too tight and timed out.
+   Env-overridable, default 30s. */
+const SHEET_TIMEOUT_MS = Number(process.env.SHEET_TIMEOUT_MS) || 30_000;
+
 
 const startOrderSyncCron = () => {
   cron.schedule('*/5 * * * *', async () => {
     try {
       console.log('🔄 Running background sync from Google Sheets...');
 
-      const response  = await axios.get(SHEET_URL, { timeout: 15_000 });
+      const response  = await axios.get(SHEET_URL, { timeout: SHEET_TIMEOUT_MS });
       const newOrders = response.data;
 
       if (!Array.isArray(newOrders) || newOrders.length === 0) {
@@ -74,7 +78,7 @@ const startOrderSyncCron = () => {
         await axios.post(SHEET_URL, {
           action:   'markSynced',
           rowIndex: orderData.rowIndex,
-        }, { timeout: 10_000 });
+        }, { timeout: SHEET_TIMEOUT_MS });
 
         syncedCount++;
       }
