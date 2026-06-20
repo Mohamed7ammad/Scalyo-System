@@ -371,14 +371,74 @@ async function phase3Enforce() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   Orchestrator — run the three phases strictly in order.
+   Phase 4 — Team Management / Agency model + incident schema fixes.
+   All idempotent (safe to run every boot). Each statement is independently
+   guarded so one failure never blocks the rest.
+   ══════════════════════════════════════════════════════════════════════════ */
+async function phase4AgencySchema() {
+  /* ── 4a. users.role CHECK — allow 'media_buyer' ──────────────────────────
+     The live constraint only permitted ('agent','admin'), so creating a media
+     buyer threw `violates check constraint "users_role_check"` (HTTP 500). Drop
+     then re-add aligned to staff.js VALID_ROLES. Extend the IN(...) list here if
+     a new role is ever added to VALID_ROLES. */
+  await pool.query(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`).catch(() => {});
+  await pool.query(`
+    ALTER TABLE users ADD CONSTRAINT users_role_check
+      CHECK (role IN ('agent', 'admin', 'media_buyer'))
+  `).catch((err) =>
+    console.warn('⚠️   Phase 4: users_role_check update skipped:', err.message)
+  );
+
+  /* ── 4b. Widen orders."Phone" 50→255 ────────────────────────────────────
+     Long / multi-number phone cells from the Google Sheet overflowed
+     VARCHAR(50) ("value too long for type character varying(50)") and aborted
+     the whole sync tick. Widening is a metadata-only change (no rewrite). */
+  await pool.query(`ALTER TABLE orders ALTER COLUMN "Phone" TYPE VARCHAR(255)`).catch((err) =>
+    console.warn('⚠️   Phase 4: orders."Phone" widen skipped:', err.message)
+  );
+
+  /* ── 4c. Agency attribution columns ─────────────────────────────────────
+     ad_account_id  → convenience single-account pointer on the user. NOTE: the
+       scalable source of truth for "which ad accounts a buyer owns" stays
+       meta_accounts.assigned_user_id (1 user → many accounts).
+     referral_code  → the buyer's unique UTM/Sub-ID; orders carrying it attribute
+       to that buyer. Unique PER TENANT so attribution is unambiguous.
+     orders.referral_code → captured at ingestion (webhook / EasyOrder / sheet);
+       drives the Media-Buyer order scope. */
+  await pool.query(`ALTER TABLE users  ADD COLUMN IF NOT EXISTS ad_account_id VARCHAR(100)`).catch((err) =>
+    console.warn('⚠️   Phase 4: users.ad_account_id skipped:', err.message)
+  );
+  await pool.query(`ALTER TABLE users  ADD COLUMN IF NOT EXISTS referral_code VARCHAR(100)`).catch((err) =>
+    console.warn('⚠️   Phase 4: users.referral_code skipped:', err.message)
+  );
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS referral_code VARCHAR(100)`).catch((err) =>
+    console.warn('⚠️   Phase 4: orders.referral_code skipped:', err.message)
+  );
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS users_referral_code_tenant_uidx
+      ON users (business_id, referral_code) WHERE referral_code IS NOT NULL
+  `).catch((err) =>
+    console.warn('⚠️   Phase 4: users_referral_code_tenant_uidx skipped:', err.message)
+  );
+  /* Fast Media-Buyer order lookups by referral. */
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS orders_referral_code_idx
+      ON orders (business_id, referral_code)
+  `).catch(() => {});
+
+  console.log('✅  Phase 4: agency/team-management schema ready (role check, Phone, referral columns)');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Orchestrator — run the phases strictly in order.
    ══════════════════════════════════════════════════════════════════════════ */
 async function initTenancy() {
   try {
-    await phase1Create();    // tables + nullable columns, no FKs
-    await phase2DataFix();   // back-fill + orphan cleanup
-    await phase3Enforce();   // FKs, composite PKs, unique + filter indexes
-    console.log('✅  Tenant isolation: 3-phase migration complete — schema is clean');
+    await phase1Create();      // tables + nullable columns, no FKs
+    await phase2DataFix();     // back-fill + orphan cleanup
+    await phase3Enforce();     // FKs, composite PKs, unique + filter indexes
+    await phase4AgencySchema();// team-management + incident schema fixes
+    console.log('✅  Tenant isolation: migration complete — schema is clean');
   } catch (err) {
     console.error('⚠️   Tenant isolation migration failed:', err.message);
   }
