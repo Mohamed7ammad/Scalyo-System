@@ -16,7 +16,7 @@ import {
   Cell,
 } from 'recharts';
 
-import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders, getCampaigns } from '@/lib/api';
+import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders } from '@/lib/api';
 import type { DeliveredOrdersResponse } from '@/lib/api';
 import type {
   Product,
@@ -37,9 +37,6 @@ const DATE_RANGES = [
   { label: 'هذا الشهر',  value: 'month'     },
 ];
 
-/* Campaign options are now fetched LIVE from the backend (real Meta campaigns,
-   plan-isolated) — see the `campaigns` state below. The old hardcoded placeholder
-   list was removed: it filtered on names that exist nowhere in the DB. */
 const STATUSES = ['كل الحالات', 'جديد', 'تم التأكيد', 'تم الشحن', 'تم الاستلام', 'مُرجَّع'];
 
 /** Colour palette for rejection-reason donut slices — cycles via index */
@@ -510,7 +507,6 @@ export default function AnalyticsDashboard() {
   const [activeRange, setActiveRange] = useState('7d');
   const [fromDate,    setFromDate]    = useState('');
   const [toDate,      setToDate]      = useState('');
-  const [campaign,    setCampaign]    = useState('كل الحملات');
   const [product,     setProduct]     = useState('كل المنتجات');
   const [status,      setStatus]      = useState('كل الحالات');
   const [chartView,   setChartView]   = useState<ChartView>('orders');
@@ -521,8 +517,6 @@ export default function AnalyticsDashboard() {
 
   /* ── API data state ───────────────────────────────────────────── */
   const [products,             setProducts]             = useState<Product[]>([]);
-  /* Real Meta campaign names for the filter dropdown (plan-isolated by backend). */
-  const [campaigns,            setCampaigns]            = useState<string[]>([]);
   const [dashStats,            setDashStats]            = useState<DashboardStats | null>(null);
   const [loadingDash,          setLoadingDash]          = useState(false);
   const [errorDash,            setErrorDash]            = useState<string | null>(null);
@@ -602,11 +596,11 @@ export default function AnalyticsDashboard() {
     } catch { /* non-admin gets 403 — swallow silently */ }
   }, []);
 
-  const fetchDashStats = useCallback(async (sd?: string, ed?: string, prod?: string, camp?: string) => {
+  const fetchDashStats = useCallback(async (sd?: string, ed?: string, prod?: string) => {
     setLoadingDash(true);
     setErrorDash(null);
     try {
-      const res = await getDashboardStats(sd, ed, prod, camp);
+      const res = await getDashboardStats(sd, ed, prod);
       setDashStats(res.data);
     } catch (err: unknown) {
       setDashStats(null);
@@ -622,10 +616,10 @@ export default function AnalyticsDashboard() {
     }
   }, []);
 
-  const fetchProfitability = useCallback(async (sd?: string, ed?: string, prod?: string, camp?: string) => {
+  const fetchProfitability = useCallback(async (sd?: string, ed?: string, prod?: string) => {
     setLoadingProfitability(true);
     try {
-      const res = await getProductsProfitability(sd, ed, prod, camp);
+      const res = await getProductsProfitability(sd, ed, prod);
       setProfitability(res.data);
     } catch {
       setProfitability([]);
@@ -636,23 +630,13 @@ export default function AnalyticsDashboard() {
 
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
-  /* Real campaign options (plan-isolated). Fetched once; degrade to [] on error so
-     the dropdown still renders with just "كل الحملات". */
   useEffect(() => {
-    let alive = true;
-    getCampaigns()
-      .then((res) => { if (alive) setCampaigns(Array.isArray(res.data) ? res.data : []); })
-      .catch(() => { if (alive) setCampaigns([]); });
-    return () => { alive = false; };
-  }, []);
+    fetchDashStats(effectiveDates.startDate, effectiveDates.endDate, product);
+  }, [effectiveDates, product, fetchDashStats]);
 
   useEffect(() => {
-    fetchDashStats(effectiveDates.startDate, effectiveDates.endDate, product, campaign);
-  }, [effectiveDates, product, campaign, fetchDashStats]);
-
-  useEffect(() => {
-    fetchProfitability(effectiveDates.startDate, effectiveDates.endDate, product, campaign);
-  }, [effectiveDates, product, campaign, fetchProfitability]);
+    fetchProfitability(effectiveDates.startDate, effectiveDates.endDate, product);
+  }, [effectiveDates, product, fetchProfitability]);
 
   /* Delivered-orders list: lazy-loaded only while the section is expanded;
      refetches on date-range or product change so it always matches the filters. */
@@ -660,12 +644,12 @@ export default function AnalyticsDashboard() {
     if (!deliveredOpen) return;
     let alive = true;
     setDeliveredLoading(true);
-    getDeliveredOrders(effectiveDates.startDate, effectiveDates.endDate, product, campaign)
+    getDeliveredOrders(effectiveDates.startDate, effectiveDates.endDate, product)
       .then((res) => { if (alive) setDeliveredData(res.data); })
       .catch(() => { if (alive) setDeliveredData({ total: 0, days: [] }); })
       .finally(() => { if (alive) setDeliveredLoading(false); });
     return () => { alive = false; };
-  }, [deliveredOpen, effectiveDates, product, campaign]);
+  }, [deliveredOpen, effectiveDates, product]);
 
   /* ── Date picker handlers ─────────────────────────────────────── */
   const handleFromDate = (v: string) => { setFromDate(v); setActiveRange(''); };
@@ -982,12 +966,6 @@ export default function AnalyticsDashboard() {
     [profitability]
   );
 
-  /* ── CAMPAIGNS dropdown (built from real, plan-isolated backend data) ──── */
-  const CAMPAIGNS = useMemo(
-    () => ['كل الحملات', ...campaigns],
-    [campaigns]
-  );
-
   /* ── AI Insights: winner + loser from profitability ───────────── */
   const aiWinner = useMemo(
     () => [...profitability].sort((a, b) => b.net_profit - a.net_profit)[0] ?? null,
@@ -1140,7 +1118,6 @@ export default function AnalyticsDashboard() {
 
             <FilterSelect value={status}   onChange={setStatus}   options={STATUSES}  />
             <FilterSelect value={product}  onChange={setProduct}  options={PRODUCTS}  />
-            <FilterSelect value={campaign} onChange={setCampaign} options={CAMPAIGNS} />
 
             <button className="mr-auto flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium
               bg-indigo-600 hover:bg-indigo-700 text-white transition shadow-sm shrink-0">
