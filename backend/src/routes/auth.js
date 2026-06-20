@@ -47,7 +47,23 @@ function getSupabase() {
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_ANON_KEY;
     if (!url || !key) throw new Error('SUPABASE_URL / SUPABASE_ANON_KEY not set in .env');
-    _supabase = createClient(url, key);
+
+    /* Node < 22 has no global WebSocket, so supabase-js's Realtime client throws
+       "Node.js 20 detected without native WebSocket support" on init. Inject the
+       `ws` package as the Realtime transport. Lazy-required so the server still
+       boots (and login still works without Realtime) if `ws` isn't installed —
+       it just warns and falls back to the default client. */
+    let WebSocketImpl = null;
+    try { WebSocketImpl = require('ws'); }
+    catch {
+      console.warn('[auth] ⚠️  "ws" package not installed — Supabase Realtime will warn on Node < 22. Run: npm install ws');
+    }
+
+    _supabase = createClient(url, key, {
+      /* Server-side: no browser session storage / token auto-refresh. */
+      auth: { persistSession: false, autoRefreshToken: false },
+      ...(WebSocketImpl ? { realtime: { transport: WebSocketImpl } } : {}),
+    });
   }
   return _supabase;
 }
