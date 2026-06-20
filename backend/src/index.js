@@ -99,14 +99,20 @@ app.listen(PORT, async () => {
   /* Tenant isolation migration MUST finish before the cron jobs (which
      insert tenant-scoped rows) begin firing. */
   await initTenancy();
-  if (process.env.NODE_ENV !== 'development') {
-    console.log(`[CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" → starting cron jobs (Meta sync, Bosta, Taager, staff alerts)…`);
+  /* CRON GATE — crons fire ONLY when NODE_ENV is EXPLICITLY 'production'.
+     Previously this was `!== 'development'`, which treated an UNSET NODE_ENV as
+     production — so booting locally (NODE_ENV undefined) silently started the
+     Google-Sheets sync + Bosta enrichment against the LIVE DB and DDoS'd Bosta.
+     Fail-safe default: anything that is not the literal 'production' (development,
+     test, staging, or unset) keeps ALL background syncing OFF. */
+  if (process.env.NODE_ENV === 'production') {
+    console.log(`[CRON] NODE_ENV="production" → starting cron jobs (Meta sync, Bosta, Taager, staff alerts)…`);
     startOrderSyncCron();
     startMetaSyncCron();
     startBostaReconcileCron();
     startTaagerSyncCron();
     startStaffAlertsCron();
   } else {
-    console.log('⚠️ [CRON] NODE_ENV=development → ALL cron jobs are DISABLED (incl. Meta Ads auto-sync). Set NODE_ENV=production on the server to enable automatic syncing.');
+    console.log(`⚠️ [CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" (not "production") → ALL cron jobs DISABLED (Sheets sync, Bosta enrich/reconcile, Meta, Taager, staff alerts). This is the safe local-dev default — set NODE_ENV=production ONLY on the server.`);
   }
 });
