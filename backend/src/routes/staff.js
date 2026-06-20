@@ -28,6 +28,9 @@ const migrations = [
   /* ── Email verification (OTP) ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified  BOOLEAN       DEFAULT false`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_code        VARCHAR(6)`,
+  /* ── Agency model: media-buyer referral code (also added by initTenancy
+        phase 4 — duplicated here so this route's RETURNING never races boot). ── */
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code   VARCHAR(100)`,
   /* ── Persisted auto-distribution weight (%) — drives weighted round-robin
         assignment of incoming EasyOrder webhook orders. 0 = excluded. ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS distribution_percentage NUMERIC(5,2) NOT NULL DEFAULT 0`,
@@ -74,8 +77,43 @@ const RETURNING = `
     COALESCE(comm_delivered, 0)                 AS comm_delivered,
     COALESCE(comm_rejected,  0)                 AS comm_rejected,
     COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
+    referral_code,
     created_at
 `;
+
+/* ── Ad-account assignment sync (agency model) ───────────────────────────────
+   Make meta_accounts.assigned_user_id reflect EXACTLY the set the admin picked
+   for this media buyer (tenant-scoped):
+     • unassign accounts currently theirs but no longer selected,
+     • assign the selected accounts to them.
+   Idempotent — re-running with the same set is a no-op. `assigned_user_id` is
+   compared/written as text (users.id is VARCHAR), and Postgres coerces either way. */
+async function syncAdAccountAssignment(userId, adAccountIds, businessId) {
+  const ids = Array.isArray(adAccountIds)
+    ? [...new Set(adAccountIds.map((x) => parseInt(x, 10)).filter(Number.isInteger))]
+    : [];
+
+  await pool.query(
+    `UPDATE meta_accounts SET assigned_user_id = NULL, updated_at = NOW()
+      WHERE business_id = $1 AND assigned_user_id = $2::text
+        AND NOT (id = ANY($3::int[]))`,
+    [businessId, String(userId), ids]
+  );
+  if (ids.length) {
+    await pool.query(
+      `UPDATE meta_accounts SET assigned_user_id = $2, updated_at = NOW()
+        WHERE business_id = $1 AND id = ANY($3::int[])`,
+      [businessId, String(userId), ids]
+    );
+  }
+}
+
+/* Normalise an inbound referral code → trimmed, ≤100 chars, '' → null. */
+function cleanReferral(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s.slice(0, 100);
+}
 
 /* ── GET /api/staff ────────────────────────────────────────────────────── */
 router.get('/', authenticate, requireAdmin, async (req, res) => {
@@ -94,6 +132,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
         COALESCE(comm_rejected,  0)                 AS comm_rejected,
         COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
         COALESCE(distribution_percentage, 0)        AS distribution_percentage,
+        referral_code,
         last_active_at,
         created_at
       FROM users
@@ -120,6 +159,8 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     comm_delivered   = 0,
     comm_rejected    = 0,
     comm_no_answer   = 0,
+    referral_code,
+    ad_account_ids,
   } = req.body;
 
   if (!email || !password)
@@ -133,6 +174,10 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     ? permissions : ['orders'];
 
   const cleanEmail = email.trim().toLowerCase();
+  /* Agency fields apply ONLY to media buyers — ignored/cleared for other roles. */
+  const isBuyer   = role === 'media_buyer';
+  const refCode   = isBuyer ? cleanReferral(referral_code) : null;
+  const adAccts   = isBuyer ? ad_account_ids : [];
 
   try {
     const password_hash = await bcrypt.hash(password, 10);
@@ -144,8 +189,8 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       `INSERT INTO users
          (name, email, password_hash, role, is_active, is_absent,
           permissions, commission_rate, comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
-          email_verified, otp_code, business_id)
-       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,true,NULL,$11)
+          email_verified, otp_code, referral_code, business_id)
+       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,true,NULL,$11,$12)
        ${RETURNING}`,
       [
         name.trim() || null,
@@ -158,15 +203,22 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
         parseFloat(comm_delivered)  || 0,
         parseFloat(comm_rejected)   || 0,
         parseFloat(comm_no_answer)  || 0,
-        req.user.business_id,        // $11
+        refCode,                     // $11 — media-buyer referral code (nullable)
+        req.user.business_id,        // $12
       ]
     );
+
+    /* Sync ad-account assignment for the freshly-created buyer. */
+    await syncAdAccountAssignment(result.rows[0].id, adAccts, req.user.business_id);
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('[POST /staff]', err);
-    if (err.code === '23505')
+    if (err.code === '23505') {
+      if (err.constraint === 'users_referral_code_tenant_uidx')
+        return res.status(409).json({ error: 'كود الإحالة مستخدم بالفعل لميديا باير آخر' });
       return res.status(409).json({ error: 'البريد الإلكتروني مستخدم بالفعل' });
+    }
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
@@ -178,6 +230,7 @@ router.patch('/:id', authenticate, requireAdmin, async (req, res) => {
     name, email, password, role, is_active,
     permissions, commission_rate,
     comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
+    referral_code, ad_account_ids,
   } = req.body;
 
   const sets = [];
@@ -209,24 +262,59 @@ router.patch('/:id', authenticate, requireAdmin, async (req, res) => {
     sets.push(`password_hash = $${idx++}`); vals.push(hash);
   }
 
-  if (!sets.length)
+  /* ── Agency fields ──────────────────────────────────────────────────────────
+     Demoting away from media_buyer clears the referral code AND unassigns every
+     ad account. Otherwise, set referral_code when provided. Ad-account sync runs
+     after the user UPDATE (below) so it also works on an assignment-only edit. */
+  const demoting = role !== undefined && role !== 'media_buyer';
+  if (demoting) {
+    sets.push(`referral_code = NULL`);
+  } else if (referral_code !== undefined) {
+    sets.push(`referral_code = $${idx++}`); vals.push(cleanReferral(referral_code));
+  }
+
+  const wantsAssignSync = demoting || ad_account_ids !== undefined;
+  if (!sets.length && !wantsAssignSync)
     return res.status(400).json({ error: 'لا توجد حقول صالحة للتحديث' });
 
-  vals.push(id);
-  const idPos = idx;
-  vals.push(req.user.business_id);
   try {
-    const result = await pool.query(
-      `UPDATE users SET ${sets.join(', ')} WHERE id = $${idPos} AND business_id = $${idPos + 1} ${RETURNING}`,
-      vals
-    );
-    if (!result.rows.length)
-      return res.status(404).json({ error: 'الموظف غير موجود' });
-    res.json(result.rows[0]);
+    let userRow = null;
+    if (sets.length) {
+      vals.push(id);                  const idPos = idx;
+      vals.push(req.user.business_id);
+      const result = await pool.query(
+        `UPDATE users SET ${sets.join(', ')} WHERE id = $${idPos} AND business_id = $${idPos + 1} ${RETURNING}`,
+        vals
+      );
+      if (!result.rows.length)
+        return res.status(404).json({ error: 'الموظف غير موجود' });
+      userRow = result.rows[0];
+    }
+
+    /* Sync ad-account assignment (tenant-scoped). Demotion → unassign all. */
+    if (wantsAssignSync) {
+      await syncAdAccountAssignment(id, demoting ? [] : ad_account_ids, req.user.business_id);
+    }
+
+    /* Assignment-only edit (no user-column change) → return the current row. */
+    if (!userRow) {
+      const fresh = await pool.query(
+        `SELECT id, COALESCE(name,'') AS name, email, role,
+                COALESCE(is_active,true) AS is_active, referral_code
+           FROM users WHERE id = $1 AND business_id = $2`,
+        [id, req.user.business_id]
+      );
+      if (!fresh.rows.length) return res.status(404).json({ error: 'الموظف غير موجود' });
+      userRow = fresh.rows[0];
+    }
+    res.json(userRow);
   } catch (err) {
     console.error('[PATCH /staff/:id]', err);
-    if (err.code === '23505')
+    if (err.code === '23505') {
+      if (err.constraint === 'users_referral_code_tenant_uidx')
+        return res.status(409).json({ error: 'كود الإحالة مستخدم بالفعل لميديا باير آخر' });
       return res.status(409).json({ error: 'البريد الإلكتروني مستخدم بالفعل' });
+    }
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });

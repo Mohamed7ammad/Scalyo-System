@@ -4,8 +4,8 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getStaff, createStaff, updateStaff, toggleAttendance, deleteStaff,
-  getAgentAnalytics, createEmployeePayout,
-  StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics,
+  getAgentAnalytics, createEmployeePayout, getMetaAccounts,
+  StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics, MetaAccount,
 } from '@/lib/api';
 
 /* ── Types ──────────────────────────────────────────────────────── */
@@ -64,6 +64,9 @@ interface FormState {
   comm_delivered:  number;
   comm_rejected:   number;
   comm_no_answer:  number;
+  /* Agency model (media_buyer only). */
+  referral_code:   string;
+  ad_account_ids:  number[];
 }
 const ALL_PERMISSIONS = [
   { key:'orders',             label:'تأكيد الطلبات',           description:'عرض وتعديل الطلبات',             alwaysOn:true },
@@ -74,6 +77,7 @@ const ALL_PERMISSIONS = [
 const EMPTY_FORM: FormState = {
   name:'', email:'', password:'', role:'agent', is_active:true, permissions:['orders'],
   comm_confirmed:0, comm_delivered:0, comm_rejected:0, comm_no_answer:0,
+  referral_code:'', ad_account_ids:[],
 };
 
 /* ── Analytics sub-components ──────────────────────────────────── */
@@ -256,6 +260,26 @@ export default function StaffPage() {
   const [saving,     setSaving]     = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
+  /* Meta ad accounts — for the media-buyer assignment UI. Loaded once (admin page);
+     assigned_user_id tells us which accounts already belong to a given buyer. */
+  const [metaAccounts,    setMetaAccounts]    = useState<MetaAccount[]>([]);
+  const [loadingMetaAccs, setLoadingMetaAccs] = useState(false);
+  const refreshMetaAccounts = useCallback(() => {
+    setLoadingMetaAccs(true);
+    return getMetaAccounts()
+      .then((res) => setMetaAccounts(Array.isArray(res.data) ? res.data : []))
+      .catch(() => setMetaAccounts([]))
+      .finally(() => setLoadingMetaAccs(false));
+  }, []);
+  useEffect(() => { refreshMetaAccounts(); }, [refreshMetaAccounts]);
+
+  /* Ad-account ids currently assigned to a given user (string/number-id safe). */
+  const accountsAssignedTo = useCallback(
+    (userId: number | string) =>
+      metaAccounts.filter((a) => String(a.assigned_user_id) === String(userId)).map((a) => a.id),
+    [metaAccounts]
+  );
+
   const openAdd  = () => { setEditTarget(null); setForm(EMPTY_FORM); setModalError(null); setShowModal(true); };
   const openEdit = (m: StaffMember) => {
     setEditTarget(m);
@@ -267,6 +291,8 @@ export default function StaffPage() {
       comm_delivered: toN(m.comm_delivered),
       comm_rejected:  toN(m.comm_rejected),
       comm_no_answer: toN(m.comm_no_answer),
+      referral_code:  m.referral_code ?? '',
+      ad_account_ids: accountsAssignedTo(m.id),
     });
     setModalError(null);
     setShowModal(true);
@@ -276,6 +302,10 @@ export default function StaffPage() {
   const handleSave = async () => {
     setModalError(null); setSaving(true);
     try {
+      /* Agency fields only matter for media buyers; the backend ignores/clears
+         them for other roles, but we keep the payload clean by sending them only
+         when relevant. */
+      const isBuyer = form.role === 'media_buyer';
       if (editTarget) {
         const payload: UpdateStaffPayload = {
           name: form.name, email: form.email, role: form.role,
@@ -285,9 +315,14 @@ export default function StaffPage() {
           comm_rejected:  form.comm_rejected,
           comm_no_answer: form.comm_no_answer,
         };
+        if (isBuyer) {
+          payload.referral_code  = form.referral_code.trim() || null;
+          payload.ad_account_ids = form.ad_account_ids;
+        }
         if (form.password.trim()) payload.password = form.password;
         const res = await updateStaff(editTarget.id, payload);
         setStaff(prev => prev.map(m => m.id === editTarget.id ? res.data : m));
+        if (isBuyer) refreshMetaAccounts();   // reflect new assignment locally
         showToast('تم تحديث بيانات الموظف بنجاح');
       } else {
         const payload: CreateStaffPayload = {
@@ -298,8 +333,13 @@ export default function StaffPage() {
           comm_rejected:  form.comm_rejected,
           comm_no_answer: form.comm_no_answer,
         };
+        if (isBuyer) {
+          payload.referral_code  = form.referral_code.trim() || null;
+          payload.ad_account_ids = form.ad_account_ids;
+        }
         const res = await createStaff(payload);
         setStaff(prev => [...prev, res.data]);
+        if (isBuyer) refreshMetaAccounts();
         showToast('تم إضافة الموظف بنجاح');
       }
       closeModal();
@@ -1498,6 +1538,68 @@ export default function StaffPage() {
                   </select>
                 </div>
               </div>
+
+              {/* Agency model — media buyers only */}
+              {form.role === 'media_buyer' && (
+                <div className="space-y-3 rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-900/10 p-3.5">
+                  <p className="text-xs font-bold text-amber-700 dark:text-amber-400">إعدادات الميديا باير</p>
+
+                  {/* Referral code */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                      كود الإحالة (UTM / Sub-ID)
+                      <span className="text-slate-400 font-normal"> — يُلحق برابط الإعلان لنسب الطلبات</span>
+                    </label>
+                    <input type="text" dir="ltr" value={form.referral_code}
+                      onChange={e => setForm(f => ({...f, referral_code: e.target.value}))}
+                      placeholder="مثال: ahmed01"
+                      className="w-full px-4 py-2.5 rounded-xl text-sm text-left bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-400/50 focus:border-amber-400 transition"/>
+                  </div>
+
+                  {/* Ad-account assignment */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                      حسابات الإعلانات المخصّصة
+                      <span className="text-slate-400 font-normal"> — مصروف الإعلانات يُنسب لهذا الميديا باير</span>
+                    </label>
+                    {loadingMetaAccs ? (
+                      <p className="text-xs text-slate-400 py-2">جارٍ تحميل حسابات الإعلانات…</p>
+                    ) : metaAccounts.length === 0 ? (
+                      <p className="text-xs text-slate-400 py-2">لا توجد حسابات إعلانات. أضِفها من صفحة تكامل ميتا أولاً.</p>
+                    ) : (
+                      <div className="rounded-xl border border-slate-200 dark:border-slate-700 max-h-40 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800">
+                        {metaAccounts.map(acc => {
+                          const checked = form.ad_account_ids.includes(acc.id);
+                          const takenByOther = acc.assigned_user_id != null
+                            && String(acc.assigned_user_id) !== String(editTarget?.id ?? '')
+                            && !checked;
+                          return (
+                            <label key={acc.id} className="flex items-center gap-2.5 px-3.5 py-2.5 bg-white dark:bg-slate-800/60 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
+                              <input type="checkbox" checked={checked}
+                                onChange={e => setForm(f => ({
+                                  ...f,
+                                  ad_account_ids: e.target.checked
+                                    ? [...f.ad_account_ids, acc.id]
+                                    : f.ad_account_ids.filter(id => id !== acc.id),
+                                }))}
+                                className="w-4 h-4 rounded accent-amber-500"/>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-medium text-slate-800 dark:text-slate-200 truncate">{acc.account_name}</p>
+                                <p className="text-[10px] text-slate-400 dark:text-slate-600" dir="ltr">act_{acc.ad_account_id}</p>
+                              </div>
+                              {takenByOther && (
+                                <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0">
+                                  مخصّص لـ {acc.assigned_user_name || 'آخر'}
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Commission matrix — agents only */}
               {form.role === 'agent' && (
