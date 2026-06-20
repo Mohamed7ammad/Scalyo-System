@@ -74,6 +74,84 @@ async function resolveCampaignTokens(businessId, campaignSel) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+   resolveAnalyticsScope(req) — AGENCY MODEL data scope
+   ─────────────────────────────────────────────────────────────────────
+   Returns { all, referralCodes, adAccountIds, mediaBuyerId }:
+     • admin, no ?mediaBuyer   → { all:true }  (sees EVERYTHING)
+     • admin + ?mediaBuyer=ID  → that buyer's scope (impersonation/filter)
+     • media_buyer             → their OWN scope, ALWAYS — the ?mediaBuyer query
+                                 param is IGNORED, so a buyer can never widen
+                                 scope or peek at a colleague.
+
+   Attribution model:
+     • ORDERS  → users.referral_code (the buyer's unique UTM/Sub-ID). For Safqa
+                 affiliate orders the equivalent column is `marketer`.
+     • AD SPEND→ meta_accounts.assigned_user_id (1 buyer → many ad accounts),
+                 plus the optional users.ad_account_id convenience pointer
+                 resolved to its meta_accounts.id.
+
+   CALLER CONTRACT: pass `scope.all ? null : (codes || [])` to each filter.
+     null  → unscoped (admin sees all);  []  → scoped-but-unconfigured (0 rows);
+     [..]  → scoped to those values. This is what guarantees a scoped buyer can
+     never accidentally read unscoped data.
+   ════════════════════════════════════════════════════════════════════ */
+async function loadMediaBuyerScope(businessId, userId) {
+  const uid = String(userId);
+  const { rows: uRows } = await pool.query(
+    `SELECT referral_code, ad_account_id FROM users
+      WHERE id::text = $1 AND business_id = $2::integer`,
+    [uid, businessId]
+  );
+  const u = uRows[0] || {};
+  const referralCodes = u.referral_code ? [String(u.referral_code)] : [];
+
+  /* Ad accounts assigned to this buyer — the scalable 1→many source of truth. */
+  const { rows: aRows } = await pool.query(
+    `SELECT id FROM meta_accounts WHERE assigned_user_id = $1 AND business_id = $2::integer`,
+    [uid, businessId]
+  );
+  const adAccountIds = aRows.map((r) => r.id);
+
+  /* Optional convenience pointer users.ad_account_id (the META ad_account_id
+     string) → resolve to its meta_accounts.id and merge in. */
+  if (u.ad_account_id) {
+    const { rows: mRows } = await pool.query(
+      `SELECT id FROM meta_accounts WHERE ad_account_id = $1 AND business_id = $2::integer`,
+      [String(u.ad_account_id), businessId]
+    );
+    for (const m of mRows) if (!adAccountIds.includes(m.id)) adAccountIds.push(m.id);
+  }
+
+  return {
+    all: false,
+    referralCodes: referralCodes.length ? referralCodes : null,
+    adAccountIds:  adAccountIds.length  ? adAccountIds  : null,
+    mediaBuyerId:  uid,
+  };
+}
+
+async function resolveAnalyticsScope(req) {
+  const role       = req.user?.role;
+  const businessId = req.user?.business_id;
+  const ADMIN_ALL  = { all: true, referralCodes: null, adAccountIds: null, mediaBuyerId: null };
+
+  if (role === 'media_buyer') {
+    /* Strict isolation — never trust a client param for a media buyer. */
+    return loadMediaBuyerScope(businessId, req.user.id);
+  }
+  if (role === 'admin') {
+    const mb = typeof req.query.mediaBuyer === 'string' ? req.query.mediaBuyer.trim() : '';
+    if (!mb) return ADMIN_ALL;
+    return loadMediaBuyerScope(businessId, mb);   // admin impersonation/filter
+  }
+  return ADMIN_ALL;   // other roles are blocked by the per-route guards anyway
+}
+
+/* Convert a resolved scope into the per-filter param value (see CALLER CONTRACT). */
+const scopeOrders   = (s) => (s.all ? null : (s.referralCodes || []));
+const scopeAdAcc    = (s) => (s.all ? null : (s.adAccountIds  || []));
+
+/* ════════════════════════════════════════════════════════════════════
    buildJoinOn(params, startDate, endDate)
    ─────────────────────────────────────────────────────────────────────
    Builds the LEFT JOIN … ON (…) string.  All date logic lives here —
@@ -514,12 +592,16 @@ router.get('/products-profitability', authenticate, async (req, res) => {
 
   const { startDate, endDate } = req.query;
 
+  /* AGENCY scope (admin-all / admin-impersonate / media_buyer-self). */
+  const ppScope = await resolveAnalyticsScope(req);
+
   /* ── Affiliate plan: products come from external_affiliate_orders (the local
      orders/products tables are empty for affiliate tenants). Return the Safqa
-     per-product breakdown directly, respecting the date + product filter. */
+     per-product breakdown directly, respecting the date + product + scope. */
   if (req.user.plan_type === 'affiliate') {
     const bd = await aggregateSafqaBreakdowns(req.user.business_id, {
       startDate, endDate, product: req.query.product, campaign: req.query.campaign,
+      referralCodes: scopeOrders(ppScope), adAccountIds: scopeAdAcc(ppScope),
     });
     return res.json(bd.products);
   }
@@ -550,36 +632,25 @@ router.get('/products-profitability', authenticate, async (req, res) => {
     ordFilter += ` AND o."createdAt" <= $${params.length}::timestamptz`;
   }
 
-  /* ── Role-based scoping (multi-tenant) ──────────────────────────────────────
-     Media Buyer → expense_stats scoped to their assigned meta_account_id(s)
-                   ($accIdx) and the product list limited to the SKUs they
-                   advertise ($skuIdx).  Admin → both params null (no scope).   */
-  let accIdx = 'NULL';   // SQL literal NULL → no expense-account scope
-  let skuIdx = 'NULL';   // SQL literal NULL → no product-SKU scope
-  if (role === 'media_buyer') {
-    const accRes = await pool.query(
-      `SELECT id FROM meta_accounts WHERE assigned_user_id = $1 AND business_id = $2::integer`,
-      [req.user.id, req.user.business_id]
-    );
-    const accountIds = accRes.rows.map((r) => r.id);
-    if (accountIds.length === 0) return res.json([]);   // no accounts → empty
-
-    const skuRes = await pool.query(
-      `SELECT DISTINCT UPPER(sku) AS sku
-         FROM expenses
-        WHERE meta_account_id = ANY($1)
-          AND business_id = $2::integer
-          AND sku IS NOT NULL
-          AND sku NOT IN ('UNATTRIBUTED', '')`,
-      [accountIds, req.user.business_id]
-    );
-    const advertisedSkus = skuRes.rows.map((r) => r.sku);
-    if (advertisedSkus.length === 0) return res.json([]); // nothing advertised
-
-    params.push(accountIds);
+  /* ── Role-based scoping — AGENCY MODEL ───────────────────────────────────────
+     Unified with /dashboard so Detailed Table ↔ Top Cards stay consistent:
+       expense_stats → meta_account_id IN (scope.adAccountIds)        [$accIdx]
+       order_stats   → orders.referral_code IN (scope.referralCodes)  [$refIdx]
+     Admin-all → both NULL (no scope). A scoped-but-unconfigured user → empty.
+     skuIdx (the old SKU-bridge attribution) is RETIRED but kept as a NULL no-op
+     so the outer-SELECT WHERE template is unchanged. */
+  let accIdx = 'NULL';   // expense-account scope
+  let skuIdx = 'NULL';   // retired SKU-bridge → NULL no-op
+  let refIdx = 'NULL';   // order referral_code scope
+  if (!ppScope.all) {
+    const hasOrderScope   = ppScope.referralCodes && ppScope.referralCodes.length > 0;
+    const hasExpenseScope = ppScope.adAccountIds  && ppScope.adAccountIds.length  > 0;
+    if (!hasOrderScope && !hasExpenseScope) return res.json([]);   // unconfigured → empty
+    /* empty array → ANY('{}') = 0 rows (strict isolation); non-empty → scoped. */
+    params.push(hasExpenseScope ? ppScope.adAccountIds : []);
     accIdx = `$${params.length}`;
-    params.push(advertisedSkus);
-    skuIdx = `$${params.length}`;
+    params.push(hasOrderScope ? ppScope.referralCodes : []);
+    refIdx = `$${params.length}`;
   }
 
   /* ── TENANT ISOLATION param — appended after any media-buyer scope params ──
@@ -703,6 +774,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         )
       )
       WHERE  p.business_id = ${bizIdx}::integer${ordFilter}
+        AND  (${refIdx}::text[] IS NULL OR o.referral_code = ANY(${refIdx}::text[]))
       GROUP  BY p.id
     ),
     expense_stats AS (
@@ -1006,24 +1078,24 @@ router.get('/dashboard', authenticate, async (req, res) => {
     (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,
   ];
 
-  /* ── Role-based scoping (multi-tenant) ──────────────────────────────────────
-     For a Media Buyer we restrict:
-       expenses → meta_account_id IN (their assigned account ids)   [$3 below]
-       orders   → SKU bridge: only orders whose product SKU (or ProductName
-                  fallback) is advertised by one of their assigned accounts.
-     For an Admin we leave both unscoped (expAccountIds = null, no order clause). */
-  let expAccountIds = null;   // $3 for both expense queries; null = no scope (admin)
+  /* ── Role-based scoping — AGENCY MODEL ───────────────────────────────────────
+     Scope is resolved from the JWT (admin = all, or admin impersonating via
+     ?mediaBuyer; media_buyer = self, param ignored). Attribution:
+       expenses → meta_account_id IN (scope.adAccountIds)              [$3 below]
+       orders   → referral_code   IN (scope.referralCodes)
+     A SCOPED caller with no codes/accounts sees ZERO — never unscoped data. */
+  const scope = await resolveAnalyticsScope(req);
+  /* $3 for both expense queries. null → admin-all; [] → scoped, 0 accounts →
+     meta_account_id = ANY('{}') yields 0 spend (correct isolation). */
+  const expAccountIds = scopeAdAcc(scope);
 
-  if (role === 'media_buyer') {
-    /* 1. Resolve the accounts assigned to this Media Buyer (tenant-scoped). */
-    const accRes = await pool.query(
-      `SELECT id FROM meta_accounts WHERE assigned_user_id = $1 AND business_id = $2::integer`,
-      [req.user.id, req.user.business_id]
-    );
-    expAccountIds = accRes.rows.map((r) => r.id);
+  if (!scope.all) {
+    const hasOrderScope   = scope.referralCodes && scope.referralCodes.length > 0;
+    const hasExpenseScope = scope.adAccountIds  && scope.adAccountIds.length  > 0;
 
-    /* No accounts assigned → empty (but valid) dashboard, not an error. */
-    if (expAccountIds.length === 0) {
+    /* Fully-unconfigured scoped user (no referral code AND no ad accounts) →
+       short-circuit to an empty (valid) dashboard instead of running every query. */
+    if (!hasOrderScope && !hasExpenseScope) {
       return res.json({
         overview: {
           total_orders: 0, total_confirmed: 0, total_delivered: 0,
@@ -1032,46 +1104,21 @@ router.get('/dashboard', authenticate, async (req, res) => {
           in_transit_count: 0, outstanding_cash: 0,
         },
         daily_chart_stats: [], governorates_stats: [], rejection_reasons: [],
-        externalStats: await getExternalAffiliateStats(req.user.business_id, { startDate, endDate, product: req.query.product, campaign: req.query.campaign }),
+        externalStats: await getExternalAffiliateStats(req.user.business_id, {
+          startDate, endDate, product: req.query.product, campaign: req.query.campaign,
+          referralCodes: scopeOrders(scope), adAccountIds: expAccountIds,
+        }),
       });
     }
 
-    /* 2. SKUs those accounts advertise (the bridge to orders). */
-    const skuRes = await pool.query(
-      `SELECT DISTINCT UPPER(sku) AS sku
-         FROM expenses
-        WHERE meta_account_id = ANY($1)
-          AND business_id = $2::integer
-          AND sku IS NOT NULL
-          AND sku NOT IN ('UNATTRIBUTED', '')`,
-      [expAccountIds, req.user.business_id]
-    );
-    const advertisedSkus = skuRes.rows.map((r) => r.sku);
-
-    /* 3. Product names for the ProductName fallback (legacy orders w/o sku). */
-    let advertisedNames = [];
-    if (advertisedSkus.length) {
-      const nameRes = await pool.query(
-        `SELECT DISTINCT UPPER(name) AS name FROM products WHERE UPPER(sku) = ANY($1) AND business_id = $2::integer`,
-        [advertisedSkus, req.user.business_id]
-      );
-      advertisedNames = nameRes.rows.map((r) => r.name);
-    }
-
-    /* 4. Append the order-scoping clause onto the shared ordFilter.
-       If the buyer advertises no SKUs yet there is nothing to show → 1=0. */
-    if (advertisedSkus.length === 0) {
-      ordFilter += ` AND 1=0`;
+    /* ORDERS → referral_code attribution (the buyer's unique UTM/Sub-ID). A scoped
+       buyer with no referral code yet → 1=0 (their attributed order set is empty
+       until order ingestion starts stamping orders.referral_code). */
+    if (hasOrderScope) {
+      ordParams.push(scope.referralCodes);   const refIdx = ordParams.length;
+      ordFilter += ` AND referral_code = ANY($${refIdx}::text[])`;
     } else {
-      ordParams.push(advertisedSkus);
-      const skuIdx = ordParams.length;
-      ordParams.push(advertisedNames);
-      const nameIdx = ordParams.length;
-      ordFilter += ` AND (
-        ( COALESCE(sku, '') <> '' AND UPPER(sku) = ANY($${skuIdx}) )
-        OR
-        ( COALESCE(sku, '') = '' AND UPPER(COALESCE("ProductName", '')) = ANY($${nameIdx}) )
-      )`;
+      ordFilter += ` AND 1=0`;
     }
   }
 
@@ -1569,7 +1616,10 @@ router.get('/dashboard', authenticate, async (req, res) => {
        Pulls Taager / Safqa revenue when the tenant has saved API keys. Mock
        service for now; resolves to zeros when no keys are configured, so this
        is always safe to include in the payload for any plan. */
-    const externalStats = await getExternalAffiliateStats(req.user.business_id, { startDate, endDate, product: req.query.product, campaign: req.query.campaign });
+    const externalStats = await getExternalAffiliateStats(req.user.business_id, {
+      startDate, endDate, product: req.query.product, campaign: req.query.campaign,
+      referralCodes: scopeOrders(scope), adAccountIds: expAccountIds,
+    });
 
     /* ── Affiliate plan: the lower widgets (daily chart, governorates, rejection
        reasons) aggregate from external_affiliate_orders, since the local orders
@@ -1578,7 +1628,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
     let dailyOut = daily_chart_stats, govOut = governorates_stats, rejOut = rejection_reasons;
     if (req.user.plan_type === 'affiliate') {
       const bd = await aggregateSafqaBreakdowns(req.user.business_id, {
-        startDate, endDate, product: req.query.product,
+        startDate, endDate, product: req.query.product, campaign: req.query.campaign,
+        referralCodes: scopeOrders(scope), adAccountIds: expAccountIds,
       });
       dailyOut = bd.daily;
       govOut   = bd.governorates;
@@ -1648,6 +1699,18 @@ router.get('/delivered-orders', authenticate, async (req, res) => {
       params.push(campTokens);   const ct = params.length;
       where += ` AND ( UPPER(TRIM(COALESCE(sku,'')))           = ANY($${ct}::text[])
                     OR UPPER(TRIM(COALESCE("ProductName",'')))  = ANY($${ct}::text[]) )`;
+    }
+  }
+
+  /* AGENCY scope — a media buyer's drill-down must show ONLY their own delivered
+     orders (referral_code). Admin sees all (or impersonates via ?mediaBuyer). */
+  const doScope = await resolveAnalyticsScope(req);
+  if (!doScope.all) {
+    if (doScope.referralCodes && doScope.referralCodes.length > 0) {
+      params.push(doScope.referralCodes);   const rc = params.length;
+      where += ` AND referral_code = ANY($${rc}::text[])`;
+    } else {
+      where += ` AND 1=0`;   // scoped buyer with no referral code → no rows
     }
   }
 
@@ -1742,6 +1805,43 @@ router.get('/campaigns', authenticate, async (req, res) => {
   } catch (err) {
     console.error('[analytics/campaigns] failed:', err.message, err.detail ?? '');
     return res.json([]);   // degrade gracefully → dropdown shows only "all"
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════
+   GET /api/analytics/media-buyers  — Admin only
+   ─────────────────────────────────────────────────────────────────────
+   Powers the admin "filter by Media Buyer" dropdown (impersonation). Returns
+   every media_buyer in the tenant with their referral_code and the ad_account_id
+   list assigned to them (via meta_accounts.assigned_user_id). Media buyers must
+   NOT call this (they only ever see themselves) → admin-only guard. '[]' on error.
+   ════════════════════════════════════════════════════════════════════ */
+router.get('/media-buyers', authenticate, async (req, res) => {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'غير مصرح لك بعرض قائمة الميديا باير' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id::text                         AS id,
+              COALESCE(u.name, '')               AS name,
+              u.email,
+              u.referral_code,
+              COALESCE(
+                ARRAY_AGG(m.ad_account_id) FILTER (WHERE m.ad_account_id IS NOT NULL),
+                '{}'
+              )                                  AS ad_account_ids
+         FROM users u
+         LEFT JOIN meta_accounts m
+                ON m.assigned_user_id = u.id AND m.business_id = u.business_id
+        WHERE u.role = 'media_buyer' AND u.business_id = $1::integer
+        GROUP BY u.id, u.name, u.email, u.referral_code
+        ORDER BY name ASC`,
+      [req.user.business_id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('[analytics/media-buyers] failed:', err.message, err.detail ?? '');
+    return res.json([]);
   }
 });
 

@@ -328,6 +328,16 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   const campaign  = (opts.campaign && opts.campaign !== 'كل الحملات') ? String(opts.campaign).trim() : null;
   /* Reusable campaign predicate; $n is the campaign param position in each call. */
   const campPred  = (n) => ` AND ($${n}::text IS NULL OR (COALESCE(TRIM(sku),'') <> '' AND UPPER($${n}::text) LIKE '%' || UPPER(TRIM(sku)) || '%'))`;
+  /* ── AGENCY scope (Media-Buyer isolation) ───────────────────────────────────
+     referralCodes → restrict Safqa orders to those marketers (the buyer's UTM/
+       Sub-ID maps to external_affiliate_orders.marketer).
+     adAccountIds  → restrict the ADS spend to the buyer's Meta ad accounts.
+     CONVENTION (set by resolveAnalyticsScope): null = unscoped (admin sees all);
+     [] = scoped-but-unconfigured → 0 rows; [..] = scoped. */
+  const referralCodes = Array.isArray(opts.referralCodes) ? opts.referralCodes : null;
+  const adAccountIds  = Array.isArray(opts.adAccountIds)  ? opts.adAccountIds  : null;
+  /* Marketer predicate; $n is the referralCodes param position. */
+  const refPred   = (n) => ` AND ($${n}::text[] IS NULL OR marketer = ANY($${n}::text[]))`;
 
   /* Two tenant-scoped reads:
        1) the pure Safqa-order buckets (counts + revenue by status_class)
@@ -360,8 +370,9 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
          AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
          AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
          ${prodPred(4)}
-         ${campPred(5)}`,
-      [businessId, startDate, endDate, product, campaign]
+         ${campPred(5)}
+         ${refPred(6)}`,
+      [businessId, startDate, endDate, product, campaign, referralCodes]
     );
   } catch (err) {
     console.error(
@@ -371,8 +382,11 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
       `to run the boot migration. Falling back to an UNFILTERED read so data still renders.\n`,
       err
     );
-    /* Fallback: drop the date bounds but KEEP the product ($2) + campaign ($3) filters. */
-    aggRes = await pool.query(`${ORDER_AGG_SELECT}${prodPred(2)}${campPred(3)}`, [businessId, product, campaign]);
+    /* Fallback: drop the date bounds but KEEP product ($2) + campaign ($3) + referral ($4). */
+    aggRes = await pool.query(
+      `${ORDER_AGG_SELECT}${prodPred(2)}${campPred(3)}${refPred(4)}`,
+      [businessId, product, campaign, referralCodes]
+    );
   }
 
   /* ADS — STRICTLY ISOLATED Safqa ad spend. Sum ONLY expenses whose campaign name
@@ -392,6 +406,8 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
            that campaign's spend. The EXISTS below still guarantees it is a Safqa
            campaign, so affiliate ADS stays isolated from e-commerce spend. */
         AND ($5::text IS NULL OR UPPER(e.campaign_name) = UPPER($5))
+        /* AGENCY scope: restrict spend to the buyer's Meta ad accounts. */
+        AND ($6::int[] IS NULL OR e.meta_account_id = ANY($6::int[]))
         AND EXISTS (
               SELECT 1
                 FROM external_affiliate_orders o
@@ -400,7 +416,7 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
                  AND UPPER(e.campaign_name) LIKE '%' || UPPER(TRIM(o.sku)) || '%'
                  AND ($4::text IS NULL OR o.product_name = $4 OR UPPER(TRIM(COALESCE(o.sku,''))) = UPPER(TRIM($4)))
             )`,
-    [businessId, startDate, endDate, product, campaign]
+    [businessId, startDate, endDate, product, campaign, adAccountIds]
   ).catch((err) => {
     console.error(`[aggregateSafqaFromDb] ⚠️  ad-spend query failed for business ${businessId} (ADS→0):`, err.message);
     return { rows: [{ ad_spend: 0 }] };
@@ -519,17 +535,23 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
      Detailed Table stays UNIFIED with the Top Cards: an order belongs to the
      campaign when the campaign name CONTAINS its SKU. NULL = all campaigns. */
   const campaign  = (opts.campaign && opts.campaign !== 'كل الحملات') ? String(opts.campaign).trim() : null;
+  /* AGENCY scope (Media-Buyer isolation) — UNIFIED with aggregateSafqaFromDb so
+     the Detailed Table matches the Top Cards. referralCodes → marketer filter;
+     adAccountIds → ADS scope. null = admin (all); [] = scoped-empty (0 rows). */
+  const referralCodes = Array.isArray(opts.referralCodes) ? opts.referralCodes : null;
+  const adAccountIds  = Array.isArray(opts.adAccountIds)  ? opts.adAccountIds  : null;
 
-  /* $1 tenant · $2 start · $3 end · $4 product (NULL = all) · $5 campaign (NULL = all).
+  /* $1 tenant · $2 start · $3 end · $4 product · $5 campaign · $6 referralCodes (marketer).
      created_at is the order-placement date (back-dated from the CSV / set by the webhook). */
-  const params = [businessId, startDate, endDate, product, campaign];
+  const params = [businessId, startDate, endDate, product, campaign, referralCodes];
   const where = `
     FROM external_affiliate_orders
     WHERE network = 'safqa' AND business_id = $1
       AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
       AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
       AND ($4::text IS NULL OR product_name = $4 OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($4)))
-      AND ($5::text IS NULL OR (COALESCE(TRIM(sku),'') <> '' AND UPPER($5::text) LIKE '%' || UPPER(TRIM(sku)) || '%'))`;
+      AND ($5::text IS NULL OR (COALESCE(TRIM(sku),'') <> '' AND UPPER($5::text) LIKE '%' || UPPER(TRIM(sku)) || '%'))
+      AND ($6::text[] IS NULL OR marketer = ANY($6::text[]))`;
 
   /* CONFIRMED includes returns: a returned order passed call-center confirmation
      first (then failed at shipping/delivery). Returns are counted in CONFIRMED
@@ -583,7 +605,8 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
          WHERE business_id = $1::integer AND meta_sync = TRUE
            AND ($2::date IS NULL OR expense_date >= $2::date)
            AND ($3::date IS NULL OR expense_date <= $3::date)
-         GROUP BY UPPER(campaign_name)`, [businessId, startDate, endDate]),
+           AND ($4::int[] IS NULL OR meta_account_id = ANY($4::int[]))
+         GROUP BY UPPER(campaign_name)`, [businessId, startDate, endDate, adAccountIds]),
     ]);
 
     const daily = dailyR.rows.map((r) => ({
