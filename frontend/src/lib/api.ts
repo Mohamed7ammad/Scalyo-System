@@ -508,13 +508,16 @@ export interface EmployeeLedger {
   payouts:             EmployeePayout[];
 }
 
-function buildAnalyticsQS(startDate?: string, endDate?: string, product?: string) {
+function buildAnalyticsQS(startDate?: string, endDate?: string, product?: string, mediaBuyer?: string) {
   const qs = new URLSearchParams();
   if (startDate) qs.set('startDate', startDate);
   if (endDate)   qs.set('endDate',   endDate);
   /* Product filter — the dropdown's selected product NAME. 'كل المنتجات' / empty
      means "all", so we omit it (backend treats absence as no filter). */
   if (product && product !== 'كل المنتجات') qs.set('product', product);
+  /* Media-Buyer impersonation (admin only) — the selected buyer's user id. Empty
+     means "all buyers"; the backend ignores it for non-admins (strict self-scope). */
+  if (mediaBuyer) qs.set('mediaBuyer', mediaBuyer);
   const q = qs.toString();
   return q ? `?${q}` : '';
 }
@@ -714,8 +717,21 @@ export interface DashboardStats {
  * — all strictly filtered by the given date range.
  * Admin only.
  */
-export const getDashboardStats = (startDate?: string, endDate?: string, product?: string) =>
-  api.get<DashboardStats>(`/api/analytics/dashboard${buildAnalyticsQS(startDate, endDate, product)}`);
+export const getDashboardStats = (startDate?: string, endDate?: string, product?: string, mediaBuyer?: string) =>
+  api.get<DashboardStats>(`/api/analytics/dashboard${buildAnalyticsQS(startDate, endDate, product, mediaBuyer)}`);
+
+/* ── Team Management (Agency model) ──────────────────────────────────────────
+   The media buyers in the tenant, for the admin's "filter by buyer" dropdown.
+   Admin only (the backend 403s everyone else). */
+export interface MediaBuyer {
+  id:             string;
+  name:           string;
+  email:          string;
+  referral_code:  string | null;
+  ad_account_ids: string[];
+}
+export const getMediaBuyers = () =>
+  api.get<MediaBuyer[]>('/api/analytics/media-buyers');
 
 /* ── Product Profitability ───────────────────────────────────────── */
 export interface ProductProfitability {
@@ -768,9 +784,9 @@ export interface ProductProfitability {
  * Fetch per-product profitability metrics for the given date range.
  * Matches orders and ad spend via product SKU.  Admin only.
  */
-export const getProductsProfitability = (startDate?: string, endDate?: string, product?: string) =>
+export const getProductsProfitability = (startDate?: string, endDate?: string, product?: string, mediaBuyer?: string) =>
   api.get<ProductProfitability[]>(
-    `/api/analytics/products-profitability${buildAnalyticsQS(startDate, endDate, product)}`
+    `/api/analytics/products-profitability${buildAnalyticsQS(startDate, endDate, product, mediaBuyer)}`
   );
 
 /* ── Delivered Orders (detailed list, grouped by delivery day) ──────────── */
@@ -799,9 +815,9 @@ export interface DeliveredOrdersResponse {
  * Fetch the detailed list of DELIVERED orders, grouped by actual delivery day
  * (delivered_at), optionally scoped to a product. Admin + Media Buyer.
  */
-export const getDeliveredOrders = (startDate?: string, endDate?: string, product?: string) =>
+export const getDeliveredOrders = (startDate?: string, endDate?: string, product?: string, mediaBuyer?: string) =>
   api.get<DeliveredOrdersResponse>(
-    `/api/analytics/delivered-orders${buildAnalyticsQS(startDate, endDate, product)}`
+    `/api/analytics/delivered-orders${buildAnalyticsQS(startDate, endDate, product, mediaBuyer)}`
   );
 
 /**

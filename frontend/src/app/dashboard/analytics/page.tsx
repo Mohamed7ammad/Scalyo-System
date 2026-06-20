@@ -16,8 +16,8 @@ import {
   Cell,
 } from 'recharts';
 
-import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders } from '@/lib/api';
-import type { DeliveredOrdersResponse } from '@/lib/api';
+import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders, getMediaBuyers } from '@/lib/api';
+import type { DeliveredOrdersResponse, MediaBuyer } from '@/lib/api';
 import type {
   Product,
   DashboardStats,
@@ -399,6 +399,34 @@ function FilterSelect({ value, onChange, options }: {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   MEDIA-BUYER SELECT  (Admin-only — agency model impersonation/filter)
+   value = the buyer's user id ('' = all buyers). Disabled while loading.
+   ═══════════════════════════════════════════════════════════════════ */
+function MediaBuyerSelect({ value, onChange, buyers, loading }: {
+  value: string; onChange: (v: string) => void; buyers: MediaBuyer[]; loading: boolean;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={loading}
+      title="فلترة حسب الميديا باير"
+      className="px-3 py-2 text-sm rounded-xl border outline-none cursor-pointer
+        bg-white dark:bg-slate-900
+        border-slate-300 dark:border-slate-700
+        text-slate-700 dark:text-slate-300
+        focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition
+        disabled:opacity-60 disabled:cursor-wait"
+    >
+      <option value="">{loading ? 'جارٍ تحميل الميديا باير…' : '👥 كل الميديا باير'}</option>
+      {buyers.map((b) => (
+        <option key={b.id} value={b.id}>{b.name?.trim() || b.email}</option>
+      ))}
+    </select>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    DATE INPUT
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -492,6 +520,9 @@ export default function AnalyticsDashboard() {
       const u = JSON.parse(localStorage.getItem('user') || 'null');
       if (!u) { router.replace('/'); return; }
       setIsAffiliate(u.plan_type === 'affiliate');
+      /* Admins get the "filter by Media Buyer" dropdown; media buyers see a locked,
+         self-scoped view (no dropdown) — the backend enforces the scope either way. */
+      setIsAdmin(u.role === 'admin');
       /* Admins and Media Buyers always have analytics access. Other roles need
          the explicit 'analytics' permission. */
       if (u.role !== 'admin' && u.role !== 'media_buyer') {
@@ -514,6 +545,11 @@ export default function AnalyticsDashboard() {
   /* True for affiliate-plan tenants — hides local-inventory metrics (COGS,
      stock, product profitability) and drives the core KPIs off external data. */
   const [isAffiliate, setIsAffiliate] = useState(false);
+  /* Agency model: admins can filter/impersonate a specific media buyer. */
+  const [isAdmin,            setIsAdmin]            = useState(false);
+  const [mediaBuyer,         setMediaBuyer]         = useState('');   // '' = all buyers
+  const [mediaBuyers,        setMediaBuyers]        = useState<MediaBuyer[]>([]);
+  const [loadingMediaBuyers, setLoadingMediaBuyers] = useState(false);
 
   /* ── API data state ───────────────────────────────────────────── */
   const [products,             setProducts]             = useState<Product[]>([]);
@@ -596,11 +632,11 @@ export default function AnalyticsDashboard() {
     } catch { /* non-admin gets 403 — swallow silently */ }
   }, []);
 
-  const fetchDashStats = useCallback(async (sd?: string, ed?: string, prod?: string) => {
+  const fetchDashStats = useCallback(async (sd?: string, ed?: string, prod?: string, mb?: string) => {
     setLoadingDash(true);
     setErrorDash(null);
     try {
-      const res = await getDashboardStats(sd, ed, prod);
+      const res = await getDashboardStats(sd, ed, prod, mb);
       setDashStats(res.data);
     } catch (err: unknown) {
       setDashStats(null);
@@ -616,10 +652,10 @@ export default function AnalyticsDashboard() {
     }
   }, []);
 
-  const fetchProfitability = useCallback(async (sd?: string, ed?: string, prod?: string) => {
+  const fetchProfitability = useCallback(async (sd?: string, ed?: string, prod?: string, mb?: string) => {
     setLoadingProfitability(true);
     try {
-      const res = await getProductsProfitability(sd, ed, prod);
+      const res = await getProductsProfitability(sd, ed, prod, mb);
       setProfitability(res.data);
     } catch {
       setProfitability([]);
@@ -630,13 +666,26 @@ export default function AnalyticsDashboard() {
 
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
+  /* Media buyers list — admins only (the endpoint 403s anyone else). Fetched once;
+     degrade to [] on error so the dropdown still renders with just "all buyers". */
   useEffect(() => {
-    fetchDashStats(effectiveDates.startDate, effectiveDates.endDate, product);
-  }, [effectiveDates, product, fetchDashStats]);
+    if (!isAdmin) return;
+    let alive = true;
+    setLoadingMediaBuyers(true);
+    getMediaBuyers()
+      .then((res) => { if (alive) setMediaBuyers(Array.isArray(res.data) ? res.data : []); })
+      .catch(() => { if (alive) setMediaBuyers([]); })
+      .finally(() => { if (alive) setLoadingMediaBuyers(false); });
+    return () => { alive = false; };
+  }, [isAdmin]);
 
   useEffect(() => {
-    fetchProfitability(effectiveDates.startDate, effectiveDates.endDate, product);
-  }, [effectiveDates, product, fetchProfitability]);
+    fetchDashStats(effectiveDates.startDate, effectiveDates.endDate, product, mediaBuyer);
+  }, [effectiveDates, product, mediaBuyer, fetchDashStats]);
+
+  useEffect(() => {
+    fetchProfitability(effectiveDates.startDate, effectiveDates.endDate, product, mediaBuyer);
+  }, [effectiveDates, product, mediaBuyer, fetchProfitability]);
 
   /* Delivered-orders list: lazy-loaded only while the section is expanded;
      refetches on date-range or product change so it always matches the filters. */
@@ -644,12 +693,12 @@ export default function AnalyticsDashboard() {
     if (!deliveredOpen) return;
     let alive = true;
     setDeliveredLoading(true);
-    getDeliveredOrders(effectiveDates.startDate, effectiveDates.endDate, product)
+    getDeliveredOrders(effectiveDates.startDate, effectiveDates.endDate, product, mediaBuyer)
       .then((res) => { if (alive) setDeliveredData(res.data); })
       .catch(() => { if (alive) setDeliveredData({ total: 0, days: [] }); })
       .finally(() => { if (alive) setDeliveredLoading(false); });
     return () => { alive = false; };
-  }, [deliveredOpen, effectiveDates, product]);
+  }, [deliveredOpen, effectiveDates, product, mediaBuyer]);
 
   /* ── Date picker handlers ─────────────────────────────────────── */
   const handleFromDate = (v: string) => { setFromDate(v); setActiveRange(''); };
@@ -1118,6 +1167,17 @@ export default function AnalyticsDashboard() {
 
             <FilterSelect value={status}   onChange={setStatus}   options={STATUSES}  />
             <FilterSelect value={product}  onChange={setProduct}  options={PRODUCTS}  />
+
+            {/* Media-Buyer filter — ADMIN ONLY. Media buyers get a locked, self-scoped
+                view (no dropdown); the backend enforces isolation regardless. */}
+            {isAdmin && (
+              <MediaBuyerSelect
+                value={mediaBuyer}
+                onChange={setMediaBuyer}
+                buyers={mediaBuyers}
+                loading={loadingMediaBuyers}
+              />
+            )}
 
             <button className="mr-auto flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium
               bg-indigo-600 hover:bg-indigo-700 text-white transition shadow-sm shrink-0">
