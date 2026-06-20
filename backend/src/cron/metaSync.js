@@ -42,24 +42,28 @@ function localDateStr(offsetDays = 0) {
 
 /* ── Cron setup ───────────────────────────────────────────────────────────── */
 
+const META_CRON_EXPR = '*/30 * * * *';   // every 30 minutes (:00 and :30)
+
 function startMetaSyncCron() {
-  /* Run at :00 and :30 of every hour, every day.
-     node-cron v3/v4 uses the standard 5-field cron expression.             */
-  cron.schedule('0,30 * * * *', async () => {
+  /* node-cron v3/v4 standard 5-field expression; auto-started on schedule(). */
+  cron.schedule(META_CRON_EXPR, async () => {
+    /* Prominent fire marker — confirms in PM2 logs that the tick actually ran. */
+    console.log(`[CRON] 🔔 Meta Sync TICK firing — ${new Date().toISOString()}`);
+
     /* ── Cooldown gate ──────────────────────────────────────────────────────
        If the previous sync hit an API error (blocked account, expired token,
        rate-limit) runMetaSync activates a 2-hour cooldown.  We skip this
        tick entirely so we never hammer a restricted endpoint.  The dashboard
        continues serving historical data from the DB during the cooldown.   */
     if (isCronCoolingDown()) {
-      console.warn('[Cron] ⏸️  Meta sync skipped — API-error cooldown is active. Dashboard serving historical data. Will retry after cooldown expires.');
+      console.warn('[CRON] ⏸️  Meta sync skipped — API-error cooldown is active. Dashboard serving historical data. Will retry after cooldown expires.');
       return;
     }
 
     const yesterday = localDateStr(-1);
     const today     = localDateStr(0);
 
-    console.log(`[Cron] Auto-syncing Meta Ads for ${yesterday} → ${today}`);
+    console.log(`[CRON] Auto-syncing Meta Ads for ${yesterday} → ${today} …`);
 
     try {
       /* ignoreCooldown is NOT set here — cron syncs are gated by the cooldown.
@@ -67,7 +71,7 @@ function startMetaSyncCron() {
          the admin can always test a refreshed token immediately from the UI.) */
       const result = await runMetaSync(yesterday, today);
       console.log(
-        `[Cron] ✅ Meta sync complete — ` +
+        `[CRON] ✅ Meta sync complete — ` +
         `${result.daysInserted} day(s), ` +
         `${result.campaignRowsInserted} campaign-row(s), ` +
         `total spend: ${result.totalSpend} EGP`
@@ -81,11 +85,11 @@ function startMetaSyncCron() {
            in case of a race between two concurrent syncs.                   */
         return;
       }
-      console.error(`[Cron] ⚠️  Meta sync failed (${err.statusCode ?? 'ERR'}): ${err.message}`);
+      console.error(`[CRON] ⚠️  Meta sync failed (${err.statusCode ?? 'ERR'}): ${err.message}`);
     }
   });
 
-  console.log('✅  Meta Ads auto-sync cron scheduled (every 30 minutes)');
+  console.log(`✅  [CRON] Meta Ads auto-sync REGISTERED — runs every 30 minutes (${META_CRON_EXPR}). Watch for "🔔 Meta Sync TICK firing" at :00 / :30.`);
 }
 
 module.exports = { startMetaSyncCron };

@@ -100,12 +100,13 @@ app.listen(PORT, async () => {
      insert tenant-scoped rows) begin firing. */
   await initTenancy();
   if (process.env.NODE_ENV !== 'development') {
+    console.log(`[CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" → starting cron jobs (Meta sync, Bosta, Taager, staff alerts)…`);
     startOrderSyncCron();
     startMetaSyncCron();
     startBostaReconcileCron();
     startTaagerSyncCron();
     startStaffAlertsCron();
   } else {
-    console.log('⚠️ Development environment detected: Cron jobs disabled to prevent data duplication.');
+    console.log('⚠️ [CRON] NODE_ENV=development → ALL cron jobs are DISABLED (incl. Meta Ads auto-sync). Set NODE_ENV=production on the server to enable automatic syncing.');
   }
 });
