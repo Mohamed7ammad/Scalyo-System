@@ -3,6 +3,7 @@ const crypto  = require('crypto');
 const pool    = require('../config/db');
 const { enrichDeliveryRate } = require('../services/bostaEnrich');
 const { recordSafqaOrder } = require('../services/externalAffiliate');
+const { extractReferralCode } = require('../utils/referral');
 
 const router = express.Router();
 
@@ -133,6 +134,8 @@ function extractOrderFields(body) {
     ProductPrice: productPrice,
     sku,
     quantity:     parseQuantity(body),
+    /* Media-Buyer attribution: the UTM/Sub-ID appended to the buyer's ad link. */
+    referral_code: extractReferralCode(body),
   };
 }
 
@@ -259,15 +262,16 @@ async function ingestEasyOrder(body, businessId) {
   const result = await pool.query(
     `INSERT INTO orders
        ("FullName", "Phone", "DeliveryRate", "City", "Address", "Note", "Status",
-        "ProductName", "ProductPrice", "sku", "quantity", external_order_id, order_source, business_id)
+        "ProductName", "ProductPrice", "sku", "quantity", external_order_id,
+        referral_code, order_source, business_id)
      VALUES ($1, $2, 'بدون', $3, $4, $5, 'جديد',
-             $6, $7, $8, $9, $10, 'easyorder', $11)
+             $6, $7, $8, $9, $10, $11, 'easyorder', $12)
      ON CONFLICT (external_order_id, business_id) WHERE external_order_id IS NOT NULL
      DO NOTHING
      RETURNING *`,
     [f.FullName, f.Phone, f.City || null, f.Address || null, f.Note || null,
      f.ProductName, f.ProductPrice, f.sku || null, Math.max(1, parseInt(f.quantity, 10) || 1),
-     externalId, businessId]
+     externalId, f.referral_code || null, businessId]
   );
 
   if (result.rows.length === 0) {

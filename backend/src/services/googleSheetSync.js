@@ -2,6 +2,7 @@ const cron  = require('node-cron');
 const axios = require('axios');
 const pool  = require('../config/db');
 const { enrichDeliveryRate } = require('./bostaEnrich');
+const { extractReferralCode } = require('../utils/referral');
 
 const SHEET_URL =
   'https://script.google.com/macros/s/AKfycbwUsAT0ui9ZeJVXD_96V6RZAlMpSn5dQPrMhGq16zw7ezsIFoEzEqUM4q3Oug33-phP/exec';
@@ -76,6 +77,9 @@ const startOrderSyncCron = () => {
         // possible, falls back to plain insert; rare, the Apps Script always
         // sends rowIndex for markSynced.)
         const sheetRowIndex = Number.isInteger(orderData.rowIndex) ? orderData.rowIndex : null;
+        /* Media-Buyer attribution: a referral/UTM column on the sheet row, if present
+           (forward-compatible — captured automatically once the sheet adds one). */
+        const referralCode = extractReferralCode(orderData);
 
         // Insert as 'بدون' (not-yet-checked). enrichDeliveryRate fires immediately
         // after and overwrites it with the real Bosta rating within seconds.
@@ -84,8 +88,8 @@ const startOrderSyncCron = () => {
           `INSERT INTO orders
              ("FullName", "Phone", "DeliveryRate", "City", "Address",
               "Status", "Note", "ProductName", "ProductPrice", "AssignedTo",
-              sheet_row_index, business_id)
-           VALUES ($1, $2, 'بدون', $3, $4, 'جديد', $5, $6, $7, $8, $9, $10)
+              referral_code, sheet_row_index, business_id)
+           VALUES ($1, $2, 'بدون', $3, $4, 'جديد', $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT (business_id, sheet_row_index) DO NOTHING
            RETURNING id`,
           [
@@ -97,8 +101,9 @@ const startOrderSyncCron = () => {
             orderData.ProductName  || null,  // $6
             orderData.ProductPrice || null,  // $7
             assignedTo,                      // $8
-            sheetRowIndex,                   // $9 — idempotency key
-            defaultBusinessId,               // $10 — ORIGINAL tenant
+            referralCode,                    // $9 — Media-Buyer attribution (nullable)
+            sheetRowIndex,                   // $10 — idempotency key
+            defaultBusinessId,               // $11 — ORIGINAL tenant
           ]
         );
 
