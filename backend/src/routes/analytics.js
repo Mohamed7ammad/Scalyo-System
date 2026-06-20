@@ -39,6 +39,41 @@ function getEgyptOffset(dateStr) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+   resolveCampaignTokens(businessId, campaignSel)
+   ─────────────────────────────────────────────────────────────────────
+   E-COMMERCE campaign → order-match token set.
+
+   Orders carry no campaign reference; the ONLY link is the Meta naming
+   convention used everywhere else (ad-spend attribution, ADS isolation):
+   a campaign advertises a product when its NAME contains that product's SKU.
+
+   So a selected campaign resolves to every CATALOGUE product whose SKU appears
+   inside the campaign name, and we return that product set's match tokens
+   (sku + name + aliases, uppercased) — the SAME token shape the product-filter
+   uses — so the caller can scope orders by `sku`/`ProductName` exactly like the
+   product dropdown does.  STRICT tenant scope.  Returns [] when nothing matches.
+   ════════════════════════════════════════════════════════════════════ */
+async function resolveCampaignTokens(businessId, campaignSel) {
+  if (!campaignSel || campaignSel === 'كل الحملات') return [];
+  const { rows } = await pool.query(
+    `SELECT sku, name, COALESCE(aliases, '{}'::text[]) AS aliases
+       FROM products
+      WHERE business_id = $1::integer
+        AND COALESCE(TRIM(sku), '') <> ''
+        AND UPPER($2::text) LIKE '%' || UPPER(TRIM(sku)) || '%'`,
+    [businessId, campaignSel]
+  );
+  const tokens = [];
+  for (const r of rows) {
+    for (const t of [r.sku, r.name, ...(r.aliases || [])]) {
+      const v = String(t ?? '').trim().toUpperCase();
+      if (v) tokens.push(v);
+    }
+  }
+  return [...new Set(tokens)];
+}
+
+/* ════════════════════════════════════════════════════════════════════
    buildJoinOn(params, startDate, endDate)
    ─────────────────────────────────────────────────────────────────────
    Builds the LEFT JOIN … ON (…) string.  All date logic lives here —
@@ -484,7 +519,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
      per-product breakdown directly, respecting the date + product filter. */
   if (req.user.plan_type === 'affiliate') {
     const bd = await aggregateSafqaBreakdowns(req.user.business_id, {
-      startDate, endDate, product: req.query.product,
+      startDate, endDate, product: req.query.product, campaign: req.query.campaign,
     });
     return res.json(bd.products);
   }
@@ -552,6 +587,37 @@ router.get('/products-profitability', authenticate, async (req, res) => {
      below so products / orders / expenses are all locked to the caller's tenant. */
   params.push(req.user.business_id);
   const bizIdx = `$${params.length}`;
+
+  /* ── Campaign filter ──────────────────────────────────────────────────────
+     Restrict the returned products to those advertised by the selected Meta
+     campaign (campaign_name CONTAINS the product SKU — the same naming convention
+     used by ADS isolation + the dashboard campaign filter). This keeps the
+     Detailed Products Table UNIFIED with the Top Cards: both reduce to the same
+     campaign→SKU product set. NULL ('كل الحملات'/'') → all products.
+     A campaign matching no catalogue product → empty table (consistent with the
+     dashboard's 1=0 for the same case). */
+  let campSkuIdx  = 'NULL';   // SQL literal NULL → no campaign product scope
+  let campNameIdx = 'NULL';   // SQL literal NULL → no campaign ad-spend scope
+  const campaignSel = typeof req.query.campaign === 'string' ? req.query.campaign.trim() : '';
+  if (campaignSel && campaignSel !== 'كل الحملات') {
+    const csRes = await pool.query(
+      `SELECT DISTINCT UPPER(TRIM(sku)) AS sku
+         FROM products
+        WHERE business_id = $1::integer
+          AND COALESCE(TRIM(sku), '') <> ''
+          AND UPPER($2::text) LIKE '%' || UPPER(TRIM(sku)) || '%'`,
+      [req.user.business_id, campaignSel]
+    );
+    const campSkus = csRes.rows.map((r) => r.sku);
+    if (campSkus.length === 0) return res.json([]);   // campaign advertises no product
+    params.push(campSkus);
+    campSkuIdx = `$${params.length}`;
+    /* Also scope the per-SKU ad-spend (expense_stats) to THIS campaign's name, so a
+       product's attributed_ad_spend in the table matches the campaign-scoped
+       meta_spend in the Top Cards (a SKU may run under several campaigns). */
+    params.push(campaignSel.toUpperCase());
+    campNameIdx = `$${params.length}`;
+  }
 
   /* Inline price parser for delivered revenue (references orders alias "o") */
   const PRICE_O = `
@@ -655,6 +721,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         AND  ($1::date IS NULL OR e.expense_date >= $1::date)
         AND  ($2::date IS NULL OR e.expense_date <= $2::date)
         AND  (${accIdx}::int[] IS NULL OR e.meta_account_id = ANY(${accIdx}))
+        AND  (${campNameIdx}::text IS NULL OR UPPER(e.campaign_name) = ${campNameIdx})
       GROUP  BY UPPER(e.sku)
     )
     SELECT
@@ -676,6 +743,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
     LEFT   JOIN expense_stats es ON es.sku = UPPER(p.sku)
     WHERE  p.business_id = ${bizIdx}::integer
       AND  (${skuIdx}::text[] IS NULL OR UPPER(p.sku) = ANY(${skuIdx}))
+      AND  (${campSkuIdx}::text[] IS NULL OR UPPER(TRIM(p.sku)) = ANY(${campSkuIdx}))
     ORDER  BY COALESCE(os.delivered_revenue, 0) DESC,
               COALESCE(es.attributed_spend,  0) DESC,
               p.name ASC
@@ -964,7 +1032,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
           in_transit_count: 0, outstanding_cash: 0,
         },
         daily_chart_stats: [], governorates_stats: [], rejection_reasons: [],
-        externalStats: await getExternalAffiliateStats(req.user.business_id, { startDate, endDate, product: req.query.product }),
+        externalStats: await getExternalAffiliateStats(req.user.business_id, { startDate, endDate, product: req.query.product, campaign: req.query.campaign }),
       });
     }
 
@@ -1016,6 +1084,26 @@ router.get('/dashboard', authenticate, async (req, res) => {
                       OR UPPER(TRIM(COALESCE("ProductName",'')))  = ANY($${pTokIdx}::text[]) )`;
   }
 
+  /* Campaign filter (admin dropdown) — composes (AND) with product/role scope.
+     Orders have no campaign column, so we resolve the selected campaign NAME to
+     the SKU/name/alias tokens of every product it advertises (campaign_name
+     CONTAINS sku), then scope orders to those products — exactly like the product
+     filter. Ad spend is scoped separately to the campaign NAME ($6). A campaign
+     that matches no catalogue product yields 1=0 (no orders), while its spend can
+     still surface via $6. 'كل الحملات'/'' = no filter. */
+  const campaignSel = typeof req.query.campaign === 'string' ? req.query.campaign.trim() : '';
+  const hasCampaign = campaignSel && campaignSel !== 'كل الحملات';
+  if (hasCampaign) {
+    const campTokens = await resolveCampaignTokens(req.user.business_id, campaignSel);
+    if (campTokens.length === 0) {
+      ordFilter += ` AND 1=0`;
+    } else {
+      ordParams.push(campTokens);   const cTokIdx = ordParams.length;
+      ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))           = ANY($${cTokIdx}::text[])
+                        OR UPPER(TRIM(COALESCE("ProductName",'')))  = ANY($${cTokIdx}::text[]) )`;
+    }
+  }
+
   /* Expense scope param is ALWAYS $3 (null for admin → no-op via IS NULL OR). */
   expParams.push(expAccountIds);
   /* TENANT ISOLATION: business_id is ALWAYS $4 for both expense queries. */
@@ -1024,6 +1112,10 @@ router.get('/dashboard', authenticate, async (req, res) => {
      + Meta order count also reflect the dropdown. NULL when "all" (or the product
      has no SKU to attribute spend to) → IS NULL OR leaves spend unfiltered. */
   expParams.push(hasProduct && prodSku ? prodSku : null);
+  /* Campaign filter for ad-spend ($6): scope meta_spend + Meta order count to the
+     selected campaign NAME (case-insensitive). Composes with the product SKU ($5).
+     NULL when "all campaigns" → IS NULL OR leaves spend unfiltered. */
+  expParams.push(hasCampaign ? campaignSel.toUpperCase() : null);
 
   /* Inline ProductPrice parser (same as other endpoints) */
   const P = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
@@ -1105,6 +1197,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       AND ($2::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') <= $2)
       AND ($3::int[] IS NULL OR meta_account_id = ANY($3))
       AND ($5::text IS NULL OR UPPER(sku) = $5)
+      AND ($6::text IS NULL OR UPPER(campaign_name) = $6)
   `;
 
   /* ── 3. Daily orders grouped by Egypt-local creation date ── */
@@ -1157,6 +1250,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       AND ($2::text IS NULL OR TO_CHAR(expense_date, 'YYYY-MM-DD') <= $2)
       AND ($3::int[] IS NULL OR meta_account_id = ANY($3))
       AND ($5::text IS NULL OR UPPER(sku) = $5)
+      AND ($6::text IS NULL OR UPPER(campaign_name) = $6)
     GROUP BY TO_CHAR(expense_date, 'YYYY-MM-DD')
     ORDER BY stat_date ASC
   `;
@@ -1475,7 +1569,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
        Pulls Taager / Safqa revenue when the tenant has saved API keys. Mock
        service for now; resolves to zeros when no keys are configured, so this
        is always safe to include in the payload for any plan. */
-    const externalStats = await getExternalAffiliateStats(req.user.business_id, { startDate, endDate, product: req.query.product });
+    const externalStats = await getExternalAffiliateStats(req.user.business_id, { startDate, endDate, product: req.query.product, campaign: req.query.campaign });
 
     /* ── Affiliate plan: the lower widgets (daily chart, governorates, rejection
        reasons) aggregate from external_affiliate_orders, since the local orders
@@ -1541,6 +1635,22 @@ router.get('/delivered-orders', authenticate, async (req, res) => {
                      OR (UPPER(COALESCE("ProductName",'')) = UPPER($${pn})) )`;
   }
 
+  /* Optional campaign filter — resolve the selected Meta campaign NAME to the
+     match tokens of every product it advertises (campaign_name CONTAINS sku),
+     then scope orders to those products, mirroring the dashboard campaign filter
+     so the delivered drill-down stays consistent with the Top Cards. */
+  const campaignSel = typeof req.query.campaign === 'string' ? req.query.campaign.trim() : '';
+  if (campaignSel && campaignSel !== 'كل الحملات') {
+    const campTokens = await resolveCampaignTokens(req.user.business_id, campaignSel);
+    if (campTokens.length === 0) {
+      where += ` AND 1=0`;
+    } else {
+      params.push(campTokens);   const ct = params.length;
+      where += ` AND ( UPPER(TRIM(COALESCE(sku,'')))           = ANY($${ct}::text[])
+                    OR UPPER(TRIM(COALESCE("ProductName",'')))  = ANY($${ct}::text[]) )`;
+    }
+  }
+
   const P = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
 
   try {
@@ -1580,6 +1690,58 @@ router.get('/delivered-orders', authenticate, async (req, res) => {
   } catch (err) {
     console.error('[delivered-orders] Error:', err.message, err.detail ?? '');
     res.status(500).json({ error: 'خطأ في الخادم', details: err.message });
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════
+   GET /api/analytics/campaigns  — Admin + Media Buyer
+   ─────────────────────────────────────────────────────────────────────
+   Real Meta campaign names for the filter dropdown, PLAN-ISOLATED so the
+   affiliate and e-commerce systems never share campaigns:
+     • affiliate plan  → only campaigns whose name contains a known Safqa SKU
+                         (external_affiliate_orders, network='safqa').
+     • e-commerce plan → only campaigns whose name contains a catalogue SKU
+                         (products) — i.e. the tenant's own product campaigns.
+   The "contains SKU" rule is the SAME naming convention used by every other
+   campaign↔data link (ADS isolation, ad-spend attribution, campaign filter), so
+   the dropdown only ever offers campaigns that can actually filter something.
+   Returns a plain string[] (original-case names); '[]' on any error so the UI
+   degrades to just "كل الحملات".
+   ════════════════════════════════════════════════════════════════════ */
+router.get('/campaigns', authenticate, async (req, res) => {
+  const role = req.user?.role;
+  if (role !== 'admin' && role !== 'media_buyer') {
+    return res.status(403).json({ error: 'غير مصرح لك بعرض الحملات' });
+  }
+
+  const businessId = req.user.business_id;
+  const isAffiliate = req.user.plan_type === 'affiliate';
+  /* Plan-isolated EXISTS source: Safqa orders for affiliate, catalogue for e-com. */
+  const skuSource = isAffiliate
+    ? `external_affiliate_orders o
+        WHERE o.business_id = $1::integer AND o.network = 'safqa'
+          AND COALESCE(TRIM(o.sku), '') <> ''
+          AND UPPER(e.campaign_name) LIKE '%' || UPPER(TRIM(o.sku)) || '%'`
+    : `products p
+        WHERE p.business_id = $1::integer
+          AND COALESCE(TRIM(p.sku), '') <> ''
+          AND UPPER(e.campaign_name) LIKE '%' || UPPER(TRIM(p.sku)) || '%'`;
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT e.campaign_name AS name
+         FROM expenses e
+        WHERE e.business_id = $1::integer
+          AND e.meta_sync = TRUE
+          AND COALESCE(TRIM(e.campaign_name), '') <> ''
+          AND EXISTS (SELECT 1 FROM ${skuSource})
+        ORDER BY name ASC`,
+      [businessId]
+    );
+    return res.json(rows.map((r) => r.name));
+  } catch (err) {
+    console.error('[analytics/campaigns] failed:', err.message, err.detail ?? '');
+    return res.json([]);   // degrade gracefully → dropdown shows only "all"
   }
 });
 

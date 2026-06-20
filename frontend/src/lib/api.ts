@@ -508,13 +508,16 @@ export interface EmployeeLedger {
   payouts:             EmployeePayout[];
 }
 
-function buildAnalyticsQS(startDate?: string, endDate?: string, product?: string) {
+function buildAnalyticsQS(startDate?: string, endDate?: string, product?: string, campaign?: string) {
   const qs = new URLSearchParams();
   if (startDate) qs.set('startDate', startDate);
   if (endDate)   qs.set('endDate',   endDate);
   /* Product filter — the dropdown's selected product NAME. 'كل المنتجات' / empty
      means "all", so we omit it (backend treats absence as no filter). */
   if (product && product !== 'كل المنتجات') qs.set('product', product);
+  /* Campaign filter — the dropdown's selected Meta campaign NAME. 'كل الحملات' /
+     empty means "all", so we omit it (backend treats absence as no filter). */
+  if (campaign && campaign !== 'كل الحملات') qs.set('campaign', campaign);
   const q = qs.toString();
   return q ? `?${q}` : '';
 }
@@ -714,8 +717,17 @@ export interface DashboardStats {
  * — all strictly filtered by the given date range.
  * Admin only.
  */
-export const getDashboardStats = (startDate?: string, endDate?: string, product?: string) =>
-  api.get<DashboardStats>(`/api/analytics/dashboard${buildAnalyticsQS(startDate, endDate, product)}`);
+export const getDashboardStats = (startDate?: string, endDate?: string, product?: string, campaign?: string) =>
+  api.get<DashboardStats>(`/api/analytics/dashboard${buildAnalyticsQS(startDate, endDate, product, campaign)}`);
+
+/**
+ * Fetch the REAL Meta campaign names for the filter dropdown — plan-isolated by
+ * the backend (affiliate tenants get Safqa campaigns, e-commerce tenants get
+ * their own product campaigns). Returns a plain string[] (excludes "كل الحملات",
+ * which the UI prepends). Admin + Media Buyer.
+ */
+export const getCampaigns = () =>
+  api.get<string[]>('/api/analytics/campaigns');
 
 /* ── Product Profitability ───────────────────────────────────────── */
 export interface ProductProfitability {
@@ -768,9 +780,9 @@ export interface ProductProfitability {
  * Fetch per-product profitability metrics for the given date range.
  * Matches orders and ad spend via product SKU.  Admin only.
  */
-export const getProductsProfitability = (startDate?: string, endDate?: string, product?: string) =>
+export const getProductsProfitability = (startDate?: string, endDate?: string, product?: string, campaign?: string) =>
   api.get<ProductProfitability[]>(
-    `/api/analytics/products-profitability${buildAnalyticsQS(startDate, endDate, product)}`
+    `/api/analytics/products-profitability${buildAnalyticsQS(startDate, endDate, product, campaign)}`
   );
 
 /* ── Delivered Orders (detailed list, grouped by delivery day) ──────────── */
@@ -799,9 +811,9 @@ export interface DeliveredOrdersResponse {
  * Fetch the detailed list of DELIVERED orders, grouped by actual delivery day
  * (delivered_at), optionally scoped to a product. Admin + Media Buyer.
  */
-export const getDeliveredOrders = (startDate?: string, endDate?: string, product?: string) =>
+export const getDeliveredOrders = (startDate?: string, endDate?: string, product?: string, campaign?: string) =>
   api.get<DeliveredOrdersResponse>(
-    `/api/analytics/delivered-orders${buildAnalyticsQS(startDate, endDate, product)}`
+    `/api/analytics/delivered-orders${buildAnalyticsQS(startDate, endDate, product, campaign)}`
   );
 
 /**

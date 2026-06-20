@@ -320,6 +320,14 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   const product   = (opts.product && opts.product !== 'كل المنتجات') ? String(opts.product).trim() : null;
   /* Reusable product predicate; $n is the product param position in each call. */
   const prodPred  = (n) => ` AND ($${n}::text IS NULL OR product_name = $${n} OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($${n})))`;
+  /* Global Campaign Filter — the dropdown passes a Meta campaign NAME. An order
+     belongs to that campaign when the campaign name CONTAINS the order's SKU (the
+     SAME naming convention the ad-spend attribution uses). Row-wise predicate —
+     external_affiliate_orders.sku is on the order itself, so no resolution needed.
+     NULL ('كل الحملات'/empty) = all campaigns. */
+  const campaign  = (opts.campaign && opts.campaign !== 'كل الحملات') ? String(opts.campaign).trim() : null;
+  /* Reusable campaign predicate; $n is the campaign param position in each call. */
+  const campPred  = (n) => ` AND ($${n}::text IS NULL OR (COALESCE(TRIM(sku),'') <> '' AND UPPER($${n}::text) LIKE '%' || UPPER(TRIM(sku)) || '%'))`;
 
   /* Two tenant-scoped reads:
        1) the pure Safqa-order buckets (counts + revenue by status_class)
@@ -351,8 +359,9 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
       `${ORDER_AGG_SELECT}
          AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
          AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
-         ${prodPred(4)}`,
-      [businessId, startDate, endDate, product]
+         ${prodPred(4)}
+         ${campPred(5)}`,
+      [businessId, startDate, endDate, product, campaign]
     );
   } catch (err) {
     console.error(
@@ -362,8 +371,8 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
       `to run the boot migration. Falling back to an UNFILTERED read so data still renders.\n`,
       err
     );
-    /* Fallback: drop the date bounds but KEEP the product filter ($2 here). */
-    aggRes = await pool.query(`${ORDER_AGG_SELECT}${prodPred(2)}`, [businessId, product]);
+    /* Fallback: drop the date bounds but KEEP the product ($2) + campaign ($3) filters. */
+    aggRes = await pool.query(`${ORDER_AGG_SELECT}${prodPred(2)}${campPred(3)}`, [businessId, product, campaign]);
   }
 
   /* ADS — STRICTLY ISOLATED Safqa ad spend. Sum ONLY expenses whose campaign name
@@ -379,6 +388,10 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
       WHERE e.business_id = $1::integer AND e.meta_sync = TRUE
         AND ($2::date IS NULL OR e.expense_date >= $2::date)
         AND ($3::date IS NULL OR e.expense_date <= $3::date)
+        /* Campaign filter ($5): when a campaign is selected, ADS narrows to EXACTLY
+           that campaign's spend. The EXISTS below still guarantees it is a Safqa
+           campaign, so affiliate ADS stays isolated from e-commerce spend. */
+        AND ($5::text IS NULL OR UPPER(e.campaign_name) = UPPER($5))
         AND EXISTS (
               SELECT 1
                 FROM external_affiliate_orders o
@@ -387,7 +400,7 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
                  AND UPPER(e.campaign_name) LIKE '%' || UPPER(TRIM(o.sku)) || '%'
                  AND ($4::text IS NULL OR o.product_name = $4 OR UPPER(TRIM(COALESCE(o.sku,''))) = UPPER(TRIM($4)))
             )`,
-    [businessId, startDate, endDate, product]
+    [businessId, startDate, endDate, product, campaign]
   ).catch((err) => {
     console.error(`[aggregateSafqaFromDb] ⚠️  ad-spend query failed for business ${businessId} (ADS→0):`, err.message);
     return { rows: [{ ad_spend: 0 }] };
@@ -502,16 +515,21 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
   const startDate = DATE_RE.test(String(opts.startDate || '')) ? opts.startDate : null;
   const endDate   = DATE_RE.test(String(opts.endDate   || '')) ? opts.endDate   : null;
   const product   = (opts.product && opts.product !== 'كل المنتجات') ? String(opts.product).trim() : null;
+  /* Campaign filter — same naming-convention rule as aggregateSafqaFromDb so the
+     Detailed Table stays UNIFIED with the Top Cards: an order belongs to the
+     campaign when the campaign name CONTAINS its SKU. NULL = all campaigns. */
+  const campaign  = (opts.campaign && opts.campaign !== 'كل الحملات') ? String(opts.campaign).trim() : null;
 
-  /* $1 tenant · $2 start · $3 end · $4 product (NULL = all). created_at is the
-     order-placement date (back-dated from the CSV / set by the webhook). */
-  const params = [businessId, startDate, endDate, product];
+  /* $1 tenant · $2 start · $3 end · $4 product (NULL = all) · $5 campaign (NULL = all).
+     created_at is the order-placement date (back-dated from the CSV / set by the webhook). */
+  const params = [businessId, startDate, endDate, product, campaign];
   const where = `
     FROM external_affiliate_orders
     WHERE network = 'safqa' AND business_id = $1
       AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
       AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
-      AND ($4::text IS NULL OR product_name = $4 OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($4)))`;
+      AND ($4::text IS NULL OR product_name = $4 OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($4)))
+      AND ($5::text IS NULL OR (COALESCE(TRIM(sku),'') <> '' AND UPPER($5::text) LIKE '%' || UPPER(TRIM(sku)) || '%'))`;
 
   /* CONFIRMED includes returns: a returned order passed call-center confirmation
      first (then failed at shipping/delivery). Returns are counted in CONFIRMED
@@ -591,9 +609,14 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
 
     /* Naming-convention ad-spend attribution: a Meta campaign's spend links to a
        product when the campaign NAME contains that product's SKU (uppercased). */
+    /* When a campaign is selected, the per-product ad-spend must reflect ONLY that
+       campaign (so the Detailed Table's CPP/Net stays consistent with the campaign-
+       scoped Top-Card ADS). adR.campaign is already UPPER(campaign_name). */
+    const selCampU = campaign ? campaign.toUpperCase() : null;
     const campaigns = (adR.rows || [])
       .map((c) => ({ name: String(c.campaign || ''), spend: num(c.spend) }))
-      .filter((c) => c.spend > 0);
+      .filter((c) => c.spend > 0)
+      .filter((c) => !selCampU || c.name === selCampU);
     const r2 = (x) => Math.round(num(x) * 100) / 100;
 
     const products = prodR.rows.map((r) => {
