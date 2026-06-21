@@ -130,6 +130,10 @@ async function loadMediaBuyerScope(businessId, userId) {
   };
 }
 
+/* Sentinel marketer for ORGANIC orders (no referral/UTM) — written by the
+   EasyOrder ingestion and selectable in the dashboard as "الحساب الأساسي". */
+const MAIN_ACCOUNT = 'main_account';
+
 async function resolveAnalyticsScope(req) {
   const role       = req.user?.role;
   const businessId = req.user?.business_id;
@@ -142,6 +146,11 @@ async function resolveAnalyticsScope(req) {
   if (role === 'admin') {
     const mb = typeof req.query.mediaBuyer === 'string' ? req.query.mediaBuyer.trim() : '';
     if (!mb) return ADMIN_ALL;
+    /* "Main Account" — isolate ORGANIC orders (marketer='main_account'). They have
+       no media buyer and therefore no ad account, so ad spend is scoped to none. */
+    if (mb === MAIN_ACCOUNT) {
+      return { all: false, referralCodes: [MAIN_ACCOUNT], adAccountIds: [], mediaBuyerId: MAIN_ACCOUNT };
+    }
     return loadMediaBuyerScope(businessId, mb);   // admin impersonation/filter
   }
   return ADMIN_ALL;   // other roles are blocked by the per-route guards anyway

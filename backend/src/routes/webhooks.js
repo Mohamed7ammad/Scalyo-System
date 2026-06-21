@@ -279,7 +279,11 @@ async function ingestEasyOrderAffiliate(body, businessId) {
     status:        'pending',          // created — call-center confirmation not done yet
     status_ar:     'قيد المعالجة',
     total:         0,                  // commission unknown until Safqa confirms
-    marketer:      f.referral_code || null,   // the UTM / Sub-ID = the media buyer
+    /* Attribution: the UTM/Sub-ID = the media buyer. Orders that arrive WITHOUT a
+       referral code are ORGANIC — tag them 'main_account' (not null/'-') so the
+       dashboard can isolate them via the "الحساب الأساسي" filter instead of having
+       them blend into the global "all buyers" view. */
+    marketer:      f.referral_code || 'main_account',
     product_name:  f.ProductName || null,
     sku:           f.sku || null,
     governorate:   f.City || null,

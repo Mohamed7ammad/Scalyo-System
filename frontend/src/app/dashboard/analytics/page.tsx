@@ -419,6 +419,8 @@ function MediaBuyerSelect({ value, onChange, buyers, loading }: {
         disabled:opacity-60 disabled:cursor-wait"
     >
       <option value="">{loading ? 'جارٍ تحميل الميديا باير…' : '👥 كل الميديا باير'}</option>
+      {/* Pseudo-buyer: ORGANIC orders (marketer='main_account', no referral code). */}
+      <option value="main_account">🏠 الحساب الأساسي (طلبات بدون كود)</option>
       {buyers.map((b) => (
         <option key={b.id} value={b.id}>{b.name?.trim() || b.email}</option>
       ))}
