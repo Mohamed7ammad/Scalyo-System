@@ -130,6 +130,10 @@ async function loadMediaBuyerScope(businessId, userId) {
   };
 }
 
+/* Sentinel marketer for the Main Account (organic / unassigned) bucket — written
+   by the EasyOrder ingestion and selectable in the dashboard as "الحساب الأساسي". */
+const MAIN_ACCOUNT = 'main_account';
+
 async function resolveAnalyticsScope(req) {
   const role       = req.user?.role;
   const businessId = req.user?.business_id;
@@ -146,6 +150,23 @@ async function resolveAnalyticsScope(req) {
   if (role === 'admin') {
     const mb = typeof req.query.mediaBuyer === 'string' ? req.query.mediaBuyer.trim() : '';
     if (!mb) return ADMIN_ALL;                    // Master view (business-name option)
+    /* "الحساب الأساسي" — isolate the Main Account: orders tagged marketer='main_account'
+       AND ad spend from the UNASSIGNED ad accounts (assigned_user_id IS NULL = the
+       main agency campaigns owned by no individual buyer). Coexists with the Master
+       view, which still shows the grand total of everything. */
+    if (mb === MAIN_ACCOUNT) {
+      const { rows } = await pool.query(
+        `SELECT id FROM meta_accounts
+          WHERE business_id = $1::integer AND assigned_user_id IS NULL`,
+        [businessId]
+      );
+      return {
+        all: false,
+        referralCodes: [MAIN_ACCOUNT],
+        adAccountIds:  rows.map((r) => r.id),   // [] → 0 spend until an account is left unassigned
+        mediaBuyerId:  MAIN_ACCOUNT,
+      };
+    }
     return loadMediaBuyerScope(businessId, mb);   // drill-down to one buyer
   }
   return ADMIN_ALL;   // other roles are blocked by the per-route guards anyway

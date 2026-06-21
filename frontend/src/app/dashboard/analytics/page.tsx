@@ -420,8 +420,10 @@ function MediaBuyerSelect({ value, onChange, buyers, loading, masterLabel }: {
         disabled:opacity-60 disabled:cursor-wait"
     >
       {/* Master Dashboard: value '' = no scope = grand total of EVERY order
-          (all buyers + organic/main_account). Labelled with the business name. */}
+          (Main Account + all buyers). Labelled with the business name. */}
       <option value="">{loading ? 'جارٍ التحميل…' : `🏢 ${masterLabel}`}</option>
+      {/* Main Account: ONLY marketer='main_account' orders + unassigned-account spend. */}
+      <option value="main_account">🏠 الحساب الأساسي</option>
       {buyers.map((b) => (
         <option key={b.id} value={b.id}>{b.name?.trim() || b.email}</option>
       ))}
