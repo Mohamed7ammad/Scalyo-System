@@ -622,37 +622,71 @@ async function runMetaSync(startDate, endDate, { ignoreCooldown = false, account
     accounts:             [],
   };
 
+  /* ISOLATE per-account failures. Previously this loop had no try/catch, so a
+     single failing account (bad/expired token, no access to that ad_account, or a
+     429) THREW and aborted the whole run — leaving that account AND every account
+     after it with zero spend, while the ones before it had already been written.
+     That's exactly how a newly-added agency account (synced last) ended up with
+     no data. Now each account is independent; failures are collected and surfaced
+     so the admin sees WHICH account failed and WHY (e.g. the System-User token
+     lacks access to that ad account). Cooldown, if the failure was API-side, was
+     already set inside syncSingleAccount. */
+  const acctErrors = [];
   for (const acct of accounts) {
     console.log(`[meta/runSync] ▶ Account #${acct.id} "${acct.accountName}" (act_${acct.adAccountId})`);
-    const r = await syncSingleAccount(acct, startDate, endDate);
-    agg.totalSpend           += r.totalSpend;
-    agg.campaignRowsInserted += r.campaignRowsInserted;
-    r.insertedDates.forEach((d) => agg.insertedDates.add(d));
-    r.daysReceived.forEach((d) => agg.daysReceived.add(d));
-    agg.accounts.push({
-      id:                   acct.id,
-      accountName:          acct.accountName,
-      totalSpend:           parseFloat(r.totalSpend.toFixed(2)),
-      campaignRowsInserted: r.campaignRowsInserted,
-    });
+    try {
+      const r = await syncSingleAccount(acct, startDate, endDate);
+      agg.totalSpend           += r.totalSpend;
+      agg.campaignRowsInserted += r.campaignRowsInserted;
+      r.insertedDates.forEach((d) => agg.insertedDates.add(d));
+      r.daysReceived.forEach((d) => agg.daysReceived.add(d));
+      agg.accounts.push({
+        id:                   acct.id,
+        accountName:          acct.accountName,
+        totalSpend:           parseFloat(r.totalSpend.toFixed(2)),
+        campaignRowsInserted: r.campaignRowsInserted,
+      });
+    } catch (e) {
+      console.error(`[meta/runSync] ✖ Account #${acct.id} "${acct.accountName}" (act_${acct.adAccountId}) FAILED: ${e.message}`);
+      acctErrors.push({
+        id:          acct.id,
+        accountName: acct.accountName,
+        adAccountId: acct.adAccountId,
+        error:       e.message,
+        metaCode:    e.metaCode ?? null,
+      });
+    }
+  }
+
+  /* Every account failed → surface a hard error (cooldown already set if API-side). */
+  if (accounts.length > 0 && acctErrors.length === accounts.length) {
+    const e = new Error(`فشلت مزامنة جميع حسابات Meta (${accounts.length}). أول خطأ: ${acctErrors[0].error}`);
+    e.statusCode    = acctErrors[0].metaCode ? 502 : 400;
+    if (acctErrors[0].metaCode) e.metaCode = acctErrors[0].metaCode;
+    e.accountErrors = acctErrors;
+    throw e;
   }
 
   const totalSpendRounded = parseFloat(agg.totalSpend.toFixed(2));
   console.log(
-    `[meta/runSync] ✅ ALL DONE — ${accounts.length} account(s), ` +
-    `${agg.campaignRowsInserted} campaign-day row(s), total spend: ${totalSpendRounded}`
+    `[meta/runSync] ✅ DONE — ${agg.accounts.length}/${accounts.length} account(s) ok` +
+    (acctErrors.length ? `, ${acctErrors.length} FAILED` : '') +
+    `, ${agg.campaignRowsInserted} campaign-day row(s), total spend: ${totalSpendRounded}`
   );
 
   return {
-    message:              `تم سحب وتحديث مصروفات الفترة من ${startDate} إلى ${endDate} لعدد ${accounts.length} حساب بنجاح`,
+    message:              `تم سحب مصروفات الفترة من ${startDate} إلى ${endDate} لعدد ${agg.accounts.length} حساب`
+                          + (acctErrors.length ? ` (فشل ${acctErrors.length} حساب — راجع التفاصيل)` : ' بنجاح'),
     startDate,
     endDate,
     totalSpend:           totalSpendRounded,
     daysInserted:         agg.insertedDates.size,
     daysReceived:         agg.daysReceived.size,
     campaignRowsInserted: agg.campaignRowsInserted,
-    accountsSynced:       accounts.length,
+    accountsSynced:       agg.accounts.length,
+    accountsFailed:       acctErrors.length,
     accounts:             agg.accounts,
+    accountErrors:        acctErrors,
     synced_at:            new Date().toISOString(),
   };
 }

@@ -453,6 +453,7 @@ export default function MetaIntegrationPage() {
                 <input
                   type="text" value={fName} onChange={(e) => setFName(e.target.value)}
                   placeholder="مثال: حساب أحمد الإعلاني"
+                  autoComplete="off"
                   className="w-full rounded-xl border border-slate-200 dark:border-slate-600
                     bg-white dark:bg-slate-800 text-slate-900 dark:text-white px-3 py-2 text-sm
                     focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
@@ -465,6 +466,7 @@ export default function MetaIntegrationPage() {
                 <input
                   type="text" value={fAcctId} onChange={(e) => setFAcctId(e.target.value)}
                   placeholder="123456789012345" dir="ltr"
+                  autoComplete="off" name="meta_ad_account_id" inputMode="numeric"
                   className="w-full rounded-xl border border-slate-200 dark:border-slate-600
                     bg-white dark:bg-slate-800 text-slate-900 dark:text-white px-3 py-2 text-sm font-mono
                     focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
@@ -482,7 +484,7 @@ export default function MetaIntegrationPage() {
                     type={acctShowToken ? 'text' : 'password'}
                     value={fToken} onChange={(e) => setFToken(e.target.value)}
                     placeholder={editingId !== null ? 'اتركه فارغاً للإبقاء على التوكن الحالي' : 'EAAxxxxx...'}
-                    dir="ltr"
+                    dir="ltr" autoComplete="off" name="meta_access_token"
                     className="w-full rounded-xl border border-slate-200 dark:border-slate-600
                       bg-white dark:bg-slate-800 text-slate-900 dark:text-white px-3 py-2 pl-9 text-sm font-mono
                       focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
@@ -579,6 +581,7 @@ export default function MetaIntegrationPage() {
                 value={adAccountId}
                 onChange={(e) => setAdAccountId(e.target.value)}
                 dir="ltr"
+                autoComplete="off" name="meta_ad_account_id" inputMode="numeric"
                 className="w-full rounded-xl border border-slate-200 dark:border-slate-600
                   bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white
                   px-4 py-2.5 text-sm font-mono
@@ -608,6 +611,7 @@ export default function MetaIntegrationPage() {
                   value={accessToken}
                   onChange={(e) => setAccessToken(e.target.value)}
                   dir="ltr"
+                  autoComplete="off" name="meta_access_token"
                   className="w-full rounded-xl border border-slate-200 dark:border-slate-600
                     bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white
                     px-4 py-2.5 pl-12 text-sm font-mono
