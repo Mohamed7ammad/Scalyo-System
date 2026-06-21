@@ -430,13 +430,18 @@ router.post('/safqa/:businessId', async (req, res) => {
       : (body._id || body.id)                                                          ? body
       : null;
 
-    console.log(`📦 Safqa webhook (tenant ${businessId}) event="${event || '(none)'}":`, JSON.stringify(body).slice(0, 1000));
+    /* FULL envelope logged (NOT truncated) so any envelope-level tracking Safqa
+       sends (sub-id / UTM / query params / metadata) is visible in the PM2 logs.
+       Grep with: pm2 logs scalyo-backend | grep "Safqa webhook FULL". */
+    console.log(`📦 Safqa webhook FULL (tenant ${businessId}) event="${event || '(none)'}":`, JSON.stringify(body));
 
     if (!order || typeof order !== 'object' || !(order._id || order.id)) {
       return res.status(400).json({ error: 'Missing or invalid order object' });
     }
 
-    const result = await recordSafqaOrder(order, businessId);
+    /* Persist the ENTIRE body into `raw` (not just `order`) — captures the outer
+       envelope verbatim. Structured columns are still parsed from `order`. */
+    const result = await recordSafqaOrder(order, businessId, { fullBody: body });
     if (!result.ok) {
       return res.status(400).json({ error: result.reason || 'Could not record order' });
     }

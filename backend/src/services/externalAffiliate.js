@@ -232,7 +232,13 @@ function primaryProductName(s) {
  * Idempotent on (network, external_id, business_id) — status updates overwrite.
  * Returns { ok, inserted?, externalId?, statusClass?, reason? }.
  */
-async function recordSafqaOrder(order, businessId) {
+async function recordSafqaOrder(order, businessId, opts = {}) {
+  /* FORENSICS: structured columns (marketer/sku/…) are still parsed from the
+     `order` sub-object, but `raw` stores the FULL webhook envelope when the caller
+     passes opts.fullBody — so any envelope-level tracking Safqa sends (sub-id, UTM,
+     query params, metadata) is captured verbatim instead of being discarded.
+     Falls back to `order` for callers that have no envelope (e.g. the CSV import). */
+  const rawToStore = (opts.fullBody !== undefined && opts.fullBody !== null) ? opts.fullBody : order;
   /* STABLE external key — duplicate-proofing for live traffic:
      Safqa's `serial_number` ("sk-…") is the SAME order code the CSV export uses
      ("كود الطلب"), whereas the webhook's `_id` is a Mongo ObjectId. Keying on the
@@ -289,7 +295,7 @@ async function recordSafqaOrder(order, businessId) {
                    updated_at   = NOW()
      RETURNING (xmax = 0) AS inserted`,
     [externalId, businessId, status, statusAr, statusClass, total, marketer,
-     productName, sku, governorate, note, quantity, JSON.stringify(order ?? {})]
+     productName, sku, governorate, note, quantity, JSON.stringify(rawToStore ?? {})]
   );
   return { ok: true, inserted: rows[0]?.inserted === true, externalId, statusClass };
 }
