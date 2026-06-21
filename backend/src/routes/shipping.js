@@ -458,9 +458,23 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
       });
     }
 
+    /* ── Defensive batch cap (rate-limit + runtime backstop) ────────────────
+       The Bosta queue already serialises + paces every call, and the UI ships a
+       user-set quota — but we ALSO cap here so NO single request (a direct API
+       hit, an automated retry, or a future bug) can ever queue an unbounded burst
+       at Bosta. Oldest-first; the overflow is reported as `remaining` so the
+       caller ships it on the next run. Tunable via BOSTA_DISPATCH_MAX_BATCH. */
+    const MAX_BATCH    = Number(process.env.BOSTA_DISPATCH_MAX_BATCH) || 200;
+    const totalPending = orders.length;
+    if (orders.length > MAX_BATCH) {
+      orders = orders.slice(0, MAX_BATCH);
+      console.warn(`[shipping/forward] batch capped: ${totalPending} pending → shipping ${MAX_BATCH} this run (set BOSTA_DISPATCH_MAX_BATCH to change)`);
+    }
+
     const success = [];
     const failed  = [];
 
+    console.log(`[shipping/forward] dispatching ${orders.length} order(s) via the throttled Bosta queue…`);
     for (const order of orders) {
       try {
         const payload  = toBosta(order, allowOpen, payWithPoints);
@@ -507,6 +521,10 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
 
         console.log(`✅  Bosta: order ${order.id} → tracking ${trackingCode}`);
 
+        /* Progress breadcrumb for big batches (every 25 processed). */
+        const done = success.length + failed.length;
+        if (done % 25 === 0) console.log(`[shipping/forward] progress ${done}/${orders.length}`);
+
       } catch (err) {
         const bostaError =
           err.response?.data?.message ??
@@ -530,10 +548,17 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
       }
     }
 
+    const processed = success.length + failed.length;
+    const remaining = Math.max(0, totalPending - processed);
     res.json({
-      message: `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length} طلب`,
+      message: remaining > 0
+        ? `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length}. متبقٍ ${remaining} طلب — اضغط "إرسال للشحن" مرة أخرى لإكمالها.`
+        : `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length} طلب`,
       success,
       failed,
+      total_pending: totalPending,
+      processed,
+      remaining,
     });
 
   } catch (err) {

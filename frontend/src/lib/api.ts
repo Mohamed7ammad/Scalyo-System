@@ -49,6 +49,11 @@ export interface ShippingResult {
   message: string;
   success: ShippingResultRow[];
   failed:  ShippingResultRow[];
+  /* Defensive batch cap (BOSTA_DISPATCH_MAX_BATCH): when more orders were pending
+     than the cap, the overflow is reported here so the UI can prompt to continue. */
+  total_pending?: number;
+  processed?:     number;
+  remaining?:     number;
 }
 
 export type PlanType = 'affiliate' | 'ecommerce';

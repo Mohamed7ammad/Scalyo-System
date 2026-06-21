@@ -1980,6 +1980,23 @@ export default function DashboardPage() {
                     </div>
                   </div>
 
+                  {/* Batch cap: more orders were pending than shipped this run. */}
+                  {!!shippingResult.remaining && shippingResult.remaining > 0 && (
+                    <div className="mb-5 flex items-center justify-between gap-3 p-3 rounded-xl
+                      bg-amber-50 border border-amber-200 text-sm">
+                      <span className="text-amber-800">
+                        متبقٍ <span className="font-bold">{shippingResult.remaining}</span> طلب لم يُرسل بعد (تم تقسيم الدفعة للحفاظ على استقرار الشحن).
+                      </span>
+                      <button
+                        onClick={handleForwardShipping}
+                        disabled={shippingLoading}
+                        className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-white
+                          bg-amber-600 hover:bg-amber-700 disabled:opacity-60 transition">
+                        {shippingLoading ? 'جارٍ الإرسال…' : 'إرسال الدفعة التالية'}
+                      </button>
+                    </div>
+                  )}
+
                   <div className="space-y-3 max-h-[40vh] overflow-y-auto pl-1">
                     {/* Successes */}
                     {shippingResult.success.map((row) => (

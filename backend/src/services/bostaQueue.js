@@ -40,6 +40,9 @@ const LANES = { DISPATCH: 'dispatch', ENRICH: 'enrich' };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const is429 = (err) => err?.response?.status === 429;
+/* ±15% jitter so a steady backlog never settles into a perfectly periodic burst
+   that lines up with Bosta's rate window. */
+const jitter = (ms) => Math.round(ms * (0.85 + Math.random() * 0.3));
 
 /* Background bulk lanes (enrich) get a larger base gap than interactive ones. */
 function baseGapFor(name) {
@@ -113,7 +116,7 @@ async function drain(laneName) {
         }
       }
 
-      if (lane.queue.length > 0) await sleep(lane.gapMs);   // space out next call (adaptive)
+      if (lane.queue.length > 0) await sleep(jitter(lane.gapMs));   // space out next call (adaptive + jitter)
     }
   } finally {
     lane.draining = false;
