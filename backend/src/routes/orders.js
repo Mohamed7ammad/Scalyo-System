@@ -630,7 +630,9 @@ router.post('/distribute', authenticate, requireAdmin, async (req, res) => {
       const usersRes = await client.query(
         `SELECT id, email FROM users
           WHERE id::text = ANY($1::text[]) AND role = 'agent'
-            AND COALESCE(is_active, true) = true AND business_id = $2`,
+            AND COALESCE(is_active, true) = true
+            AND COALESCE(is_absent, false) = false      -- skip ABSENT agents even if given a %
+            AND business_id = $2`,
         [ids, businessId]
       );
       const emailById = new Map(usersRes.rows.map((u) => [String(u.id), u.email]));
