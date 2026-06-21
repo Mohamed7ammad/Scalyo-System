@@ -130,13 +130,13 @@ async function loadMediaBuyerScope(businessId, userId) {
   };
 }
 
-/* Sentinel marketer for ORGANIC orders (no referral/UTM) — written by the
-   EasyOrder ingestion and selectable in the dashboard as "الحساب الأساسي". */
-const MAIN_ACCOUNT = 'main_account';
-
 async function resolveAnalyticsScope(req) {
   const role       = req.user?.role;
   const businessId = req.user?.business_id;
+  /* MASTER DASHBOARD: admin with no buyer selected → all:true → NO marketer/account
+     filter → the grand total of EVERY order (all buyers + organic 'main_account' +
+     legacy null/'-'). This IS the single source of truth; the dropdown only narrows
+     it down to an individual buyer. */
   const ADMIN_ALL  = { all: true, referralCodes: null, adAccountIds: null, mediaBuyerId: null };
 
   if (role === 'media_buyer') {
@@ -145,24 +145,8 @@ async function resolveAnalyticsScope(req) {
   }
   if (role === 'admin') {
     const mb = typeof req.query.mediaBuyer === 'string' ? req.query.mediaBuyer.trim() : '';
-    if (!mb) return ADMIN_ALL;
-    /* "Main Account" — the agency's own bucket: orders tagged marketer='main_account'
-       AND ad spend from the UNASSIGNED ad accounts (meta_accounts.assigned_user_id
-       IS NULL = the main agency campaigns, not owned by any individual buyer). */
-    if (mb === MAIN_ACCOUNT) {
-      const { rows } = await pool.query(
-        `SELECT id FROM meta_accounts
-          WHERE business_id = $1::integer AND assigned_user_id IS NULL`,
-        [businessId]
-      );
-      return {
-        all: false,
-        referralCodes: [MAIN_ACCOUNT],
-        adAccountIds:  rows.map((r) => r.id),   // [] → 0 spend until a main account is left unassigned
-        mediaBuyerId:  MAIN_ACCOUNT,
-      };
-    }
-    return loadMediaBuyerScope(businessId, mb);   // admin impersonation/filter
+    if (!mb) return ADMIN_ALL;                    // Master view (business-name option)
+    return loadMediaBuyerScope(businessId, mb);   // drill-down to one buyer
   }
   return ADMIN_ALL;   // other roles are blocked by the per-route guards anyway
 }

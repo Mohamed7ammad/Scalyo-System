@@ -402,15 +402,16 @@ function FilterSelect({ value, onChange, options }: {
    MEDIA-BUYER SELECT  (Admin-only — agency model impersonation/filter)
    value = the buyer's user id ('' = all buyers). Disabled while loading.
    ═══════════════════════════════════════════════════════════════════ */
-function MediaBuyerSelect({ value, onChange, buyers, loading }: {
+function MediaBuyerSelect({ value, onChange, buyers, loading, masterLabel }: {
   value: string; onChange: (v: string) => void; buyers: MediaBuyer[]; loading: boolean;
+  masterLabel: string;
 }) {
   return (
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={loading}
-      title="فلترة حسب الميديا باير"
+      title="لوحة الأداء الرئيسية — الكل، أو فلترة حسب ميديا باير"
       className="px-3 py-2 text-sm rounded-xl border outline-none cursor-pointer
         bg-white dark:bg-slate-900
         border-slate-300 dark:border-slate-700
@@ -418,9 +419,9 @@ function MediaBuyerSelect({ value, onChange, buyers, loading }: {
         focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition
         disabled:opacity-60 disabled:cursor-wait"
     >
-      <option value="">{loading ? 'جارٍ تحميل الميديا باير…' : '👥 كل الميديا باير'}</option>
-      {/* Pseudo-buyer: ORGANIC orders (marketer='main_account', no referral code). */}
-      <option value="main_account">🏠 الحساب الأساسي (طلبات بدون كود)</option>
+      {/* Master Dashboard: value '' = no scope = grand total of EVERY order
+          (all buyers + organic/main_account). Labelled with the business name. */}
+      <option value="">{loading ? 'جارٍ التحميل…' : `🏢 ${masterLabel}`}</option>
       {buyers.map((b) => (
         <option key={b.id} value={b.id}>{b.name?.trim() || b.email}</option>
       ))}
@@ -1178,6 +1179,7 @@ export default function AnalyticsDashboard() {
                 onChange={setMediaBuyer}
                 buyers={mediaBuyers}
                 loading={loadingMediaBuyers}
+                masterLabel={businessProfile?.brand_name?.trim() || 'لوحة الأداء الرئيسية'}
               />
             )}
 
