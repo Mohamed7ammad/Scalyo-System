@@ -146,10 +146,21 @@ async function resolveAnalyticsScope(req) {
   if (role === 'admin') {
     const mb = typeof req.query.mediaBuyer === 'string' ? req.query.mediaBuyer.trim() : '';
     if (!mb) return ADMIN_ALL;
-    /* "Main Account" — isolate ORGANIC orders (marketer='main_account'). They have
-       no media buyer and therefore no ad account, so ad spend is scoped to none. */
+    /* "Main Account" — the agency's own bucket: orders tagged marketer='main_account'
+       AND ad spend from the UNASSIGNED ad accounts (meta_accounts.assigned_user_id
+       IS NULL = the main agency campaigns, not owned by any individual buyer). */
     if (mb === MAIN_ACCOUNT) {
-      return { all: false, referralCodes: [MAIN_ACCOUNT], adAccountIds: [], mediaBuyerId: MAIN_ACCOUNT };
+      const { rows } = await pool.query(
+        `SELECT id FROM meta_accounts
+          WHERE business_id = $1::integer AND assigned_user_id IS NULL`,
+        [businessId]
+      );
+      return {
+        all: false,
+        referralCodes: [MAIN_ACCOUNT],
+        adAccountIds:  rows.map((r) => r.id),   // [] → 0 spend until a main account is left unassigned
+        mediaBuyerId:  MAIN_ACCOUNT,
+      };
     }
     return loadMediaBuyerScope(businessId, mb);   // admin impersonation/filter
   }
