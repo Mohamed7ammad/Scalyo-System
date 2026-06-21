@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { getAffiliateSettings, saveAffiliateSettings, disconnectAffiliate, syncTaagerOrders } from '@/lib/api';
+import { getAffiliateSettings, saveAffiliateSettings, disconnectAffiliate, syncTaagerOrders, getBusinessProfile, API_ORIGIN } from '@/lib/api';
 import type { AffiliateSettings, AffiliateNetworkSetting, AffiliateSettingsPayload } from '@/lib/api';
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -421,6 +421,107 @@ export default function ExternalAffiliatePage() {
     id === 'taager' ? settings?.taager : settings?.safqa;
 
   return (
+    <EasyOrderAndNetworks
+      toast={toast}
+      loading={loading}
+      error={error}
+      load={load}
+      showToast={showToast}
+      settingFor={settingFor}
+    />
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   EasyOrder Integration card — generates the tenant's slug-based webhook URL.
+   (Affiliate creation + attribution source for the double-webhook strategy.)
+   ══════════════════════════════════════════════════════════════════════════ */
+function EasyOrderIntegration({ showToast }: { showToast: (m: string, t: Toast['type']) => void }) {
+  const [slug,    setSlug]    = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [copied,  setCopied]  = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    getBusinessProfile()
+      .then((res) => { if (alive) setSlug(res.data.slug ?? null); })
+      .catch(() => { if (alive) setSlug(null); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, []);
+
+  const url = slug ? `${API_ORIGIN}/api/webhooks/easyorder/${slug}` : '';
+
+  const copy = async () => {
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+      showToast('تم نسخ الرابط', 'success');
+    } catch { showToast('تعذّر النسخ — انسخه يدوياً', 'error'); }
+  };
+
+  return (
+    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-orange-500 to-amber-600
+          flex items-center justify-center shadow-lg shadow-amber-500/25">
+          <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+              d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <div>
+          <h3 className="text-base font-bold text-slate-900 dark:text-white leading-tight">الربط مع إيزي أوردر</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-snug">
+            أضِف هذا الرابط كـ Webhook في حساب إيزي أوردر (عند «إنشاء الطلب») ليُسجَّل كل طلب مع كود
+            الميديا باير (UTM / Sub-ID) تلقائياً. صفقة تتكفّل بتحديثات الحالة بعد ذلك.
+          </p>
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+          رابط الـ Webhook الخاص بنشاطك
+        </label>
+        {loading ? (
+          <div className="h-11 rounded-xl bg-slate-100 dark:bg-slate-800 animate-pulse" />
+        ) : url ? (
+          <div className="flex gap-2">
+            <input readOnly dir="ltr" value={url} onFocus={(e) => e.currentTarget.select()}
+              className="flex-1 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800
+                text-slate-900 dark:text-white px-3 py-2.5 text-sm font-mono text-left focus:outline-none
+                focus:ring-2 focus:ring-amber-500/40" />
+            <button onClick={copy}
+              className="shrink-0 px-4 rounded-xl text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 transition">
+              {copied ? '✓ تم النسخ' : 'نسخ'}
+            </button>
+          </div>
+        ) : (
+          <p className="text-xs text-rose-500">تعذّر توليد الرابط. تأكّد من ضبط اسم النشاط في الملف التجاري ثم أعِد المحاولة.</p>
+        )}
+      </div>
+
+      <ol className="text-[11px] text-slate-500 dark:text-slate-400 space-y-1 list-decimal pr-4 leading-relaxed">
+        <li>افتح حساب إيزي أوردر ← الإعدادات ← Webhooks.</li>
+        <li>أضِف Webhook جديد على حدث «إنشاء الطلب» والصق الرابط أعلاه.</li>
+        <li>تأكّد أن رابط إعلان كل ميديا باير يحمل كوده في الـ UTM / Sub-ID.</li>
+      </ol>
+    </div>
+  );
+}
+
+/* Layout wrapper: keeps the original page body + adds the EasyOrder card. */
+function EasyOrderAndNetworks({ toast, loading, error, load, showToast, settingFor }: {
+  toast: Toast | null;
+  loading: boolean;
+  error: string | null;
+  load: () => void;
+  showToast: (m: string, t: Toast['type']) => void;
+  settingFor: (id: NetworkId) => AffiliateNetworkSetting | undefined;
+}) {
+  return (
     <div dir="rtl" className="min-h-full">
       {/* Toast */}
       {toast && (
@@ -482,6 +583,9 @@ export default function ExternalAffiliatePage() {
             ))}
           </div>
         )}
+
+        {/* EasyOrder integration — creation + attribution source (double-webhook) */}
+        <EasyOrderIntegration showToast={showToast} />
 
         {/* Security note */}
         <div className="flex items-start gap-2.5 px-4 py-3 rounded-xl

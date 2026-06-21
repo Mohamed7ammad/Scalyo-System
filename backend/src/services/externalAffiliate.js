@@ -157,6 +157,16 @@ pool.query(`
   .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS governorate  VARCHAR(120)`))
   .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS note         TEXT`))
   .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS quantity     INTEGER DEFAULT 1`))
+  /* Customer phone — written by the EasyOrder creation webhook (double-webhook
+     strategy) so the later Safqa status webhook (which has only phone + status,
+     no marketer/sku) can MATCH the existing rich row by phone and update its
+     status. Stored NORMALISED (digits-only, last 11) for reliable cross-source
+     matching. NULL on legacy/CSV rows. */
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS client_phone VARCHAR(50)`))
+  .then(() => pool.query(`
+    CREATE INDEX IF NOT EXISTS external_affiliate_orders_phone_idx
+      ON external_affiliate_orders (business_id, client_phone)
+  `))
   .then(() => pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS external_affiliate_orders_uidx
       ON external_affiliate_orders (network, external_id, business_id)
@@ -227,6 +237,16 @@ function primaryProductName(s) {
   return first || null;
 }
 
+/* Normalise a phone to a stable cross-source matching key: digits only, last 11.
+   This makes "+201001234567", "201001234567" and "01001234567" all collapse to
+   "01001234567", so the EasyOrder-created row and the Safqa status webhook match. */
+function normalizePhone(raw) {
+  if (raw == null) return null;
+  const digits = String(raw).replace(/\D/g, '');
+  if (!digits) return null;
+  return digits.length > 11 ? digits.slice(-11) : digits;
+}
+
 /**
  * Upsert ONE Safqa order (from an `order.status.updated` webhook) for a tenant.
  * Idempotent on (network, external_id, business_id) — status updates overwrite.
@@ -274,12 +294,14 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   const note        = pick('note', 'rejection_reason', 'rejectionReason', 'notes');
   const qtyRaw      = order?.quantity ?? order?.qty ?? order?.Qty;
   const quantity    = Number.isFinite(parseInt(qtyRaw, 10)) ? parseInt(qtyRaw, 10) : null;
+  /* Customer phone — the matching key for the Safqa status webhook. */
+  const clientPhone = normalizePhone(pick('client_phone1', 'client_phone', 'phone', 'client_phone2', 'mobile'));
 
   const { rows } = await pool.query(
     `INSERT INTO external_affiliate_orders
        (network, external_id, business_id, status, status_ar, status_class, total, marketer,
-        product_name, sku, governorate, note, quantity, raw, updated_at)
-     VALUES ('safqa', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, NOW())
+        product_name, sku, governorate, note, quantity, client_phone, raw, updated_at)
+     VALUES ('safqa', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, NOW())
      ON CONFLICT (network, external_id, business_id)
      DO UPDATE SET status       = EXCLUDED.status,
                    status_ar    = EXCLUDED.status_ar,
@@ -291,13 +313,65 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
                    governorate  = COALESCE(EXCLUDED.governorate,  external_affiliate_orders.governorate),
                    note         = COALESCE(EXCLUDED.note,         external_affiliate_orders.note),
                    quantity     = COALESCE(EXCLUDED.quantity,     external_affiliate_orders.quantity),
+                   client_phone = COALESCE(EXCLUDED.client_phone, external_affiliate_orders.client_phone),
                    raw          = EXCLUDED.raw,
                    updated_at   = NOW()
      RETURNING (xmax = 0) AS inserted`,
     [externalId, businessId, status, statusAr, statusClass, total, marketer,
-     productName, sku, governorate, note, quantity, JSON.stringify(rawToStore ?? {})]
+     productName, sku, governorate, note, quantity, clientPhone, JSON.stringify(rawToStore ?? {})]
   );
   return { ok: true, inserted: rows[0]?.inserted === true, externalId, statusClass };
+}
+
+/**
+ * Safqa STATUS webhook — double-webhook strategy.
+ * Safqa pushes only { status, status_ar, client_phone1 } (no marketer / sku /
+ * product / governorate). Rather than create a new data-poor row (or guess a
+ * marketer), MATCH the existing rich row that the EasyOrder creation webhook
+ * already wrote, by normalised client phone (+ sku when Safqa happens to send
+ * one), and update ONLY the status. Most-recent OPEN order wins.
+ * Returns { ok, matched, externalId?, statusClass?, reason? }.
+ */
+async function updateSafqaStatusByPhone(order, businessId) {
+  if (businessId == null) return { ok: false, matched: false, reason: 'missing tenant' };
+  const phone = normalizePhone(
+    order?.client_phone1 ?? order?.client_phone ?? order?.phone ?? order?.client_phone2 ?? order?.mobile
+  );
+  if (!phone) return { ok: false, matched: false, reason: 'missing client phone' };
+
+  const status      = String(order?.status ?? '').trim().toLowerCase();
+  const statusAr    = order?.status_ar != null ? String(order.status_ar) : null;
+  const statusClass = classifySafqaStatus(status);
+  const sku         = primarySku(order?.sku ?? order?.SKU ?? null);
+  /* Safqa's `total` is the marketer COMMISSION (paid on delivery) — the EasyOrder
+     creation row stored 0 (it only knows the order's COD value, not the payout),
+     so the Safqa push is the authoritative source for commission. */
+  const safqaTotal  = num(order?.total);
+
+  const { rows } = await pool.query(
+    `SELECT id, external_id FROM external_affiliate_orders
+      WHERE business_id = $1 AND network = 'safqa' AND client_phone = $2
+        AND ($3::text IS NULL OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($3)))
+      ORDER BY (status_class IN ('delivered','returned','cancelled')) ASC,  -- OPEN orders first
+               created_at DESC
+      LIMIT 1`,
+    [businessId, phone, sku]
+  );
+  if (!rows.length) {
+    return { ok: true, matched: false, reason: 'no matching EasyOrder-created row for phone' };
+  }
+
+  await pool.query(
+    `UPDATE external_affiliate_orders
+        SET status       = $1,
+            status_ar    = COALESCE($2, status_ar),
+            status_class = $3,
+            total        = COALESCE(NULLIF($4::numeric, 0), total),   -- commission from Safqa
+            updated_at   = NOW()
+      WHERE id = $5 AND business_id = $6`,
+    [status, statusAr, statusClass, safqaTotal, rows[0].id, businessId]
+  );
+  return { ok: true, matched: true, externalId: rows[0].external_id, statusClass };
 }
 
 /**
@@ -1222,6 +1296,8 @@ module.exports = {
   fetchTaagerProducts,
   // Safqa webhook (push) architecture:
   recordSafqaOrder,
+  updateSafqaStatusByPhone,
+  normalizePhone,
   aggregateSafqaFromDb,
   aggregateSafqaBreakdowns,
   classifySafqaStatus,

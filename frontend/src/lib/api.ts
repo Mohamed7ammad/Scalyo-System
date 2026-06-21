@@ -206,11 +206,16 @@ export interface BusinessProfile {
   industry:      string;
   logo_url:      string;
   plan_type?:    PlanType;
+  /** URL-safe business slug used in the public webhook URL (…/easyorder/<slug>). */
+  slug?:         string;
   updated_at:    string;
 }
 
 export const getBusinessProfile = () =>
   api.get<BusinessProfile>('/api/business-profile');
+
+/** Public API origin — used to build copyable webhook URLs for the user. */
+export const API_ORIGIN = API_URL;
 
 export const updateBusinessProfile = (id: number, data: Partial<Omit<BusinessProfile, 'id' | 'updated_at'>>) =>
   api.patch<BusinessProfile>(`/api/business-profile/${id}`, data);

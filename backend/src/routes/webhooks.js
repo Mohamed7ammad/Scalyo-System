@@ -2,8 +2,20 @@ const express = require('express');
 const crypto  = require('crypto');
 const pool    = require('../config/db');
 const { enrichDeliveryRate } = require('../services/bostaEnrich');
-const { recordSafqaOrder } = require('../services/externalAffiliate');
+const { recordSafqaOrder, updateSafqaStatusByPhone } = require('../services/externalAffiliate');
 const { extractReferralCode } = require('../utils/referral');
+
+/* Resolve a webhook URL identifier — either the numeric business id (legacy) OR a
+   readable business-name slug (e.g. /easyorder/slaaa) — to the tenant row. */
+async function resolveTenantByIdent(ident) {
+  const s = String(ident ?? '').trim();
+  if (!s) return null;
+  const sql = `SELECT id, plan_type, easyorder_webhook_secret FROM business_profile`;
+  const { rows } = /^\d+$/.test(s)
+    ? await pool.query(`${sql} WHERE id = $1 LIMIT 1`, [parseInt(s, 10)])
+    : await pool.query(`${sql} WHERE LOWER(slug) = LOWER($1) LIMIT 1`, [s]);
+  return rows[0] || null;
+}
 
 const router = express.Router();
 
@@ -240,7 +252,55 @@ async function autoAssignOrder(orderId, businessId) {
 /* ── Shared ingest ────────────────────────────────────────────────────────────
    Inserts an EasyOrder payload into orders for a SPECIFIC tenant (businessId),
    with dedup + multi-unit quantity. Returns { ok, status, payload }.            */
-async function ingestEasyOrder(body, businessId) {
+/* ── Affiliate ingest (double-webhook strategy) ───────────────────────────────
+   For AFFILIATE tenants the EasyOrder webhook is the CREATION + ATTRIBUTION source
+   (Safqa's own webhook only does status updates and strips marketer/sku). We write
+   a rich row into external_affiliate_orders with the marketer captured from the
+   UTM/referral, full product/geo/qty details, and the customer phone (the key the
+   Safqa status webhook later matches on). `total` is set to 0 — the marketer
+   COMMISSION is unknown here and is filled in by the Safqa status push. */
+async function ingestEasyOrderAffiliate(body, businessId) {
+  const f = extractOrderFields(body);
+  if (!f.FullName || !f.Phone) {
+    return { ok: false, status: 400, payload: { error: 'FullName and Phone are required' } };
+  }
+
+  const externalId = String(
+    body.id ?? body.short_id ?? body.shortId ??
+    body.external_order_id ?? body.order_id ?? body.orderId ??
+    body.reference ?? body.ref ?? ''
+  ).trim() || buildFallbackKey(body);
+
+  /* Build a Safqa-shaped order object so recordSafqaOrder handles the upsert,
+     status classification, phone normalisation and full-envelope raw capture. */
+  const syntheticOrder = {
+    _id:           externalId,
+    serial_number: externalId,
+    status:        'pending',          // created — call-center confirmation not done yet
+    status_ar:     'قيد المعالجة',
+    total:         0,                  // commission unknown until Safqa confirms
+    marketer:      f.referral_code || null,   // the UTM / Sub-ID = the media buyer
+    product_name:  f.ProductName || null,
+    sku:           f.sku || null,
+    governorate:   f.City || null,
+    note:          f.Note || null,
+    quantity:      Math.max(1, parseInt(f.quantity, 10) || 1),
+    client_phone1: f.Phone,
+  };
+
+  const r = await recordSafqaOrder(syntheticOrder, businessId, { fullBody: body });
+  if (!r.ok) return { ok: false, status: 400, payload: { error: r.reason || 'ingest failed' } };
+  console.log(`✅  EasyOrder→affiliate: ${r.inserted ? 'created' : 'updated'} order "${externalId}" ` +
+              `(tenant ${businessId}, marketer="${syntheticOrder.marketer ?? '∅'}", sku="${syntheticOrder.sku ?? '∅'}")`);
+  return { ok: true, status: r.inserted ? 201 : 200, payload: { success: true, external_id: externalId, marketer: syntheticOrder.marketer } };
+}
+
+async function ingestEasyOrder(body, businessId, planType = 'ecommerce') {
+  /* Affiliate tenants route to external_affiliate_orders (creation + attribution). */
+  if (planType === 'affiliate') {
+    return ingestEasyOrderAffiliate(body, businessId);
+  }
+
   const f = extractOrderFields(body);
 
   if (!f.FullName || !f.Phone) {
@@ -302,11 +362,11 @@ async function ingestEasyOrder(body, businessId) {
    build (with the tenant-aware route) is actually deployed — a 200 JSON means
    the new code is live; a 404 means the running backend is stale and needs a
    redeploy/restart. Does NOT touch the database.                               */
-router.get('/easyorder/:businessId', (req, res) => {
+router.get('/easyorder/:ident', (req, res) => {
   res.status(200).json({
     ok: true,
     endpoint: 'easyorder-webhook',
-    business_id: req.params.businessId,
+    tenant_ident: req.params.ident,
     method_expected: 'POST',
     message: 'EasyOrder webhook endpoint is live. Send order payloads via POST.',
   });
@@ -316,35 +376,29 @@ router.get('/easyorder/:businessId', (req, res) => {
    EasyOrder posts here with the tenant's unique URL. Optional per-tenant secret
    (header x-easyorder-secret / x-webhook-secret, or ?secret=) is validated when
    provided. Each tenant configures their own URL from the integration page.    */
-router.post('/easyorder/:businessId', async (req, res) => {
-  const businessId = parseInt(req.params.businessId, 10);
-  if (!businessId || isNaN(businessId)) {
-    return res.status(400).json({ error: 'Invalid tenant id' });
-  }
-
+router.post('/easyorder/:ident', async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT id, easyorder_webhook_secret FROM business_profile WHERE id = $1 LIMIT 1`,
-      [businessId]
-    );
-    if (!rows.length) {
-      console.warn(`⚠️  EasyOrder webhook: unknown tenant ${businessId}`);
+    /* :ident is either the readable business slug (preferred — e.g. /easyorder/slaaa)
+       or the numeric business id (legacy). Both resolve to the same tenant. */
+    const tenant = await resolveTenantByIdent(req.params.ident);
+    if (!tenant) {
+      console.warn(`⚠️  EasyOrder webhook: unknown tenant "${req.params.ident}"`);
       return res.status(404).json({ error: 'Unknown tenant' });
     }
 
     /* Secret check: if a secret is stored AND the caller supplied one, they must
-       match. (Lenient when EasyOrder can't send a secret — the unguessable URL +
-       tenant id still scopes the write. Tighten once confirmed in production.)   */
-    const storedSecret = rows[0].easyorder_webhook_secret;
+       match. (Lenient when EasyOrder can't send a secret — the unguessable slug
+       still scopes the write. Tighten once confirmed in production.)             */
+    const storedSecret = tenant.easyorder_webhook_secret;
     const incoming =
       req.headers['x-easyorder-secret'] ?? req.headers['x-webhook-secret'] ?? req.query.secret ?? null;
     if (storedSecret && incoming != null && incoming !== storedSecret) {
-      console.warn(`⚠️  EasyOrder webhook: secret mismatch for tenant ${businessId}`);
+      console.warn(`⚠️  EasyOrder webhook: secret mismatch for tenant ${tenant.id}`);
       return res.status(401).json({ error: 'Webhook secret mismatch' });
     }
 
-    console.log(`📦 EasyOrder webhook (tenant ${businessId}):`, JSON.stringify(req.body));
-    const { status, payload } = await ingestEasyOrder(req.body, businessId);
+    console.log(`📦 EasyOrder webhook (tenant ${tenant.id}, plan ${tenant.plan_type}):`, JSON.stringify(req.body));
+    const { status, payload } = await ingestEasyOrder(req.body, tenant.id, tenant.plan_type);
     return res.status(status).json(payload);
   } catch (err) {
     console.error('EasyOrder webhook error:', err);
@@ -366,11 +420,12 @@ router.post('/easyorder', async (req, res) => {
 
   try {
     console.log('📦 Webhook payload received (legacy):', JSON.stringify(req.body));
-    const { rows } = await pool.query(`SELECT MIN(id) AS id FROM business_profile`);
-    const businessId = rows[0]?.id;
-    if (!businessId) return res.status(500).json({ error: 'No tenant configured' });
+    const { rows } = await pool.query(
+      `SELECT id, plan_type FROM business_profile ORDER BY id ASC LIMIT 1`);
+    const tenant = rows[0];
+    if (!tenant?.id) return res.status(500).json({ error: 'No tenant configured' });
 
-    const { status, payload } = await ingestEasyOrder(req.body, businessId);
+    const { status, payload } = await ingestEasyOrder(req.body, tenant.id, tenant.plan_type);
     return res.status(status).json(payload);
   } catch (err) {
     console.error('Webhook error:', err);
@@ -439,18 +494,36 @@ router.post('/safqa/:businessId', async (req, res) => {
       return res.status(400).json({ error: 'Missing or invalid order object' });
     }
 
-    /* Persist the ENTIRE body into `raw` (not just `order`) — captures the outer
-       envelope verbatim. Structured columns are still parsed from `order`. */
-    const result = await recordSafqaOrder(order, businessId, { fullBody: body });
-    if (!result.ok) {
-      return res.status(400).json({ error: result.reason || 'Could not record order' });
+    /* DOUBLE-WEBHOOK STRATEGY: Safqa now does STATUS UPDATES ONLY. EasyOrder
+       created the rich row (marketer/sku/geo/phone); the Safqa push carries only
+       status + client_phone1 (+commission `total`). Match the existing row by
+       phone and update its status/commission — do NOT create a new marketer-less,
+       sku-less row. */
+    const matchRes = await updateSafqaStatusByPhone(order, businessId);
+    if (matchRes.matched) {
+      return res.status(200).json({
+        ok: true, action: 'status_updated',
+        external_id: matchRes.externalId, status_class: matchRes.statusClass,
+      });
     }
-    return res.status(200).json({
-      ok: true,
-      action: result.inserted ? 'created' : 'updated',
-      external_id: result.externalId,
-      status_class: result.statusClass,
-    });
+
+    /* No EasyOrder-created row for this phone. DEFAULT (safe): fall back to the
+       legacy create-by-serial behaviour so Safqa-only tenants (no EasyOrder
+       webhook yet) keep ingesting — this can never duplicate, because an order
+       that DID come through EasyOrder always phone-matches above. Once EVERY
+       affiliate tenant is on the double-webhook, set SAFQA_CREATE_ON_NO_MATCH=false
+       to strictly skip instead. Always 200 so Safqa never retry-storms. */
+    const strictSkip = String(process.env.SAFQA_CREATE_ON_NO_MATCH).toLowerCase() === 'false';
+    if (!strictSkip) {
+      const created = await recordSafqaOrder(order, businessId, { fullBody: body });
+      console.log(`ℹ️  Safqa webhook: no phone match → legacy create (external_id=${created.externalId}, tenant ${businessId})`);
+      return res.status(200).json({ ok: true, action: created.inserted ? 'created' : 'updated', external_id: created.externalId, status_class: created.statusClass });
+    }
+    console.warn(
+      `⚠️  Safqa webhook: no EasyOrder row matched phone (${matchRes.reason}) — status update SKIPPED (strict mode). ` +
+      `serial=${order.serial_number ?? order._id}, tenant ${businessId}.`
+    );
+    return res.status(200).json({ ok: true, action: 'skipped_no_match', reason: matchRes.reason });
   } catch (err) {
     console.error('Safqa webhook error:', err);
     return res.status(500).json({ error: 'Failed to process webhook' });
