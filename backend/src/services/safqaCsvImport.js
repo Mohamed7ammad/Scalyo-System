@@ -17,6 +17,7 @@ const XLSX = require('xlsx');
 const pool = require('../config/db');
 const {
   recordSafqaOrder,
+  updateSafqaStatusByPhone,
   classifySafqaStatus,
   primarySku,
   primaryProductName,
@@ -58,6 +59,11 @@ const COLUMN_ALIASES = {
   governorate: ['governorate', 'province', 'city', 'state', 'المحافظة', 'المدينة'],
   note:        ['note', 'notes', 'rejection reason', 'الملاحظة', 'الملاحظه', 'ملاحظة', 'ملاحظات', 'سبب الرفض'],
   qty:         ['qty', 'quantity', 'الكمية', 'العدد'],
+  /* Customer phone — the cross-source matching key. When present, a CSV row is
+     matched against an EXISTING order (e.g. created by the EasyOrder webhook under
+     a different id) by phone (+sku) and UPDATED, instead of inserting a duplicate. */
+  phone:       ['phone', 'mobile', 'client_phone', 'client_phone1', 'phone1', 'phone number', 'tel', 'telephone',
+                'رقم الهاتف', 'الهاتف', 'الموبايل', 'موبايل', 'رقم الموبايل', 'تليفون', 'رقم التليفون', 'الجوال', 'رقم العميل', 'هاتف'],
 };
 
 /* Minimal RFC-4180-ish CSV parser (quotes, commas/newlines in quotes, "" escapes,
@@ -196,7 +202,8 @@ async function importSafqaGrid(grid0, businessId, opts = {}) {
   const statusHistogram = {};
   const unmapped = {};
   const csvIds = [];
-  let processed = 0, inserted = 0, updated = 0, skippedNoId = 0, failed = 0, dated = 0;
+  const matchedKeepIds = [];   // external_ids of phone-matched rows → protect from --replace prune
+  let processed = 0, inserted = 0, updated = 0, matchedByPhone = 0, skippedNoId = 0, failed = 0, dated = 0;
 
   for (const r of dataRows) {
     const rawId = String(r[cols.id] ?? '').trim();
@@ -211,36 +218,58 @@ async function importSafqaGrid(grid0, businessId, opts = {}) {
 
     /* Pass RAW product/sku — recordSafqaOrder applies primaryProductName/primarySku
        itself (single source), so multi-item upsells collapse to the hero product.
-       It also keys the UPSERT on serial_number (here the CSV order code), so a
-       re-import or a later webhook updates the SAME row — never a duplicate. */
+       Idempotency (see the try-block below): match by PHONE(+sku) first — so a sheet
+       row updates an order already created via the EasyOrder webhook (different id)
+       — and only fall back to the serial-keyed UPSERT when no phone match exists. */
     const order = {
-      _id:          rawId,
-      status:       resolved ?? rawStatus,
-      status_ar:    cols.status_ar   != null ? r[cols.status_ar]   : undefined,
-      total:        cols.total       != null ? parseMoney(r[cols.total]) : 0,
-      marketer:     cols.marketer    != null ? r[cols.marketer]    : undefined,
-      product_name: cols.products    != null ? r[cols.products]    : undefined,
-      sku:          cols.sku         != null ? r[cols.sku]         : undefined,
-      governorate:  cols.governorate != null ? r[cols.governorate] : undefined,
-      note:         cols.note        != null ? r[cols.note]        : undefined,
-      quantity:     cols.qty         != null ? r[cols.qty]         : undefined,
+      _id:           rawId,
+      status:        resolved ?? rawStatus,
+      status_ar:     cols.status_ar   != null ? r[cols.status_ar]   : undefined,
+      total:         cols.total       != null ? parseMoney(r[cols.total]) : 0,
+      marketer:      cols.marketer    != null ? r[cols.marketer]    : undefined,
+      product_name:  cols.products    != null ? r[cols.products]    : undefined,
+      sku:           cols.sku         != null ? r[cols.sku]         : undefined,
+      governorate:   cols.governorate != null ? r[cols.governorate] : undefined,
+      note:          cols.note        != null ? r[cols.note]        : undefined,
+      quantity:      cols.qty         != null ? r[cols.qty]         : undefined,
+      /* Phone — only present when the sheet has a phone column; enables the
+         phone(+sku) match-before-insert below. */
+      client_phone1: cols.phone       != null ? r[cols.phone]       : undefined,
     };
     const isoDate = cols.date != null ? parseDate(r[cols.date], dayFirst) : null;
 
     if (dryRun) { processed++; continue; }
 
     try {
-      const res = await recordSafqaOrder(order, bid);
-      if (!res.ok) { failed++; continue; }
+      /* 1. PHONE(+SKU) MATCH-FIRST — only when the sheet has a phone column. If this
+         order already exists (e.g. created by the EasyOrder webhook under a DIFFERENT
+         external_id), update its status/commission in place instead of inserting a
+         duplicate keyed on the Safqa serial. Reuses the exact webhook matching logic. */
+      let res = null;
+      const pm = order.client_phone1 != null
+        ? await updateSafqaStatusByPhone(order, bid)
+        : { matched: false };
+
+      if (pm.matched) {
+        res = { ok: true, inserted: false, externalId: pm.externalId };
+        matchedByPhone++;
+        updated++;
+        matchedKeepIds.push(pm.externalId);   // its id isn't a CSV serial → protect from --replace
+      } else {
+        /* 2. No existing order for this phone → upsert by serial (idempotent within
+           the CSV source: a re-import of the same sheet updates the same row). */
+        res = await recordSafqaOrder(order, bid);
+        if (!res.ok) { failed++; continue; }
+        if (res.inserted) inserted++; else updated++;
+      }
       processed++;
-      if (res.inserted) inserted++; else updated++;
 
       /* Back-date created_at to the real order date so the Date Filter is accurate. */
-      if (isoDate) {
+      if (isoDate && res.externalId) {
         await pool.query(
           `UPDATE external_affiliate_orders SET created_at = $1
              WHERE network = 'safqa' AND external_id = $2 AND business_id = $3`,
-          [isoDate, res.externalId || rawId, bid]
+          [isoDate, res.externalId, bid]
         );
         dated++;
       }
@@ -253,12 +282,16 @@ async function importSafqaGrid(grid0, businessId, opts = {}) {
      is never an empty-table window. Never exposed to the self-serve web upload. */
   let pruned = 0;
   if (!dryRun && replace && csvIds.length > 0) {
+    /* Keep set = the CSV serials PLUS the external_ids of any rows we phone-matched
+       (whose ids are NOT CSV serials) — otherwise --replace would delete the very
+       EasyOrder-created rows we just updated. */
+    const keepIds = csvIds.concat(matchedKeepIds);
     const del = await pool.query(
       `DELETE FROM external_affiliate_orders
         WHERE network = 'safqa' AND business_id = $1
           AND NOT (external_id = ANY($2::text[]))
         RETURNING id`,
-      [bid, csvIds]
+      [bid, keepIds]
     );
     pruned = del.rowCount || 0;
   }
@@ -281,7 +314,7 @@ async function importSafqaGrid(grid0, businessId, opts = {}) {
     statusHistogram,
     unmapped,
     dataRowCount: dataRows.length,
-    processed, inserted, updated, skippedNoId, failed, dated, pruned,
+    processed, inserted, updated, matchedByPhone, skippedNoId, failed, dated, pruned,
     totalAfter,
   };
 }
