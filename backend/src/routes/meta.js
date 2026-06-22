@@ -895,6 +895,9 @@ async function syncSingleAccount(acct, startDate, endDate) {
        present ANYWHERE in the name (e.g. "… - صفقة-yQASPqV") attributes correctly
        even when the prefix/Arabic tag varies. Loaded ONCE per account. */
     const knownSkus = await loadKnownSkus(businessId);
+    /* Tenant-ownership set: ONLY SKUs this business actually owns (its catalogue
+       products + its own Safqa orders). UPPERCASED+trimmed by loadKnownSkus. */
+    const knownSkuSet = new Set(knownSkus);
 
     /* Build the rows to write (past the zero-spend + strict SKU gate). */
     const rowsToWrite = [];
@@ -904,12 +907,18 @@ async function syncSingleAccount(acct, startDate, endDate) {
         console.log(`[meta/runSync] ⏭️  Skipping zero-spend key: ${g.rowDate} | "${g.campaignName}"`);
         continue;
       }
-      /* STRICT SKU GATE — a campaign is a product campaign when it contains a
-         known SKU (anywhere) OR a "SKU-"/"صفقة-" tag. Otherwise (brand/awareness/
-         generic) it is IGNORED entirely. */
+      /* STRICT TENANT-SCOPED SKU GATE — keep a campaign ONLY when its parsed SKU is
+         one THIS tenant actually owns (catalogue product or its own Safqa SKU).
+         A bare "SKU-"/"صفقة-" tag is NOT sufficient: one Meta ad account is often
+         shared across businesses (e.g. an e-commerce account that ALSO runs another
+         tenant's affiliate/Safqa campaigns). extractSku's fallback regex will parse
+         such a foreign tag, so we re-validate the result against the tenant's
+         known-SKU set here and DROP anything it doesn't own — otherwise that foreign
+         spend pollutes this tenant's "All Products" total. Brand/awareness/generic
+         campaigns (no SKU at all) are likewise ignored. */
       const skuRaw = extractSku(g.campaignName, knownSkus);
-      if (skuRaw === null) {
-        console.log(`[meta/runSync] ⏭️  Ignoring non-product campaign (no SKU): ${g.rowDate} | "${g.campaignName}" (spend ${spend} dropped)`);
+      if (skuRaw === null || !knownSkuSet.has(skuRaw)) {
+        console.log(`[meta/runSync] ⏭️  Ignoring campaign — SKU "${skuRaw ?? 'none'}" not owned by tenant ${businessId}: ${g.rowDate} | "${g.campaignName}" (spend ${spend} dropped)`);
         continue;
       }
       rowsToWrite.push({ date: g.rowDate, name: g.campaignName, spend, purchases: g.metaPurchases, sku: skuRaw });

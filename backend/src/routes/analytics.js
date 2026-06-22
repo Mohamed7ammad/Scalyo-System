@@ -1188,6 +1188,19 @@ router.get('/dashboard', authenticate, async (req, res) => {
      selected campaign NAME (case-insensitive). Composes with the product SKU ($5).
      NULL when "all campaigns" → IS NULL OR leaves spend unfiltered. */
   expParams.push(hasCampaign ? campaignSel.toUpperCase() : null);
+  /* Defense-in-depth ($7): the tenant's CATALOGUE product SKUs (UPPERCASED). The
+     "All Products" ad-spend (meta_spend + daily ads_spend) sums ONLY rows whose sku
+     is a real catalogue product, so foreign campaigns that ever slip into expenses
+     — e.g. ANOTHER business's Safqa spend on a SHARED Meta ad account — can never
+     inflate this tenant's total. NULL when the tenant has no catalogue (e.g. a pure
+     affiliate tenant) → IS NULL OR leaves spend unfiltered (the affiliate dashboard
+     isolates its own spend separately). */
+  const catSkuRes = await pool.query(
+    `SELECT ARRAY(SELECT UPPER(TRIM(sku)) FROM products
+                   WHERE business_id = $1::integer AND COALESCE(TRIM(sku),'') <> '') AS skus`,
+    [req.user.business_id]);
+  const catalogueSkus = catSkuRes.rows[0]?.skus || [];
+  expParams.push(catalogueSkus.length ? catalogueSkus : null);
 
   /* Inline ProductPrice parser (same as other endpoints) */
   const P = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
@@ -1261,7 +1274,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
   const expSql = `
     SELECT
       COALESCE(SUM(amount),                                              0) AS total_expenses,
-      COALESCE(SUM(amount)         FILTER (WHERE meta_sync = true),      0) AS meta_spend,
+      COALESCE(SUM(amount)         FILTER (WHERE meta_sync = true
+              AND ($7::text[] IS NULL OR UPPER(TRIM(sku)) = ANY($7::text[]))), 0) AS meta_spend,
       COALESCE(SUM(meta_purchases) FILTER (WHERE meta_sync = true),      0) AS meta_total_orders
     FROM expenses
     WHERE business_id = $4::integer
@@ -1313,7 +1327,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
   const dailyExpSql = `
     SELECT
       TO_CHAR(expense_date, 'YYYY-MM-DD')       AS stat_date,
-      COALESCE(SUM(amount),         0)          AS ads_spend,
+      COALESCE(SUM(amount) FILTER (
+        WHERE $7::text[] IS NULL OR UPPER(TRIM(sku)) = ANY($7::text[])
+      ), 0)                                     AS ads_spend,
       COALESCE(SUM(meta_purchases), 0)          AS meta_orders
     FROM expenses
     WHERE meta_sync = true
