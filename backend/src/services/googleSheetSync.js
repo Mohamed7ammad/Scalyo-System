@@ -63,6 +63,11 @@ const startOrderSyncCron = () => {
 
       let syncedCount = 0;
       let skippedCount = 0;
+      let crossChannelSkipped = 0;
+      /* EasyOrder fires an order webhook (order_source='easyorder', external_order_id
+         set) AND writes the same order to this sheet → it would land twice. Skip a
+         sheet row when a recent WEBHOOK order with the same phone+product exists. */
+      const DEDUP_HOURS = Number(process.env.SHEET_DEDUP_WINDOW_HOURS) || 24;
 
       for (const orderData of newOrders) {
         // Assign to next agent in rotation (null if no agents exist)
@@ -81,41 +86,63 @@ const startOrderSyncCron = () => {
            (forward-compatible — captured automatically once the sheet adds one). */
         const referralCode = extractReferralCode(orderData);
 
-        // Insert as 'بدون' (not-yet-checked). enrichDeliveryRate fires immediately
-        // after and overwrites it with the real Bosta rating within seconds.
-        // orderData.DeliveryRate (always 'بدون' from the sheet) is intentionally ignored.
-        const insertResult = await pool.query(
-          `INSERT INTO orders
-             ("FullName", "Phone", "DeliveryRate", "City", "Address",
-              "Status", "Note", "ProductName", "ProductPrice", "AssignedTo",
-              referral_code, sheet_row_index, business_id)
-           VALUES ($1, $2, 'بدون', $3, $4, 'جديد', $5, $6, $7, $8, $9, $10, $11)
-           ON CONFLICT (business_id, sheet_row_index) DO NOTHING
-           RETURNING id`,
-          [
-            orderData.FullName     || null,  // $1
-            orderData.Phone        || null,  // $2
-            orderData.City         || null,  // $3
-            orderData.Address      || null,  // $4
-            orderData.Note         || null,  // $5
-            orderData.ProductName  || null,  // $6
-            orderData.ProductPrice || null,  // $7
-            assignedTo,                      // $8
-            referralCode,                    // $9 — Media-Buyer attribution (nullable)
-            sheetRowIndex,                   // $10 — idempotency key
-            defaultBusinessId,               // $11 — ORIGINAL tenant
-          ]
-        );
+        /* CROSS-CHANNEL DEDUP — skip if the EasyOrder webhook already created this
+           order (same phone+product, recent). Manual sheet-only orders (no webhook
+           twin) have no match and are inserted normally. */
+        let crossChannelDup = false;
+        if (orderData.Phone) {
+          const dup = await pool.query(
+            `SELECT 1 FROM orders
+              WHERE business_id = $1
+                AND external_order_id IS NOT NULL
+                AND "Phone" = $2
+                AND UPPER(TRIM(COALESCE("ProductName",''))) = UPPER(TRIM($3))
+                AND "createdAt" > NOW() - make_interval(hours => $4)
+              LIMIT 1`,
+            [defaultBusinessId, orderData.Phone, orderData.ProductName || '', DEDUP_HOURS]
+          );
+          crossChannelDup = dup.rows.length > 0;
+        }
 
-        const insertedId = insertResult.rows[0]?.id;
-        if (insertedId) {
-          // NEW row only — fire-and-forget enrichment (never on a duplicate).
-          enrichDeliveryRate(insertedId, orderData.Phone);
-          syncedCount++;
+        let insertedId = null;
+        if (crossChannelDup) {
+          // The webhook already ingested this order → don't duplicate it from the sheet.
+          crossChannelSkipped++;
         } else {
-          // Already imported (conflict) — still mark the sheet row so it stops
-          // being returned, but do NOT enrich or duplicate.
-          skippedCount++;
+          // Insert as 'بدون' (not-yet-checked). enrichDeliveryRate fires immediately
+          // after and overwrites it with the real Bosta rating within seconds.
+          // orderData.DeliveryRate (always 'بدون' from the sheet) is intentionally ignored.
+          const insertResult = await pool.query(
+            `INSERT INTO orders
+               ("FullName", "Phone", "DeliveryRate", "City", "Address",
+                "Status", "Note", "ProductName", "ProductPrice", "AssignedTo",
+                referral_code, sheet_row_index, business_id)
+             VALUES ($1, $2, 'بدون', $3, $4, 'جديد', $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (business_id, sheet_row_index) DO NOTHING
+             RETURNING id`,
+            [
+              orderData.FullName     || null,  // $1
+              orderData.Phone        || null,  // $2
+              orderData.City         || null,  // $3
+              orderData.Address      || null,  // $4
+              orderData.Note         || null,  // $5
+              orderData.ProductName  || null,  // $6
+              orderData.ProductPrice || null,  // $7
+              assignedTo,                      // $8
+              referralCode,                    // $9 — Media-Buyer attribution (nullable)
+              sheetRowIndex,                   // $10 — idempotency key
+              defaultBusinessId,               // $11 — ORIGINAL tenant
+            ]
+          );
+          insertedId = insertResult.rows[0]?.id;
+          if (insertedId) {
+            // NEW row only — fire-and-forget enrichment (never on a duplicate).
+            enrichDeliveryRate(insertedId, orderData.Phone);
+            syncedCount++;
+          } else {
+            // Already imported by sheet_row_index conflict — mark synced, don't enrich.
+            skippedCount++;
+          }
         }
 
         // Mark the source row synced regardless, so the sheet stops re-sending it.
@@ -125,7 +152,7 @@ const startOrderSyncCron = () => {
         }, { timeout: SHEET_TIMEOUT_MS });
       }
 
-      console.log(`✅ Synced ${syncedCount} new order(s), skipped ${skippedCount} already-imported. Agents in rotation: ${agents.length || 'none (unassigned)'}`);
+      console.log(`✅ Synced ${syncedCount} new order(s), skipped ${skippedCount} already-imported, ${crossChannelSkipped} webhook-duplicate(s). Agents in rotation: ${agents.length || 'none (unassigned)'}`);
     } catch (error) {
       console.error('❌ Error syncing from sheets:', error.message);
     }
