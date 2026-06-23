@@ -313,6 +313,47 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   /* Customer phone — the matching key for the Safqa status webhook. */
   const clientPhone = normalizePhone(pick('client_phone1', 'client_phone', 'phone', 'client_phone2', 'mobile'));
 
+  /* ── CROSS-CHANNEL DEDUP (EasyOrder UUID ⨯ Safqa serial) ─────────────────────
+     The SAME physical order can arrive under two different keys: the EasyOrder
+     creation webhook stores it keyed by EasyOrder's UUID, while Safqa's CSV/serial
+     stores it keyed by the 'sk-…' serial. Because the upsert key is external_id,
+     the two never collide → a DUPLICATE row (double-counted orders + money) — the
+     exact regression that inflated the affiliate dashboard.
+     Guard: when THIS external_id is NEW and an OPEN (pending/confirmed) row for the
+     same tenant + phone already exists under a DIFFERENT key, UPDATE that row and
+     SKIP the insert. Strictly gated to EXACTLY ONE open phone-match so genuine
+     re-orders on the same phone are never wrongly merged. Commission (total) is
+     filled COALESCE-style so a real value never reverts to 0. */
+  if (clientPhone) {
+    const merged = await pool.query(
+      `UPDATE external_affiliate_orders e
+          SET status=$3, status_ar=$4, status_class=$5,
+              total        = COALESCE(NULLIF($6::numeric, 0), e.total),
+              marketer     = COALESCE($7, e.marketer),
+              product_name = COALESCE($8, e.product_name),
+              sku          = COALESCE($9, e.sku),
+              governorate  = COALESCE($10, e.governorate),
+              note         = COALESCE($11, e.note),
+              quantity     = COALESCE($12, e.quantity),
+              updated_at   = NOW()
+        WHERE e.id = (
+                SELECT id FROM external_affiliate_orders
+                 WHERE business_id=$2 AND network='safqa' AND client_phone=$13
+                   AND external_id <> $1 AND status_class IN ('pending','confirmed')
+                 ORDER BY updated_at DESC LIMIT 1)
+          AND NOT EXISTS (SELECT 1 FROM external_affiliate_orders
+                           WHERE business_id=$2 AND network='safqa' AND external_id=$1)
+          AND (SELECT COUNT(*) FROM external_affiliate_orders
+                WHERE business_id=$2 AND network='safqa' AND client_phone=$13
+                  AND external_id <> $1 AND status_class IN ('pending','confirmed')) = 1
+        RETURNING e.external_id`,
+      [externalId, businessId, status, statusAr, statusClass, total, marketer,
+       productName, sku, governorate, note, quantity, clientPhone]);
+    if (merged.rows.length) {
+      return { ok: true, inserted: false, deduped: true, externalId: merged.rows[0].external_id, statusClass };
+    }
+  }
+
   const { rows } = await pool.query(
     `INSERT INTO external_affiliate_orders
        (network, external_id, business_id, status, status_ar, status_class, total, marketer,
