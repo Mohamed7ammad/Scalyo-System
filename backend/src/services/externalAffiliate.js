@@ -216,6 +216,17 @@ function classifySafqaStatus(status) {
   return SAFQA_STATUS_CLASS[String(status || '').trim().toLowerCase()] || 'pending';
 }
 
+/* Canonical marketer code. Safqa uses '-' (or blank) for organic / own-store
+   orders → the MAIN ACCOUNT. Normalise those to 'main_account' so the dashboard's
+   "الحساب الأساسي" filter (marketer = 'main_account') aggregates them correctly.
+   Any real marketer code/UTM/Sub-ID passes through unchanged. */
+const MAIN_ACCOUNT_MARKETER = 'main_account';
+function normalizeMarketer(raw) {
+  const m = (raw == null ? '' : String(raw)).trim();
+  if (m === '' || m === '-') return MAIN_ACCOUNT_MARKETER;
+  return m;
+}
+
 /* ── Primary ("hero/hook") product attribution ──────────────────────────────
    Safqa concatenates multi-item orders — SKUs as "A, B" and product names as
    "(1) Product A -- (1) Product B" — yet bills ONE commission per ORDER (no
@@ -275,7 +286,12 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   const statusAr    = order?.status_ar != null ? String(order.status_ar) : null;
   const statusClass = classifySafqaStatus(status);
   const total       = num(order?.total);
-  const marketer    = order?.marketer != null ? String(order.marketer) : null;
+  /* Marketer normalisation — Safqa marks organic/own-store sales with a literal
+     '-' (or leaves it blank). Those are the MAIN ACCOUNT's orders, so canonicalise
+     '-'/empty/null → 'main_account' AT INGEST. Without this they accumulate as '-'
+     and the "الحساب الأساسي" filter (marketer='main_account') misses them — the
+     exact regression behind Main Account showing only 1 order. */
+  const marketer    = normalizeMarketer(order?.marketer);
   /* Product / logistics fields — tolerant of the various keys Safqa (webhook) and
      the CSV backfill use. Feed the affiliate dashboard's lower widgets. */
   const pick = (...keys) => {
