@@ -455,8 +455,24 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   /* Global Product Filter — the dropdown passes the product_name; we match it
      against product_name OR sku. NULL = all products. */
   const product   = (opts.product && opts.product !== 'كل المنتجات') ? String(opts.product).trim() : null;
-  /* Reusable product predicate; $n is the product param position in each call. */
-  const prodPred  = (n) => ` AND ($${n}::text IS NULL OR product_name = $${n} OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($${n})))`;
+  /* Clean base product name: strip a leading "(N)" quantity tag and the "قطعة"
+     (piece) word so naming variants of ONE physical product collapse to a single
+     label (e.g. "(1) قطعة حزام… - مستورد" / "(3) قطعة حزام…" / "قطعة حزام…" → "حزام… - مستورد"). */
+  const cleanName = (col) => `TRIM(regexp_replace(${col}, '^\\s*(\\(\\s*\\d+\\s*\\)\\s*)?(قطعة\\s+)?', ''))`;
+  /* Base SKU = first code when an order carries a comma-joined multi-item SKU. */
+  const baseSku   = (col) => `UPPER(TRIM(split_part(${col}, ',', 1)))`;
+  /* Reusable product predicate ($n = product param). The dropdown now sends a CLEAN
+     base name (one per SKU), so resolve it back to EVERY row of the same product:
+     match the clean name directly (covers no-SKU rows) OR any row whose base SKU is
+     shared by a row with that clean name. Also still accepts a raw SKU/name. */
+  const prodPred  = (n) => ` AND ($${n}::text IS NULL
+       OR product_name = $${n}
+       OR ${cleanName('product_name')} = $${n}
+       OR ${baseSku('sku')} = UPPER(TRIM($${n}))
+       OR ${baseSku('sku')} IN (
+            SELECT ${baseSku('s2.sku')} FROM external_affiliate_orders s2
+             WHERE s2.business_id = $1 AND s2.network = 'safqa'
+               AND COALESCE(TRIM(s2.sku),'') <> '' AND ${cleanName('s2.product_name')} = $${n}))`;
   /* Global Campaign Filter — the dropdown passes a Meta campaign NAME. An order
      belongs to that campaign when the campaign name CONTAINS the order's SKU (the
      SAME naming convention the ad-spend attribution uses). Row-wise predicate —
@@ -551,7 +567,9 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
                WHERE o.business_id = $1::integer AND o.network = 'safqa'
                  AND COALESCE(TRIM(o.sku), '') <> ''
                  AND UPPER(e.campaign_name) LIKE '%' || UPPER(TRIM(o.sku)) || '%'
-                 AND ($4::text IS NULL OR o.product_name = $4 OR UPPER(TRIM(COALESCE(o.sku,''))) = UPPER(TRIM($4)))
+                 AND ($4::text IS NULL OR o.product_name = $4
+                      OR ${cleanName('o.product_name')} = $4
+                      OR ${baseSku('o.sku')} = UPPER(TRIM($4)))
             )`,
     [businessId, startDate, endDate, product, campaign, adAccountIds]
   ).catch((err) => {
@@ -681,12 +699,23 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
   /* $1 tenant · $2 start · $3 end · $4 product · $5 campaign · $6 referralCodes (marketer).
      created_at is the order-placement date (back-dated from the CSV / set by the webhook). */
   const params = [businessId, startDate, endDate, product, campaign, referralCodes];
+  /* Clean base name + base SKU helpers (see aggregateSafqaFromDb for rationale):
+     collapse "(N) قطعة …" naming variants of one product into a single label, and
+     take the first code from a comma-joined multi-item SKU. */
+  const cleanName = (col) => `TRIM(regexp_replace(${col}, '^\\s*(\\(\\s*\\d+\\s*\\)\\s*)?(قطعة\\s+)?', ''))`;
+  const baseSku   = (col) => `UPPER(TRIM(split_part(${col}, ',', 1)))`;
   const where = `
     FROM external_affiliate_orders
     WHERE network = 'safqa' AND business_id = $1
       AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
       AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
-      AND ($4::text IS NULL OR product_name = $4 OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($4)))
+      AND ($4::text IS NULL OR product_name = $4
+           OR ${cleanName('product_name')} = $4
+           OR ${baseSku('sku')} = UPPER(TRIM($4))
+           OR ${baseSku('sku')} IN (
+                SELECT ${baseSku('s2.sku')} FROM external_affiliate_orders s2
+                 WHERE s2.business_id = $1 AND s2.network = 'safqa'
+                   AND COALESCE(TRIM(s2.sku),'') <> '' AND ${cleanName('s2.product_name')} = $4))
       AND ($5::text IS NULL OR (COALESCE(TRIM(sku),'') <> '' AND UPPER($5::text) LIKE '%' || UPPER(TRIM(sku)) || '%'))
       AND ($6::text[] IS NULL OR marketer = ANY($6::text[]))`;
 
@@ -717,21 +746,37 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
                ${REV}                                     AS revenue
         ${where}
         GROUP BY 1 ORDER BY delivered DESC, total_orders DESC LIMIT 50`, params),
+      /* Rejection-reasons distribution. Safqa does NOT send a granular per-order
+         reason (no cancel_reason/rejection_reason column, none in raw), and the
+         `note` column holds CUSTOMER DELIVERY notes ("مستعجل", "عايز يستلم الخميس"),
+         not failure causes. The authoritative failure reason we DO have is the
+         Safqa status itself.
+         SCOPE (per business decision): ONLY pre-shipping call-center cancellations
+         (status_class='cancelled' → ملغي). Post-shipping returns (مرتجع / جار
+         الاسترجاع) are courier/shipping issues and are deliberately EXCLUDED so this
+         chart isolates lead-quality / call-center cancellation performance. */
       pool.query(`
-        SELECT COALESCE(NULLIF(TRIM(note), ''), 'غير محدد')        AS reason,
+        SELECT COALESCE(NULLIF(TRIM(status_ar), ''), 'غير محدد')   AS reason,
                COUNT(*)::int                              AS count
-        ${where} AND ${RET}
+        ${where} AND status_class = 'cancelled'
         GROUP BY 1 ORDER BY count DESC`, params),
+      /* Detailed Product Performance — ONE row per physical product. Group by base
+         SKU (first code of a multi-item SKU); rows with no SKU fall back to their
+         clean base name. Display = the most common clean base name for that group,
+         so quantity/wording variants ("(1) قطعة …", "(3) قطعة …") collapse cleanly. */
       pool.query(`
-        SELECT COALESCE(NULLIF(TRIM(product_name), ''), 'غير محدد') AS product_name,
-               MAX(COALESCE(NULLIF(TRIM(sku), ''), ''))   AS sku,
+        SELECT COALESCE(NULLIF(${baseSku('sku')}, ''),
+                        'NAME:' || COALESCE(NULLIF(${cleanName('product_name')}, ''), 'غير محدد')) AS group_key,
+               COALESCE(MAX(NULLIF(${baseSku('sku')}, '')), '')                          AS sku,
+               COALESCE(mode() WITHIN GROUP (ORDER BY NULLIF(${cleanName('product_name')}, '')),
+                        'غير محدد')                                                       AS product_name,
                COUNT(*)::int                              AS total_orders,
                COUNT(*) FILTER (WHERE ${CONF})::int       AS confirmed,
                COUNT(*) FILTER (WHERE ${DELV})::int       AS delivered,
                COUNT(*) FILTER (WHERE ${RET})::int        AS returned,
                ${REV}                                     AS delivered_revenue
         ${where}
-        GROUP BY 1 ORDER BY delivered_revenue DESC`, params),
+        GROUP BY group_key ORDER BY delivered_revenue DESC`, params),
       /* Meta campaign-level spend for THIS tenant (the affiliate's own ad spend),
          date-filtered on expense_date. Attributed per product in JS by the
          naming convention: campaign name CONTAINS the product SKU. Strictly
