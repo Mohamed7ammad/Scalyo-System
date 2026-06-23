@@ -1133,6 +1133,9 @@ export const MANUAL_CATEGORIES: Record<
   PACKAGING_COST:                { type: 'expense', label: 'تغليف'            },
   SHIPPING_PACKAGE_SUBSCRIPTION: { type: 'expense', label: 'باقة شحن'         },
   OPERATIONAL_EXPENSE:           { type: 'expense', label: 'مصروفات تشغيلية'  },
+  /* Stock CapEx: deducts drawer cash but is excluded from the dashboard P&L OPEX
+     (becomes COGS on delivery). Mirrors MANUAL_CATEGORIES in backend treasury.js. */
+  INVENTORY_PURCHASE:            { type: 'expense', label: 'شراء مخزون'       },
 };
 export type ManualCategory = keyof typeof MANUAL_CATEGORIES;
 
@@ -1148,6 +1151,15 @@ export interface AddTreasuryEntryPayload {
 /** Manually add a revenue or expense entry (order_id = NULL). Admin only. */
 export const addTreasuryEntry = (data: AddTreasuryEntryPayload) =>
   api.post<TreasuryTransaction>('/api/treasury', data);
+
+/** Edit a MANUAL treasury entry. Admin only. The server rejects auto-generated
+ *  rows (commissions / deposits / Bosta COD). */
+export const updateTreasuryEntry = (id: number, data: AddTreasuryEntryPayload) =>
+  api.put<TreasuryTransaction>(`/api/treasury/${id}`, data);
+
+/** Delete a MANUAL treasury entry. Admin only. Auto-generated rows are rejected. */
+export const deleteTreasuryEntry = (id: number) =>
+  api.delete<{ success: boolean; id: number }>(`/api/treasury/${id}`);
 
 /** Fetch all treasury transactions + pre-computed summary. Admin only. */
 export const getTreasury = () =>

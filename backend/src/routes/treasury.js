@@ -37,6 +37,10 @@ const MANUAL_CATEGORIES = {
   AD_SPEND:                      { type: 'expense', label: 'مصاريف إعلانات'    },
   SHIPPING_PACKAGE_SUBSCRIPTION: { type: 'expense', label: 'باقة شحن'          },
   OPERATIONAL_EXPENSE:           { type: 'expense', label: 'مصروفات تشغيلية'   },
+  /* Stock CapEx: deducts cash from the drawer like any expense, but is EXCLUDED
+     from the dashboard P&L OPEX (analytics.js) — inventory becomes COGS on
+     delivery, it is not an operating cost. Still counted in the cash balance.  */
+  INVENTORY_PURCHASE:            { type: 'expense', label: 'شراء مخزون'        },
 };
 
 /* ── Idempotent schema bootstrap ──────────────────────────────────────────
@@ -562,6 +566,120 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 
   } catch (err) {
     console.error('[treasury POST] Error:', err.message, err.stack);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── Auto-generated sources (reconciled from orders) — NEVER hand-editable ─────
+   These rows are created/maintained by the order lifecycle + backfills and are
+   keyed by order_id with partial-unique indexes. Editing or deleting them from
+   the UI would corrupt reconciliation, so both endpoints below refuse them. A
+   manual entry is identified by order_id IS NULL.                              */
+const RESERVED_AUTO_SOURCES = new Set([
+  'bosta_cod', 'deposit',
+  'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
+]);
+
+/* Load a tenant-scoped, MANUAL (order_id IS NULL) transaction or send the right
+   error. Returns the row on success, or null after responding.                 */
+async function loadEditableTxn(req, res) {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'معرّف العملية غير صالح' });
+    return null;
+  }
+  const { rows } = await pool.query(
+    `SELECT id, order_id, source, type FROM treasury_transactions
+      WHERE id = $1 AND business_id = $2::integer`,
+    [id, req.user.business_id]);
+  const row = rows[0];
+  if (!row) {
+    res.status(404).json({ error: 'العملية غير موجودة' });
+    return null;
+  }
+  if (row.order_id !== null || RESERVED_AUTO_SOURCES.has(row.source)) {
+    res.status(409).json({
+      error: 'لا يمكن تعديل أو حذف عملية مُولّدة تلقائياً (عمولة / تحصيل / عربون). عدّل الطلب نفسه بدلاً من ذلك.',
+    });
+    return null;
+  }
+  return row;
+}
+
+/* ── Edit a manual treasury transaction ───────────────────────────────────────
+   PUT /api/treasury/:id  — admin only, tenant-scoped, manual rows only.
+   Body: { amount, type, source, description, transaction_date } (same shape as
+   POST). type is re-derived from a known category, else the supplied type.     */
+router.put('/:id', authenticate, requireAdmin, async (req, res) => {
+  const row = await loadEditableTxn(req, res);
+  if (!row) return;
+
+  const { amount, type, source, description, transaction_date } = req.body;
+
+  const parsed = parseFloat(amount);
+  if (amount === undefined || amount === null || isNaN(parsed) || parsed <= 0) {
+    return res.status(400).json({ error: 'المبلغ مطلوب ويجب أن يكون رقماً موجباً' });
+  }
+  if (!source || !String(source).trim()) {
+    return res.status(400).json({ error: 'المصدر / التصنيف مطلوب' });
+  }
+  const sourceCode = String(source).trim();
+  if (RESERVED_AUTO_SOURCES.has(sourceCode)) {
+    return res.status(400).json({ error: 'لا يمكن استخدام تصنيف مُولّد تلقائياً لعملية يدوية' });
+  }
+
+  const category = MANUAL_CATEGORIES[sourceCode];
+  let resolvedType;
+  if (category) {
+    resolvedType = category.type;
+  } else if (['revenue', 'expense'].includes(String(type))) {
+    resolvedType = String(type);
+  } else {
+    return res.status(400).json({ error: 'النوع يجب أن يكون revenue أو expense' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE treasury_transactions
+          SET amount           = $1,
+              type             = $2,
+              source           = $3,
+              description      = $4,
+              transaction_date = COALESCE($5::date, transaction_date)
+        WHERE id = $6 AND business_id = $7::integer AND order_id IS NULL
+        RETURNING
+          id, order_id, amount::float AS amount, type, source, description,
+          TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, created_at`,
+      [
+        parsed.toFixed(2), resolvedType, sourceCode,
+        description ? String(description).trim() || null : null,
+        transaction_date || null,
+        row.id, req.user.business_id,
+      ]);
+    if (!rows[0]) return res.status(404).json({ error: 'العملية غير موجودة' });
+    console.log(`✏️   Treasury entry #${row.id} edited → ${resolvedType} ${parsed.toFixed(2)} EGP "${sourceCode}"`);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[treasury PUT] Error:', err.message, err.stack);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── Delete a manual treasury transaction ─────────────────────────────────────
+   DELETE /api/treasury/:id  — admin only, tenant-scoped, manual rows only.     */
+router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
+  const row = await loadEditableTxn(req, res);
+  if (!row) return;
+  try {
+    const { rowCount } = await pool.query(
+      `DELETE FROM treasury_transactions
+        WHERE id = $1 AND business_id = $2::integer AND order_id IS NULL`,
+      [row.id, req.user.business_id]);
+    if (!rowCount) return res.status(404).json({ error: 'العملية غير موجودة' });
+    console.log(`🗑️   Treasury entry #${row.id} deleted (source "${row.source}")`);
+    res.json({ success: true, id: row.id });
+  } catch (err) {
+    console.error('[treasury DELETE] Error:', err.message, err.stack);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });

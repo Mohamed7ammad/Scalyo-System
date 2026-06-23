@@ -6,6 +6,8 @@ import {
   getTreasury,
   getCommissionsBreakdown,
   addTreasuryEntry,
+  updateTreasuryEntry,
+  deleteTreasuryEntry,
   getBostaWallet,
   TreasuryTransaction,
   TreasurySummary,
@@ -186,7 +188,22 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
     label: 'مصروفات تشغيلية',
     cls: 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700/40',
   },
+  INVENTORY_PURCHASE: {
+    label: 'شراء مخزون',
+    cls: 'bg-cyan-100 text-cyan-700 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-300 dark:border-cyan-700/40',
+  },
 };
+
+/* Auto-generated sources (reconciled from orders) — NOT editable/deletable from
+   the UI. Mirrors RESERVED_AUTO_SOURCES in backend treasury.js. A manual row is
+   identified by order_id === null AND a source outside this set. */
+const RESERVED_AUTO_SOURCES = new Set([
+  'bosta_cod', 'deposit',
+  'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
+]);
+function isEditableTxn(t: TreasuryTransaction): boolean {
+  return t.order_id == null && !RESERVED_AUTO_SOURCES.has(t.source);
+}
 
 function SourceBadge({ source }: { source: string }) {
   const meta = SOURCE_META[source] ?? {
@@ -438,6 +455,7 @@ const CATEGORY_OPTIONS: { code: string; label: string }[] = [
   { code: 'PACKAGING_COST',                label: 'تغليف' },
   { code: 'SHIPPING_PACKAGE_SUBSCRIPTION', label: 'باقة شحن' },
   { code: 'OPERATIONAL_EXPENSE',           label: 'مصروفات تشغيلية' },
+  { code: 'INVENTORY_PURCHASE',            label: 'شراء مخزون (لا يُحتسب ضمن مصاريف التشغيل)' },
 ];
 
 interface AddEntryForm {
@@ -449,11 +467,17 @@ interface AddEntryForm {
 function AddEntryModal({
   onClose,
   onSaved,
+  editing,
 }: {
   onClose: () => void;
   onSaved: (entry: TreasuryTransaction) => void;
+  editing?: TreasuryTransaction | null;
 }) {
-  const [form,   setForm]   = useState<AddEntryForm>({ category: '', amount: '', description: '' });
+  const [form,   setForm]   = useState<AddEntryForm>({
+    category:    editing?.source ?? '',
+    amount:      editing ? String(editing.amount) : '',
+    description: editing?.description ?? '',
+  });
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState('');
 
@@ -464,6 +488,12 @@ function AddEntryModal({
   /* Derived sign of the currently selected category (drives the +/− preview). */
   const selected = form.category ? MANUAL_CATEGORIES[form.category] : null;
   const isIncome = selected?.type === 'revenue';
+
+  /* When editing a row whose source is a custom/free-text code not in the preset
+     list, surface it as a selectable option so the dropdown reflects reality. */
+  const categoryOptions = editing && !CATEGORY_OPTIONS.some((c) => c.code === editing.source)
+    ? [{ code: editing.source, label: editing.source }, ...CATEGORY_OPTIONS]
+    : CATEGORY_OPTIONS;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -477,12 +507,18 @@ function AddEntryModal({
     }
     setSaving(true);
     try {
+      const known = MANUAL_CATEGORIES[form.category];
       const payload: AddTreasuryEntryPayload = {
         amount,
-        source:      form.category,   // server derives revenue/expense from this
+        source:      form.category,   // server derives revenue/expense from a known category
         description: form.description.trim() || undefined,
+        /* Custom (non-preset) source has no implicit sign → carry the explicit type
+           (preserve the existing one when editing, else default to expense). */
+        ...(known ? {} : { type: (editing?.type === 'revenue' ? 'revenue' : 'expense') as 'revenue' | 'expense' }),
       };
-      const res = await addTreasuryEntry(payload);
+      const res = editing
+        ? await updateTreasuryEntry(editing.id, payload)
+        : await addTreasuryEntry(payload);
       onSaved(res.data);
     } catch (ex: unknown) {
       const msg = (ex as { response?: { data?: { error?: string } } })?.response?.data?.error;
@@ -515,7 +551,9 @@ function AddEntryModal({
               </svg>
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white">إضافة معاملة يدوية</h2>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                {editing ? 'تعديل معاملة يدوية' : 'إضافة معاملة يدوية'}
+              </h2>
               <p className="text-xs text-slate-400">تغليف · شحن · إعلانات · غيرها</p>
             </div>
           </div>
@@ -540,7 +578,7 @@ function AddEntryModal({
             </label>
             <select value={form.category} onChange={handle('category')} className={inputCls}>
               <option value="" disabled>— اختر نوع المعاملة —</option>
-              {CATEGORY_OPTIONS.map((c) => (
+              {categoryOptions.map((c) => (
                 <option key={c.code} value={c.code}>{c.label}</option>
               ))}
             </select>
@@ -601,7 +639,7 @@ function AddEntryModal({
                 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white rounded-xl
                 text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
             >
-              {saving ? <><Spin sm /> جارٍ الحفظ…</> : 'حفظ المعاملة'}
+              {saving ? <><Spin sm /> جارٍ الحفظ…</> : (editing ? 'حفظ التعديلات' : 'حفظ المعاملة')}
             </button>
             <button
               type="button"
@@ -614,6 +652,99 @@ function AddEntryModal({
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   DeleteConfirmModal — confirm removal of a manual transaction
+───────────────────────────────────────────────────────────────────────────── */
+function DeleteConfirmModal({
+  txn,
+  onClose,
+  onConfirm,
+}: {
+  txn:       TreasuryTransaction;
+  onClose:   () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err,  setErr]  = useState('');
+
+  const confirm = async () => {
+    setBusy(true);
+    setErr('');
+    try {
+      await onConfirm();
+    } catch (ex: unknown) {
+      const msg = (ex as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setErr(msg || 'فشل حذف المعاملة');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <div
+        className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm border border-slate-200 dark:border-slate-700"
+        dir="rtl"
+      >
+        <div className="p-6">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="w-10 h-10 rounded-xl bg-red-100 dark:bg-red-900/40 flex items-center justify-center shrink-0">
+              <svg className="w-5 h-5 text-red-600 dark:text-red-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">حذف المعاملة</h2>
+              <p className="text-xs text-slate-400">لا يمكن التراجع عن هذا الإجراء</p>
+            </div>
+          </div>
+
+          <p className="text-sm text-slate-600 dark:text-slate-300 mb-3">
+            هل أنت متأكد من حذف هذه المعاملة؟ سيتم تعديل رصيد الخزينة تلقائياً.
+          </p>
+          <div className="rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 px-4 py-3 mb-4 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <SourceBadge source={txn.source} />
+              <span className={`font-bold tabular-nums ${txn.type === 'revenue' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
+                {txn.type === 'expense' ? '−' : '+'}{fmt(txn.amount)} ج
+              </span>
+            </div>
+            {txn.description && (
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 line-clamp-2">{txn.description}</p>
+            )}
+          </div>
+
+          {err && <div className="mb-3"><Alert msg={err} type="error" /></div>}
+
+          <div className="flex gap-3">
+            <button
+              onClick={confirm}
+              disabled={busy}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
+                bg-red-600 hover:bg-red-700 active:bg-red-800 text-white text-sm font-semibold
+                transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              {busy ? <><Spin sm /> جارٍ الحذف…</> : 'نعم، احذف'}
+            </button>
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700
+                text-sm font-medium text-slate-600 dark:text-slate-400
+                hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-50"
+            >
+              إلغاء
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -756,6 +887,8 @@ export default function TreasuryPage() {
 
   /* ── Manual entry modal state ─────────────────────────────────── */
   const [isManualEntryOpen, setIsManualEntryOpen] = useState(false);
+  const [editingTxn,  setEditingTxn]  = useState<TreasuryTransaction | null>(null);
+  const [deletingTxn, setDeletingTxn] = useState<TreasuryTransaction | null>(null);
 
   /* ── Live Bosta wallet state ──────────────────────────────────── */
   const [wallet,        setWallet]        = useState<BostaWallet | null>(null);
@@ -823,10 +956,24 @@ export default function TreasuryPage() {
     }
   };
 
-  /* ── Entry saved callback ─────────────────────────────────────── */
+  /* ── Entry saved callback (add OR edit) ───────────────────────── */
   const handleEntrySaved = (entry: TreasuryTransaction) => {
+    const wasEditing = editingTxn != null;
     setIsManualEntryOpen(false);
-    showToast(`تم حفظ المعاملة: ${entry.source} — ${fmt(entry.amount)} ج`, 'success');
+    setEditingTxn(null);
+    showToast(
+      `${wasEditing ? 'تم تعديل المعاملة' : 'تم حفظ المعاملة'}: ${entry.source} — ${fmt(entry.amount)} ج`,
+      'success',
+    );
+    loadTreasury(true);
+  };
+
+  /* ── Delete callback — throws on failure so the modal can surface it ── */
+  const handleDelete = async () => {
+    if (!deletingTxn) return;
+    await deleteTreasuryEntry(deletingTxn.id);
+    showToast('تم حذف المعاملة بنجاح', 'success');
+    setDeletingTxn(null);
     loadTreasury(true);
   };
 
@@ -883,11 +1030,29 @@ export default function TreasuryPage() {
         />
       )}
 
-      {/* ── Manual entry modal ──────────────────────────────────── */}
+      {/* ── Manual entry modal (add) ────────────────────────────── */}
       {isManualEntryOpen && (
         <AddEntryModal
           onClose={() => setIsManualEntryOpen(false)}
           onSaved={handleEntrySaved}
+        />
+      )}
+
+      {/* ── Manual entry modal (edit) ───────────────────────────── */}
+      {editingTxn && (
+        <AddEntryModal
+          editing={editingTxn}
+          onClose={() => setEditingTxn(null)}
+          onSaved={handleEntrySaved}
+        />
+      )}
+
+      {/* ── Delete confirmation modal ───────────────────────────── */}
+      {deletingTxn && (
+        <DeleteConfirmModal
+          txn={deletingTxn}
+          onClose={() => setDeletingTxn(null)}
+          onConfirm={handleDelete}
         />
       )}
 
@@ -1289,7 +1454,7 @@ export default function TreasuryPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-100 dark:border-slate-800">
-                      {['#', 'طلب', 'المبلغ', 'النوع', 'المصدر', 'الوصف', 'التاريخ'].map((h) => (
+                      {['#', 'طلب', 'المبلغ', 'النوع', 'المصدر', 'الوصف', 'التاريخ', 'إجراءات'].map((h) => (
                         <th
                           key={h}
                           className="text-right text-xs font-semibold text-slate-500 dark:text-slate-400 px-4 py-3 whitespace-nowrap"
@@ -1340,6 +1505,36 @@ export default function TreasuryPage() {
                         <td className="px-4 py-3 whitespace-nowrap text-xs text-slate-500 dark:text-slate-400">
                           {fmtDate(t.transaction_date)}
                         </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          {isEditableTxn(t) ? (
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => setEditingTxn(t)}
+                                title="تعديل"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50
+                                  dark:hover:text-indigo-400 dark:hover:bg-indigo-900/30 transition-colors"
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                </svg>
+                              </button>
+                              <button
+                                onClick={() => setDeletingTxn(t)}
+                                title="حذف"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50
+                                  dark:hover:text-red-400 dark:hover:bg-red-900/30 transition-colors"
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-slate-300 dark:text-slate-600 text-xs" title="معاملة تلقائية — تُدار من الطلب">🔒</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1369,6 +1564,7 @@ export default function TreasuryPage() {
                   {key === 'PACKAGING_COST'                && 'تكاليف التغليف والتعبئة'}
                   {key === 'SHIPPING_PACKAGE_SUBSCRIPTION' && 'اشتراك باقة الشحن'}
                   {key === 'OPERATIONAL_EXPENSE'           && 'مصروفات تشغيلية عامة'}
+                  {key === 'INVENTORY_PURCHASE'            && 'شراء مخزون — يُخصم من النقد ولا يدخل ضمن مصاريف التشغيل'}
                 </span>
               </div>
             ))}

@@ -876,7 +876,9 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         FROM   treasury_transactions
         WHERE  business_id = $1::integer
           AND  type = 'expense'
-          AND  source <> 'AD_SPEND'
+          /* Mirror the dashboard opexSql: exclude AD_SPEND (Meta-synced) and
+             INVENTORY_PURCHASE (stock CapEx, not an operating cost) from P&L OPEX. */
+          AND  source NOT IN ('AD_SPEND', 'INVENTORY_PURCHASE')
           AND  ($2::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') >= $2)
           AND  ($3::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') <= $3)
         GROUP  BY source
@@ -1408,7 +1410,11 @@ router.get('/dashboard', authenticate, async (req, res) => {
     FROM   treasury_transactions
     WHERE  business_id = $1::integer
       AND  type   = 'expense'
-      AND  source <> 'AD_SPEND'
+      /* P&L OPEX excludes: AD_SPEND (owned by the Meta-synced expenses table) and
+         INVENTORY_PURCHASE (a stock CapEx — cash leaves the drawer but it becomes
+         an inventory asset, recognised as COGS on delivery, NOT an operating cost).
+         Both are still counted in the Treasury cash balance (treasury.js).        */
+      AND  source NOT IN ('AD_SPEND', 'INVENTORY_PURCHASE')
       AND  ($2::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') >= $2)
       AND  ($3::text IS NULL OR TO_CHAR(transaction_date, 'YYYY-MM-DD') <= $3)
     GROUP  BY source
