@@ -202,7 +202,9 @@ const RESERVED_AUTO_SOURCES = new Set([
   'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
 ]);
 function isEditableTxn(t: TreasuryTransaction): boolean {
-  return t.order_id == null && !RESERVED_AUTO_SOURCES.has(t.source);
+  /* Locked when linked to an order (commission/deposit/COD), a reserved auto
+     source, OR an inventory supply batch (purchase_order_id) — all system-posted. */
+  return t.order_id == null && t.purchase_order_id == null && !RESERVED_AUTO_SOURCES.has(t.source);
 }
 
 function SourceBadge({ source }: { source: string }) {

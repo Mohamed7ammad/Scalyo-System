@@ -1070,6 +1070,9 @@ export interface TreasuryTransaction {
   type:             'revenue' | 'expense' | string;
   source:           string;
   description:      string | null;
+  /** Set for system-posted inventory purchases (linked to a supply batch).
+   *  Non-null ⇒ the row is locked (no manual edit/delete). */
+  purchase_order_id?: string | null;
   transaction_date: string;   // YYYY-MM-DD
   created_at:       string;   // ISO timestamp
 }

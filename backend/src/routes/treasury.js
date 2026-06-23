@@ -93,6 +93,19 @@ pool.query(`
     ON treasury_transactions (order_id)
     WHERE source = 'comm_no_answer'
 `))
+/* Link to the inventory supply batch (purchase_orders.id is a UUID). Auto-
+   generated INVENTORY_PURCHASE rows carry this so the UI/API can LOCK them
+   (employees can't hand-edit a system-posted stock purchase). The partial
+   unique index also makes the auto-insert idempotent (one treasury row per
+   shipment, ON CONFLICT DO NOTHING). */
+.then(() => pool.query(`
+  ALTER TABLE treasury_transactions ADD COLUMN IF NOT EXISTS purchase_order_id UUID
+`))
+.then(() => pool.query(`
+  CREATE UNIQUE INDEX IF NOT EXISTS treasury_purchase_order_uidx
+    ON treasury_transactions (purchase_order_id)
+    WHERE purchase_order_id IS NOT NULL
+`))
 .then(() => console.log('✅  Treasury: table + all partial indexes ready'))
 .then(() => backfillTreasury())
 .catch((err) => console.warn('⚠️   Treasury schema migration:', err.message));
@@ -282,6 +295,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
           type,
           source,
           description,
+          purchase_order_id,
           TO_CHAR(transaction_date, 'YYYY-MM-DD')  AS transaction_date,
           created_at
         FROM   treasury_transactions
@@ -589,7 +603,7 @@ async function loadEditableTxn(req, res) {
     return null;
   }
   const { rows } = await pool.query(
-    `SELECT id, order_id, source, type FROM treasury_transactions
+    `SELECT id, order_id, source, type, purchase_order_id FROM treasury_transactions
       WHERE id = $1 AND business_id = $2::integer`,
     [id, req.user.business_id]);
   const row = rows[0];
@@ -597,9 +611,13 @@ async function loadEditableTxn(req, res) {
     res.status(404).json({ error: 'العملية غير موجودة' });
     return null;
   }
-  if (row.order_id !== null || RESERVED_AUTO_SOURCES.has(row.source)) {
+  /* Locked when: linked to an order (commission/deposit/COD), a reserved auto
+     source, OR linked to an inventory supply batch (purchase_order_id). These are
+     system-posted and must be corrected at their source (the order / the shipment),
+     never hand-edited in the ledger. */
+  if (row.order_id !== null || row.purchase_order_id !== null || RESERVED_AUTO_SOURCES.has(row.source)) {
     res.status(409).json({
-      error: 'لا يمكن تعديل أو حذف عملية مُولّدة تلقائياً (عمولة / تحصيل / عربون). عدّل الطلب نفسه بدلاً من ذلك.',
+      error: 'لا يمكن تعديل أو حذف عملية مُولّدة تلقائياً (عمولة / تحصيل / عربون / شراء مخزون). عدّل المصدر الأصلي بدلاً من ذلك.',
     });
     return null;
   }

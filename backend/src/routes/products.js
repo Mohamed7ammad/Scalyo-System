@@ -261,10 +261,32 @@ router.post('/purchases', authenticate, requireAdmin, async (req, res) => {
       ? purchaseDate
       : null;   // DB default (CURRENT_DATE) takes over when null
 
-    await client.query(
+    const poResult = await client.query(
       `INSERT INTO purchase_orders (product_id, quantity, cost_price, purchase_date, business_id)
-       VALUES ($1, $2, $3, COALESCE($4::date, CURRENT_DATE), $5)`,
+       VALUES ($1, $2, $3, COALESCE($4::date, CURRENT_DATE), $5)
+       RETURNING id`,
       [productId, qty, cost, insertDate, businessId]
+    );
+    const purchaseOrderId = poResult.rows[0].id;
+
+    /* Step E: financial link — post the cash-out to the treasury so the drawer
+       balance reflects the stock purchase automatically (modules were previously
+       disconnected). source='INVENTORY_PURCHASE' is EXCLUDED from the dashboard
+       P&L OPEX (it becomes COGS on delivery) but still counts in the cash balance.
+       purchase_order_id ties it to this batch → the row is LOCKED in the UI/API
+       (no manual edit/delete). ON CONFLICT keeps the whole thing idempotent if the
+       request is retried. */
+    const totalCost = parseFloat((qty * cost).toFixed(2));
+    await client.query(
+      `INSERT INTO treasury_transactions
+         (order_id, amount, type, source, description, transaction_date, business_id, purchase_order_id)
+       VALUES (NULL, $1, 'expense', 'INVENTORY_PURCHASE', $2, COALESCE($3::date, CURRENT_DATE), $4, $5)
+       ON CONFLICT (purchase_order_id) WHERE purchase_order_id IS NOT NULL DO NOTHING`,
+      [
+        totalCost,
+        `فاتورة مشتريات مخزون - ${product.sku} (${qty} وحدة × ${cost} ج)`,
+        insertDate, businessId, purchaseOrderId,
+      ]
     );
 
     await client.query('COMMIT');
