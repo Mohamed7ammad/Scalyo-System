@@ -59,43 +59,64 @@ function extractReferralCode(body) {
   return null;
 }
 
+/* Every payload field that can carry a media-buyer tag. FB Ads frequently
+   misplaces the campaign name into utm_source / utm_medium / referrer instead of
+   utm_campaign, so we scan ALL of them (top-level + nested utm{}/tracking{}). */
+const TRACKING_KEYS = [
+  'utm_campaign', 'utm_source', 'utm_medium', 'utm_content', 'utm_term',
+  'campaign_name', 'campaign', 'referral_code', 'referralCode', 'referral',
+  'referrer', 'ref_source', 'source', 'sub_id', 'subId', 'subid', 'aff_sub',
+];
+
+/* Collect every tracking string present in the payload (top-level, nested
+   containers, and custom_fields[]), lower-cased, for substring scanning. */
+function collectTrackingStrings(body) {
+  const out = [];
+  const push = (v) => { if (v != null && String(v).trim() !== '') out.push(String(v).trim().toLowerCase()); };
+  if (!body || typeof body !== 'object') return out;
+  for (const k of TRACKING_KEYS) push(body[k]);
+  for (const c of [body.utm, body.tracking, body.attribution, body.meta, body.marketing]) {
+    if (c && typeof c === 'object') for (const k of TRACKING_KEYS) push(c[k]);
+  }
+  const cf = body.custom_fields ?? body.customFields ?? body.fields ?? null;
+  if (Array.isArray(cf)) for (const item of cf) push(item?.value ?? item?.val);
+  return out;
+}
+
 /**
  * resolveMarketerCode — turn a raw inbound payload into a CANONICAL marketer code,
  * resolved against the tenant's KNOWN media-buyer referral codes.
  *
- * Why this exists: `utm_campaign` is the attribution source for EasyOrder affiliate
- * orders, but its value is often NOT a clean slug — it can be a full campaign name
- * that CONTAINS the buyer's name ("adham", "adham_botagaz_v2") or a bare Facebook
- * campaign id ("120245087774520218"). Returning that verbatim (the old behaviour)
- * either mis-attributes (full string ≠ 'adham') or invents junk numeric "marketers".
+ * Why this exists: media-buyer tags arrive dirty. The value can be a full campaign
+ * name CONTAINING the buyer's name ("adham", "adham_botagaz_v2"), a bare Facebook
+ * campaign id ("120245087774520218"), and FB often drops the tag into the WRONG
+ * field (utm_source/utm_medium/referrer instead of utm_campaign). Returning a
+ * single field verbatim mis-attributes or invents junk numeric "marketers".
  *
- * Resolution order against `knownCodes` (the tenant's users.referral_code list):
- *   1. exact match (case-insensitive)                      → canonical known code
- *   2. the raw value CONTAINS a known code as a substring  → that known code
- *   3. raw is all-digits (a bare FB campaign id) → null (organic / main_account)
- *   4. otherwise keep the raw code (a new/unregistered buyer tag)
+ * Resolution against `knownCodes` (the tenant's users.referral_code list):
+ *   1. Scan EVERY tracking field for a known code as an exact value or substring
+ *      (case-insensitive, longest known code wins) → that canonical known code.
+ *   2. Else fall back to the single best extract (extractReferralCode): keep an
+ *      unregistered non-numeric tag; drop a bare all-digit FB campaign id → null.
  *
  * Returns the canonical code, or null when nothing attributable is present.
  */
 function resolveMarketerCode(body, knownCodes = []) {
-  const raw = extractReferralCode(body);
-  if (!raw) return null;
-
   const codes = (Array.isArray(knownCodes) ? knownCodes : [])
     .map((c) => String(c == null ? '' : c).trim())
-    .filter(Boolean);
-  const lower = raw.toLowerCase();
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);   // longest first → "adham_pro" beats "adham"
 
-  const exact = codes.find((c) => c.toLowerCase() === lower);
-  if (exact) return exact;
+  /* 1 — aggressive: any known code appearing anywhere in any tracking field. */
+  const haystacks = collectTrackingStrings(body);
+  for (const code of codes) {
+    const needle = code.toLowerCase();
+    if (haystacks.some((h) => h === needle || h.includes(needle))) return code;
+  }
 
-  /* Longest known code first so "adham_pro" beats "adham" when both are registered. */
-  const contained = codes
-    .slice()
-    .sort((a, b) => b.length - a.length)
-    .find((c) => lower.includes(c.toLowerCase()));
-  if (contained) return contained;
-
+  /* 2 — fall back to the single best raw extract. */
+  const raw = extractReferralCode(body);
+  if (!raw) return null;
   if (/^\d+$/.test(raw)) return null;   // bare FB campaign id → not a marketer
   return raw;                           // unregistered buyer tag — keep as-is
 }
