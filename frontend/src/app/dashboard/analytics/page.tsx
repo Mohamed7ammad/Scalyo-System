@@ -550,6 +550,11 @@ export default function AnalyticsDashboard() {
   /* True for affiliate-plan tenants — hides local-inventory metrics (COGS,
      stock, product profitability) and drives the core KPIs off external data. */
   const [isAffiliate, setIsAffiliate] = useState(false);
+  /* Affiliate Detailed-Products sort (the profit columns are click-sortable).
+     Defaults to Profit-In-Progress descending, matching the column's ▼ marker. */
+  const [productSort, setProductSort] =
+    useState<{ key: 'netProfit' | 'profitInProgress' | 'futureBalance'; dir: 'asc' | 'desc' }>(
+      { key: 'profitInProgress', dir: 'desc' });
   /* Agency model: admins can filter/impersonate a specific media buyer. */
   const [isAdmin,            setIsAdmin]            = useState(false);
   const [mediaBuyer,         setMediaBuyer]         = useState('');   // '' = all buyers
@@ -1010,9 +1015,30 @@ export default function AnalyticsDashboard() {
         dr:              item.units_shipped > 0 ? safe(item.delivery_rate) : null,
         ndr:             safe(itemNdr),
         netProfit:       safe(item.net_profit),
+        /* Affiliate-only in-progress money metrics (per product). */
+        profitInProgress: safe(item.profit_in_progress),
+        futureBalance:    safe(item.future_balance),
+        forecastedNet:    safe(item.forecasted_net),
       };
     });
   }, [profitability, products, product]);
+
+  /* Affiliate-only: apply the click-to-sort on the profit columns. E-commerce
+     keeps the backend's default (revenue-desc) order untouched. */
+  const sortedProductData = useMemo(() => {
+    if (!isAffiliate) return tableProductData;
+    const { key, dir } = productSort;
+    const sign = dir === 'asc' ? 1 : -1;
+    return [...tableProductData].sort(
+      (a, b) => (Number(a[key]) - Number(b[key])) * sign
+    );
+  }, [tableProductData, isAffiliate, productSort]);
+
+  /* Toggle sort: clicking the active column flips direction; a new column
+     starts descending (largest first). */
+  const toggleProductSort = (key: 'netProfit' | 'profitInProgress' | 'futureBalance') =>
+    setProductSort((s) =>
+      s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' });
 
   /* ── PRODUCTS dropdown (built from real profitability data) ────── */
   const PRODUCTS = useMemo(
@@ -2195,20 +2221,51 @@ export default function AnalyticsDashboard() {
                 <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-900 border-b
                   border-slate-200 dark:border-slate-700">
                   <tr>
-                    {['المنتج', 'SKU', 'المخزون', 'الطلبات', 'المؤكد', 'المُسلَّم',
+                    {['المنتج', 'SKU',
+                      /* المخزون (stock) — e-commerce only; affiliates hold no stock. */
+                      ...(!isAffiliate ? ['المخزون'] : []),
+                      'الطلبات', 'المؤكد', 'المُسلَّم',
                       'إجمالي الإيرادات', 'الإنفاق الإعلاني',
                       /* COGS / Shipping / OPEX are always 0 for affiliates → hidden
                          in the affiliate view, fully kept for e-commerce. */
                       ...(!isAffiliate ? ['تكلفة البضاعة', 'مصاريف الشحن', 'المصاريف التشغيلية'] : []),
                       /* CPP الفعلي / أقصى CPP — affiliate-only (SKU-attributed ad spend). */
                       ...(isAffiliate ? ['CPP الفعلي', 'أقصى CPP'] : []),
-                      'CR%', 'DR%', 'NDR%', 'صافي الربح',
+                      'CR%', 'DR%', 'NDR%',
                     ].map((h) => (
                       <th key={h} className="px-4 py-3.5 text-right text-[11px] font-bold uppercase
                         tracking-wider text-slate-400 dark:text-slate-500 whitespace-nowrap">
                         {h}
                       </th>
                     ))}
+                    {/* Profit cluster. E-commerce: a single static Net Profit column.
+                        Affiliate: Net Profit + Profit-In-Prog. + F.B-In-Prog. (all
+                        click-sortable) + Forecasted Net. */}
+                    {!isAffiliate ? (
+                      <th className="px-4 py-3.5 text-right text-[11px] font-bold uppercase
+                        tracking-wider text-slate-400 dark:text-slate-500 whitespace-nowrap">
+                        صافي الربح
+                      </th>
+                    ) : (
+                      [
+                        { key: 'netProfit'        as const, label: 'صافي الربح',        sortable: true  },
+                        { key: 'profitInProgress' as const, label: 'ربح قيد التنفيذ',   sortable: true  },
+                        { key: 'futureBalance'    as const, label: 'رصيد مستقبلي',      sortable: true  },
+                        { key: 'forecastedNet'    as const, label: 'صافي متوقّع',        sortable: false },
+                      ].map((c) => {
+                        const active = productSort.key === c.key;
+                        const arrow  = !c.sortable ? '' : active ? (productSort.dir === 'desc' ? ' ▼' : ' ▲') : ' ↕';
+                        return (
+                          <th key={c.key}
+                            onClick={c.sortable ? () => toggleProductSort(c.key as 'netProfit' | 'profitInProgress' | 'futureBalance') : undefined}
+                            className={`px-4 py-3.5 text-right text-[11px] font-bold uppercase tracking-wider
+                              whitespace-nowrap ${c.sortable ? 'cursor-pointer select-none hover:text-slate-600 dark:hover:text-slate-300' : ''}
+                              ${active ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400 dark:text-slate-500'}`}>
+                            {c.label}{arrow}
+                          </th>
+                        );
+                      })
+                    )}
                   </tr>
                 </thead>
 
@@ -2216,20 +2273,20 @@ export default function AnalyticsDashboard() {
                   {loadingProfitability ? (
                     [...Array(4)].map((_, i) => (
                       <tr key={i}>
-                        <td colSpan={isAffiliate ? 14 : 15} className="px-4 py-2.5">
+                        <td colSpan={isAffiliate ? 16 : 15} className="px-4 py-2.5">
                           <div className="h-9 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse" />
                         </td>
                       </tr>
                     ))
                   ) : tableProductData.length === 0 ? (
                     <tr>
-                      <td colSpan={isAffiliate ? 14 : 15} className="py-14 text-center">
+                      <td colSpan={isAffiliate ? 16 : 15} className="py-14 text-center">
                         <p className="text-sm text-slate-400 dark:text-slate-600">
                           لا توجد بيانات للفترة المحددة
                         </p>
                       </td>
                     </tr>
-                  ) : tableProductData.map((p) => {
+                  ) : sortedProductData.map((p) => {
                     const losing = p.netProfit < 0;
                     return (
                       <tr key={p.sku || p.name}
@@ -2251,16 +2308,19 @@ export default function AnalyticsDashboard() {
                             {p.sku}
                           </span>
                         </td>
-                        <td className="px-4 py-3.5">
-                          <span className={`text-sm font-bold
-                            ${p.stock === 0
-                              ? 'text-red-500 dark:text-red-400'
-                              : p.stock <= 20
-                                ? 'text-amber-500 dark:text-amber-400'
-                                : 'text-emerald-600 dark:text-emerald-400'}`}>
-                            {p.stock}
-                          </span>
-                        </td>
+                        {/* المخزون (stock) — e-commerce only */}
+                        {!isAffiliate && (
+                          <td className="px-4 py-3.5">
+                            <span className={`text-sm font-bold
+                              ${p.stock === 0
+                                ? 'text-red-500 dark:text-red-400'
+                                : p.stock <= 20
+                                  ? 'text-amber-500 dark:text-amber-400'
+                                  : 'text-emerald-600 dark:text-emerald-400'}`}>
+                              {p.stock}
+                            </span>
+                          </td>
+                        )}
                         <td className="px-4 py-3.5 font-medium text-slate-700 dark:text-slate-300">{fmt(p.orders)}</td>
                         <td className="px-4 py-3.5 font-medium text-blue-600 dark:text-blue-400">
                           {p.confirmed !== null ? fmt(p.confirmed) : <span className="text-slate-300 dark:text-slate-600">—</span>}
@@ -2304,6 +2364,26 @@ export default function AnalyticsDashboard() {
                             {fmtEGP(p.netProfit)}
                           </span>
                         </td>
+                        {/* Affiliate-only: Profit-In-Prog. | F.B-In-Prog. | Forecasted Net */}
+                        {isAffiliate && (
+                          <td className="px-4 py-3.5 font-medium text-amber-600 dark:text-amber-400 whitespace-nowrap">
+                            {fmtEGP(p.profitInProgress)}
+                          </td>
+                        )}
+                        {isAffiliate && (
+                          <td className="px-4 py-3.5 font-medium text-purple-600 dark:text-purple-400 whitespace-nowrap">
+                            {fmtEGP(p.futureBalance)}
+                          </td>
+                        )}
+                        {isAffiliate && (
+                          <td className="px-4 py-3.5 whitespace-nowrap">
+                            <span className={`font-bold ${p.forecastedNet >= 0
+                              ? 'text-indigo-600 dark:text-indigo-400'
+                              : 'text-red-600 dark:text-red-400'}`}>
+                              {fmtEGP(p.forecastedNet)}
+                            </span>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -2321,16 +2401,22 @@ export default function AnalyticsDashboard() {
                   const totShipping   = tableProductData.reduce((s: number, p: {shipping: number}) => s + p.shipping, 0);
                   const totOpex       = tableProductData.reduce((s: number, p: {opex: number}) => s + p.opex, 0);
                   const totNet        = tableProductData.reduce((s: number, p: {netProfit: number}) => s + p.netProfit, 0);
-                  /* 15 columns: المنتج | SKU | المخزون | الطلبات | المؤكد | المُسلَّم |
-                     إجمالي الإيرادات | الإنفاق الإعلاني | تكلفة البضاعة | مصاريف الشحن |
-                     المصاريف التشغيلية | CR% | DR% | NDR% | صافي الربح
-                     Footer span: 1 + 2 + 1+1+1 + 1+1+1+1+1 + 3 + 1 = 15. */
+                  /* Affiliate-only profit-cluster totals (the 3 added columns). */
+                  const totProfitInProg = tableProductData.reduce((s: number, p: {profitInProgress?: number}) => s + (p.profitInProgress ?? 0), 0);
+                  const totFutureBal    = tableProductData.reduce((s: number, p: {futureBalance?: number}) => s + (p.futureBalance ?? 0), 0);
+                  const totForecasted   = tableProductData.reduce((s: number, p: {forecastedNet?: number}) => s + (p.forecastedNet ?? 0), 0);
+                  /* E-commerce → 15 columns: المنتج | SKU | المخزون | الطلبات | المؤكد |
+                     المُسلَّم | إجمالي الإيرادات | الإنفاق الإعلاني | تكلفة البضاعة | مصاريف الشحن |
+                     المصاريف التشغيلية | CR% | DR% | NDR% | صافي الربح.
+                     Affiliate → 16 columns: (no المخزون / COGS / Shipping / OPEX) + CPP الفعلي |
+                     أقصى CPP + صافي الربح | ربح قيد التنفيذ | رصيد مستقبلي | صافي متوقّع. */
                   return (
                     <tfoot>
                       <tr className="bg-slate-100 dark:bg-slate-800/80
                         border-t-2 border-slate-200 dark:border-slate-700">
                         <td className="px-4 py-3.5 font-bold text-slate-700 dark:text-slate-200 text-sm">الإجمالي</td>
-                        <td colSpan={2} />
+                        {/* SKU (+ المخزون for e-commerce only) */}
+                        <td colSpan={isAffiliate ? 1 : 2} />
                         <td className="px-4 py-3.5 font-bold text-slate-700 dark:text-slate-200">{fmt(totOrders)}</td>
                         <td className="px-4 py-3.5 font-bold text-blue-600 dark:text-blue-400">
                           {totConfirmed !== null ? fmt(totConfirmed) : <span className="text-slate-400">—</span>}
@@ -2349,6 +2435,15 @@ export default function AnalyticsDashboard() {
                           ${totNet >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
                           {fmtEGP(totNet)}
                         </td>
+                        {/* Affiliate-only profit-cluster totals */}
+                        {isAffiliate && <td className="px-4 py-3.5 font-bold text-amber-600 dark:text-amber-400 whitespace-nowrap">{fmtEGP(totProfitInProg)}</td>}
+                        {isAffiliate && <td className="px-4 py-3.5 font-bold text-purple-600 dark:text-purple-400 whitespace-nowrap">{fmtEGP(totFutureBal)}</td>}
+                        {isAffiliate && (
+                          <td className={`px-4 py-3.5 font-bold whitespace-nowrap
+                            ${totForecasted >= 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-red-600 dark:text-red-400'}`}>
+                            {fmtEGP(totForecasted)}
+                          </td>
+                        )}
                       </tr>
                     </tfoot>
                   );

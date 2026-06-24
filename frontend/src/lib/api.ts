@@ -791,6 +791,12 @@ export interface ProductProfitability {
   /** delivered_revenue − cogs − attributed_ad_spend − shipping_cost − opex_allocated.
    *  Matches the top KPI Net Profit card for the same product/date range. */
   net_profit:          number;
+  /** Affiliate only: Σ commission of confirmed-not-delivered orders (in-pipeline). */
+  profit_in_progress?: number;
+  /** Affiliate only: Future Balance = profit_in_progress × DR (expected to convert). */
+  future_balance?:     number;
+  /** Affiliate only: Forecasted Net = net_profit + future_balance. */
+  forecasted_net?:     number;
   /** attributed_ad_spend / total_orders  (null when no Meta orders) */
   cpa:                 number | null;
   /** Meta-reported purchase conversions (same as total_orders — kept for compat). */

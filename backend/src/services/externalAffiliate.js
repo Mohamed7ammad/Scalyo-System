@@ -796,7 +796,11 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
                COUNT(*) FILTER (WHERE ${CONF})::int       AS confirmed,
                COUNT(*) FILTER (WHERE ${DELV})::int       AS delivered,
                COUNT(*) FILTER (WHERE ${RET})::int        AS returned,
-               ${REV}                                     AS delivered_revenue
+               ${REV}                                     AS delivered_revenue,
+               /* Confirmed-bucket commission (in-pipeline + delivered, EXCLUDES
+                  returns — mirrors the top grid's revenue_confirmed). Used to derive
+                  the per-product Profit-In-Progress / Future-Balance / Forecasted-Net. */
+               COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0) AS confirmed_revenue
         ${where}
         GROUP BY group_key ORDER BY delivered_revenue DESC`, params),
       /* Meta campaign-level spend for THIS tenant (the affiliate's own ad spend),
@@ -875,6 +879,18 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
       const drDec         = resolved     > 0 ? delivered / resolved    : 0;
       const maxCpp        = r2(avgCommission * crDec * drDec);
 
+      /* ── In-progress money metrics (mirror the top 20-grid, per product) ──────
+         profitInProgress = Σ commission of CONFIRMED-not-delivered orders
+                          = confirmed-bucket revenue − delivered revenue.
+         futureBalance    = profitInProgress × DR  (expected to still convert).
+         netProfit        = delivered revenue − attributed ad spend  (realised).
+         forecastedNet    = netProfit + futureBalance  (realised + expected). */
+      const confirmedRevenue = Math.round(num(r.confirmed_revenue));
+      const profitInProgress = Math.max(0, confirmedRevenue - revenue);
+      const futureBalance    = Math.round(profitInProgress * drDec);
+      const netProfit        = Math.round(revenue - adSpend);
+      const forecastedNet    = Math.round(netProfit + futureBalance);
+
       return {
         product_id:          r.sku || r.product_name,
         product_name:        r.product_name,
@@ -891,7 +907,10 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
         cogs:                0,                  // affiliate holds no stock
         shipping_cost:       0,
         opex_allocated:      0,
-        net_profit:          Math.round(revenue - adSpend),   // commission − attributed ad spend
+        net_profit:          netProfit,          // realised commission − attributed ad spend
+        profit_in_progress:  profitInProgress,   // Σ commission of confirmed-not-delivered
+        future_balance:      futureBalance,      // profitInProgress × DR
+        forecasted_net:      forecastedNet,      // net_profit + future_balance
         actual_cpp:          actualCpp,
         max_cpp:             maxCpp,
         cpa:                 actualCpp > 0 ? actualCpp : null,
