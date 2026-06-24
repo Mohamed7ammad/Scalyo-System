@@ -519,7 +519,10 @@ router.post('/safqa/:businessId', async (req, res) => {
        to strictly skip instead. Always 200 so Safqa never retry-storms. */
     const strictSkip = String(process.env.SAFQA_CREATE_ON_NO_MATCH).toLowerCase() === 'false';
     if (!strictSkip) {
-      const created = await recordSafqaOrder(order, businessId, { fullBody: body });
+      /* totalIsGross: Safqa's webhook `total` is the GROSS COD value, not the
+         marketer commission — don't store it as commission (it would inflate
+         PROFIT). The real commission is set later from the Safqa CSV (العمولة). */
+      const created = await recordSafqaOrder(order, businessId, { fullBody: body, totalIsGross: true });
       console.log(`ℹ️  Safqa webhook: no phone match → legacy create (external_id=${created.externalId}, tenant ${businessId})`);
       return res.status(200).json({ ok: true, action: created.inserted ? 'created' : 'updated', external_id: created.externalId, status_class: created.statusClass });
     }

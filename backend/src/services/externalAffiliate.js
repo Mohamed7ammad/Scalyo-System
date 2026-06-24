@@ -221,10 +221,20 @@ function classifySafqaStatus(status) {
    "الحساب الأساسي" filter (marketer = 'main_account') aggregates them correctly.
    Any real marketer code/UTM/Sub-ID passes through unchanged. */
 const MAIN_ACCOUNT_MARKETER = 'main_account';
+
+/* Marketer-identity aliases — one human buyer can appear under TWO codes: their
+   EasyOrder referral slug (e.g. 'adham') AND their Safqa moderator hash (e.g.
+   '69d90ab4…'). The dashboard scopes a media-buyer by their users.referral_code,
+   so map the Safqa hash → the referral slug at ingest, otherwise the buyer's
+   Safqa-sourced orders never show under their account. Keys are UPPERCASED+trimmed.
+   (Hardcoded like CAMPAIGN_OVERRIDES; promote to a DB table if this grows.) */
+const MARKETER_ALIASES = {
+  '69D90AB4FE096AC1B298DC41': 'adham',
+};
 function normalizeMarketer(raw) {
   const m = (raw == null ? '' : String(raw)).trim();
   if (m === '' || m === '-') return MAIN_ACCOUNT_MARKETER;
-  return m;
+  return MARKETER_ALIASES[m.toUpperCase()] || m;
 }
 
 /* ── Primary ("hero/hook") product attribution ──────────────────────────────
@@ -285,7 +295,11 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   const status      = String(order?.status ?? '').trim().toLowerCase();
   const statusAr    = order?.status_ar != null ? String(order.status_ar) : null;
   const statusClass = classifySafqaStatus(status);
-  const total       = num(order?.total);
+  /* The live Safqa orderHook's `total` is the GROSS COD value, NOT the marketer
+     commission — callers from that path pass opts.totalIsGross so we store 0 (the
+     real commission is set authoritatively from the Safqa CSV/export's العمولة).
+     The CSV import passes the already-correct commission, so it omits the flag. */
+  const total       = opts.totalIsGross ? 0 : num(order?.total);
   /* Marketer normalisation — Safqa marks organic/own-store sales with a literal
      '-' (or leaves it blank). Those are the MAIN ACCOUNT's orders, so canonicalise
      '-'/empty/null → 'main_account' AT INGEST. Without this they accumulate as '-'
@@ -329,7 +343,7 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
       `UPDATE external_affiliate_orders e
           SET status=$3, status_ar=$4, status_class=$5,
               total        = COALESCE(NULLIF($6::numeric, 0), e.total),
-              marketer     = COALESCE($7, e.marketer),
+              marketer     = COALESCE(NULLIF($7, 'main_account'), e.marketer),
               product_name = COALESCE($8, e.product_name),
               sku          = COALESCE($9, e.sku),
               governorate  = COALESCE($10, e.governorate),
@@ -363,8 +377,11 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
      DO UPDATE SET status       = EXCLUDED.status,
                    status_ar    = EXCLUDED.status_ar,
                    status_class = EXCLUDED.status_class,
-                   total        = EXCLUDED.total,
-                   marketer     = COALESCE(EXCLUDED.marketer,     external_affiliate_orders.marketer),
+                   /* Never let a 0/placeholder overwrite a real commission, nor the
+                      'main_account' placeholder clobber a real marketer (the live
+                      Safqa orderHook sends GROSS total + may omit the marketer). */
+                   total        = COALESCE(NULLIF(EXCLUDED.total, 0),               external_affiliate_orders.total),
+                   marketer     = COALESCE(NULLIF(EXCLUDED.marketer, 'main_account'), external_affiliate_orders.marketer),
                    product_name = COALESCE(EXCLUDED.product_name, external_affiliate_orders.product_name),
                    sku          = COALESCE(EXCLUDED.sku,          external_affiliate_orders.sku),
                    governorate  = COALESCE(EXCLUDED.governorate,  external_affiliate_orders.governorate),
@@ -400,10 +417,12 @@ async function updateSafqaStatusByPhone(order, businessId) {
   const statusAr    = order?.status_ar != null ? String(order.status_ar) : null;
   const statusClass = classifySafqaStatus(status);
   const sku         = primarySku(order?.sku ?? order?.SKU ?? null);
-  /* Safqa's `total` is the marketer COMMISSION (paid on delivery) — the EasyOrder
-     creation row stored 0 (it only knows the order's COD value, not the payout),
-     so the Safqa push is the authoritative source for commission. */
-  const safqaTotal  = num(order?.total);
+  /* NOTE: Safqa's webhook `total` is the GROSS order value (COD), NOT the marketer
+     commission — verified against the Safqa export's العمولة column (e.g. webhook
+     total 835/1388 vs real commission ~280-340). Writing it into `total` inflated
+     PROFIT. So this status webhook updates STATUS ONLY and NEVER touches `total`;
+     the authoritative commission comes solely from the Safqa CSV/export (العمولة)
+     via recordSafqaOrder / the reconciliation import. */
 
   const { rows } = await pool.query(
     `SELECT id, external_id FROM external_affiliate_orders
@@ -423,10 +442,9 @@ async function updateSafqaStatusByPhone(order, businessId) {
         SET status       = $1,
             status_ar    = COALESCE($2, status_ar),
             status_class = $3,
-            total        = COALESCE(NULLIF($4::numeric, 0), total),   -- commission from Safqa
             updated_at   = NOW()
-      WHERE id = $5 AND business_id = $6`,
-    [status, statusAr, statusClass, safqaTotal, rows[0].id, businessId]
+      WHERE id = $4 AND business_id = $5`,
+    [status, statusAr, statusClass, rows[0].id, businessId]
   );
   return { ok: true, matched: true, externalId: rows[0].external_id, statusClass };
 }
@@ -455,10 +473,14 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   /* Global Product Filter — the dropdown passes the product_name; we match it
      against product_name OR sku. NULL = all products. */
   const product   = (opts.product && opts.product !== 'كل المنتجات') ? String(opts.product).trim() : null;
-  /* Clean base product name: strip a leading "(N)" quantity tag and the "قطعة"
-     (piece) word so naming variants of ONE physical product collapse to a single
-     label (e.g. "(1) قطعة حزام… - مستورد" / "(3) قطعة حزام…" / "قطعة حزام…" → "حزام… - مستورد"). */
-  const cleanName = (col) => `TRIM(regexp_replace(${col}, '^\\s*(\\(\\s*\\d+\\s*\\)\\s*)?(قطعة\\s+)?', ''))`;
+  /* Canonical base product name — AGGRESSIVE so ONE physical product is ONE row
+     even across EasyOrder-slug vs Safqa-code SKU differences:
+       1. strip a leading "(N)" quantity tag and the "قطعة" (piece) word, then
+       2. strip everything from the first " - " descriptor onward ("- مستورد",
+          "- يد طويلة", multi-item "-- …", etc.).
+     e.g. "(1) قطعة حزام… الشهرية - مستورد", "قطعة حزام… الشهرية" and the slug-SKU
+     "حزام… الشهرية" all collapse to "حزام التدفئة الذكي لتخفيف آلام الدورة الشهرية". */
+  const cleanName = (col) => `TRIM(regexp_replace(regexp_replace(${col}, '^\\s*(\\(\\s*\\d+\\s*\\)\\s*)?(قطعة\\s+)?', ''), '\\s+[-–—].*$', ''))`;
   /* Base SKU = first code when an order carries a comma-joined multi-item SKU. */
   const baseSku   = (col) => `UPPER(TRIM(split_part(${col}, ',', 1)))`;
   /* Reusable product predicate ($n = product param). The dropdown now sends a CLEAN
@@ -699,10 +721,10 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
   /* $1 tenant · $2 start · $3 end · $4 product · $5 campaign · $6 referralCodes (marketer).
      created_at is the order-placement date (back-dated from the CSV / set by the webhook). */
   const params = [businessId, startDate, endDate, product, campaign, referralCodes];
-  /* Clean base name + base SKU helpers (see aggregateSafqaFromDb for rationale):
-     collapse "(N) قطعة …" naming variants of one product into a single label, and
-     take the first code from a comma-joined multi-item SKU. */
-  const cleanName = (col) => `TRIM(regexp_replace(${col}, '^\\s*(\\(\\s*\\d+\\s*\\)\\s*)?(قطعة\\s+)?', ''))`;
+  /* Aggressive canonical base name (see aggregateSafqaFromDb): strip the leading
+     "(N) قطعة" tag AND every " - " descriptor/suffix so EasyOrder-slug vs Safqa-code
+     variants of one physical product collapse to a single label/row. */
+  const cleanName = (col) => `TRIM(regexp_replace(regexp_replace(${col}, '^\\s*(\\(\\s*\\d+\\s*\\)\\s*)?(قطعة\\s+)?', ''), '\\s+[-–—].*$', ''))`;
   const baseSku   = (col) => `UPPER(TRIM(split_part(${col}, ',', 1)))`;
   const where = `
     FROM external_affiliate_orders
@@ -760,16 +782,16 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
                COUNT(*)::int                              AS count
         ${where} AND status_class = 'cancelled'
         GROUP BY 1 ORDER BY count DESC`, params),
-      /* Detailed Product Performance — ONE row per physical product. Group by base
-         SKU (first code of a multi-item SKU); rows with no SKU fall back to their
-         clean base name. Display = the most common clean base name for that group,
-         so quantity/wording variants ("(1) قطعة …", "(3) قطعة …") collapse cleanly. */
+      /* Detailed Product Performance — ONE row per physical product. Group by the
+         AGGRESSIVE canonical NAME (not SKU) so the same product merges even when it
+         carries different codes (EasyOrder slug e.g. 'hzm-ltdfy' vs Safqa code
+         'OAOPRJR') or wording variants ("(1) قطعة …", "… - مستورد"). The display
+         name IS that canonical name; the representative SKU is the group's most
+         common code (used only for ad-spend attribution by campaign-name match). */
       pool.query(`
-        SELECT COALESCE(NULLIF(${baseSku('sku')}, ''),
-                        'NAME:' || COALESCE(NULLIF(${cleanName('product_name')}, ''), 'غير محدد')) AS group_key,
-               COALESCE(MAX(NULLIF(${baseSku('sku')}, '')), '')                          AS sku,
-               COALESCE(mode() WITHIN GROUP (ORDER BY NULLIF(${cleanName('product_name')}, '')),
-                        'غير محدد')                                                       AS product_name,
+        SELECT COALESCE(NULLIF(${cleanName('product_name')}, ''), 'غير محدد')      AS group_key,
+               COALESCE(mode() WITHIN GROUP (ORDER BY NULLIF(${baseSku('sku')}, '')), '') AS sku,
+               MAX(COALESCE(NULLIF(${cleanName('product_name')}, ''), 'غير محدد'))   AS product_name,
                COUNT(*)::int                              AS total_orders,
                COUNT(*) FILTER (WHERE ${CONF})::int       AS confirmed,
                COUNT(*) FILTER (WHERE ${DELV})::int       AS delivered,
