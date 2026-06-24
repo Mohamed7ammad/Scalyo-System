@@ -3,7 +3,24 @@ const crypto  = require('crypto');
 const pool    = require('../config/db');
 const { enrichDeliveryRate } = require('../services/bostaEnrich');
 const { recordSafqaOrder, updateSafqaStatusByPhone } = require('../services/externalAffiliate');
-const { extractReferralCode } = require('../utils/referral');
+const { extractReferralCode, resolveMarketerCode } = require('../utils/referral');
+
+/* Tenant's known media-buyer referral codes (users.referral_code). Used to
+   resolve an EasyOrder utm_campaign → a canonical marketer at ingest. Returns
+   [] on any error so attribution degrades to organic rather than failing. */
+async function loadMarketerCodes(businessId) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT referral_code FROM users
+        WHERE business_id = $1 AND referral_code IS NOT NULL AND TRIM(referral_code) <> ''`,
+      [businessId]
+    );
+    return rows.map((r) => String(r.referral_code).trim());
+  } catch (err) {
+    console.warn('[EasyOrder webhook] loadMarketerCodes failed:', err.message);
+    return [];
+  }
+}
 
 /* Resolve a webhook URL identifier — either the numeric business id (legacy) OR a
    readable business-name slug (e.g. /easyorder/slaaa) — to the tenant row. */
@@ -271,6 +288,14 @@ async function ingestEasyOrderAffiliate(body, businessId) {
     body.reference ?? body.ref ?? ''
   ).trim() || buildFallbackKey(body);
 
+  /* Marketer attribution: resolve the buyer from the payload against the tenant's
+     known referral codes. This maps a utm_campaign that CONTAINS a buyer's name
+     (e.g. "adham", "adham_botagaz") → the canonical code 'adham', and drops bare
+     Facebook campaign ids → organic. Falls back to main_account when nothing
+     attributable is present. (f.referral_code is the raw extract; this canonicalises.) */
+  const knownCodes = await loadMarketerCodes(businessId);
+  const marketer = resolveMarketerCode(body, knownCodes) || 'main_account';
+
   /* Build a Safqa-shaped order object so recordSafqaOrder handles the upsert,
      status classification, phone normalisation and full-envelope raw capture. */
   const syntheticOrder = {
@@ -279,11 +304,11 @@ async function ingestEasyOrderAffiliate(body, businessId) {
     status:        'pending',          // created — call-center confirmation not done yet
     status_ar:     'قيد المعالجة',
     total:         0,                  // commission unknown until Safqa confirms
-    /* Attribution: the UTM/Sub-ID = the media buyer. Orders that arrive WITHOUT a
-       referral code are ORGANIC — tag them 'main_account' (not null/'-') so the
-       dashboard can isolate them via the "الحساب الأساسي" filter instead of having
-       them blend into the global "all buyers" view. */
-    marketer:      f.referral_code || 'main_account',
+    /* Attribution: the canonical media-buyer resolved from utm_campaign / referral
+       (see resolveMarketerCode above). Orders with no attributable buyer are
+       ORGANIC → 'main_account' (not null/'-') so the dashboard can isolate them via
+       the "الحساب الأساسي" filter instead of blending into the "all buyers" view. */
+    marketer,
     product_name:  f.ProductName || null,
     sku:           f.sku || null,
     governorate:   f.City || null,

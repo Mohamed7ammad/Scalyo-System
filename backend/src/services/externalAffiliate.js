@@ -222,15 +222,14 @@ function classifySafqaStatus(status) {
    Any real marketer code/UTM/Sub-ID passes through unchanged. */
 const MAIN_ACCOUNT_MARKETER = 'main_account';
 
-/* Marketer-identity aliases — one human buyer can appear under TWO codes: their
-   EasyOrder referral slug (e.g. 'adham') AND their Safqa moderator hash (e.g.
-   '69d90ab4…'). The dashboard scopes a media-buyer by their users.referral_code,
-   so map the Safqa hash → the referral slug at ingest, otherwise the buyer's
-   Safqa-sourced orders never show under their account. Keys are UPPERCASED+trimmed.
-   (Hardcoded like CAMPAIGN_OVERRIDES; promote to a DB table if this grows.) */
-const MARKETER_ALIASES = {
-  '69D90AB4FE096AC1B298DC41': 'adham',
-};
+/* Marketer-identity aliases — map a known alternative code to a canonical
+   referral slug at ingest. Keys are UPPERCASED+trimmed.
+   NOTE: the former '69D90AB4…→adham' entry was REMOVED — that Safqa moderator
+   hash is NOT Adham. Adham (and every media buyer) is attributed solely from the
+   EasyOrder `utm_campaign` field (see resolveMarketerCode in utils/referral.js),
+   never from a Safqa hash. Left empty intentionally; add entries only for a
+   genuinely verified second identity. */
+const MARKETER_ALIASES = {};
 function normalizeMarketer(raw) {
   const m = (raw == null ? '' : String(raw)).trim();
   if (m === '' || m === '-') return MAIN_ACCOUNT_MARKETER;

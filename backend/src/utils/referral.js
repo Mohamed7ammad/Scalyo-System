@@ -59,4 +59,45 @@ function extractReferralCode(body) {
   return null;
 }
 
-module.exports = { extractReferralCode };
+/**
+ * resolveMarketerCode — turn a raw inbound payload into a CANONICAL marketer code,
+ * resolved against the tenant's KNOWN media-buyer referral codes.
+ *
+ * Why this exists: `utm_campaign` is the attribution source for EasyOrder affiliate
+ * orders, but its value is often NOT a clean slug — it can be a full campaign name
+ * that CONTAINS the buyer's name ("adham", "adham_botagaz_v2") or a bare Facebook
+ * campaign id ("120245087774520218"). Returning that verbatim (the old behaviour)
+ * either mis-attributes (full string ≠ 'adham') or invents junk numeric "marketers".
+ *
+ * Resolution order against `knownCodes` (the tenant's users.referral_code list):
+ *   1. exact match (case-insensitive)                      → canonical known code
+ *   2. the raw value CONTAINS a known code as a substring  → that known code
+ *   3. raw is all-digits (a bare FB campaign id) → null (organic / main_account)
+ *   4. otherwise keep the raw code (a new/unregistered buyer tag)
+ *
+ * Returns the canonical code, or null when nothing attributable is present.
+ */
+function resolveMarketerCode(body, knownCodes = []) {
+  const raw = extractReferralCode(body);
+  if (!raw) return null;
+
+  const codes = (Array.isArray(knownCodes) ? knownCodes : [])
+    .map((c) => String(c == null ? '' : c).trim())
+    .filter(Boolean);
+  const lower = raw.toLowerCase();
+
+  const exact = codes.find((c) => c.toLowerCase() === lower);
+  if (exact) return exact;
+
+  /* Longest known code first so "adham_pro" beats "adham" when both are registered. */
+  const contained = codes
+    .slice()
+    .sort((a, b) => b.length - a.length)
+    .find((c) => lower.includes(c.toLowerCase()));
+  if (contained) return contained;
+
+  if (/^\d+$/.test(raw)) return null;   // bare FB campaign id → not a marketer
+  return raw;                           // unregistered buyer tag — keep as-is
+}
+
+module.exports = { extractReferralCode, resolveMarketerCode };
