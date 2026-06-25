@@ -6,6 +6,7 @@ const { startMetaSyncCron }   = require('./cron/metaSync');
 const { startBostaReconcileCron } = require('./cron/bostaReconcile');
 const { startTaagerSyncCron } = require('./cron/taagerSync');
 const { startStaffAlertsCron } = require('./cron/staffAlerts');
+const { startGhostPurgeCron } = require('./cron/ghostPurge');
 const pool                    = require('./config/db');
 const { initTenancy }         = require('./config/initTenancy');
 
@@ -112,6 +113,7 @@ app.listen(PORT, async () => {
     startBostaReconcileCron();
     startTaagerSyncCron();
     startStaffAlertsCron();
+    startGhostPurgeCron();
   } else {
     console.log(`⚠️ [CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" (not "production") → ALL cron jobs DISABLED (Sheets sync, Bosta enrich/reconcile, Meta, Taager, staff alerts). This is the safe local-dev default — set NODE_ENV=production ONLY on the server.`);
   }

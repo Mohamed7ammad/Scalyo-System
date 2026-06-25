@@ -301,6 +301,45 @@ function normalizeMarketer(raw) {
   return MARKETER_ALIASES[m.toUpperCase()] || m;
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   SKU-BASED AUTO-COMMISSION  —  ends the manual Safqa-CSV dependency.
+   ────────────────────────────────────────────────────────────────────────────
+   The Safqa webhook only sends GROSS COD, never the net affiliate commission, so
+   commission used to come from a manually-uploaded CSV (العمولة). Instead we keep
+   the FIXED per-product commission here and compute it automatically on every
+   Safqa webhook: commission = COMMISSION_RATES[sku] × quantity.
+
+   Keys are UPPER-CASED. Both the Safqa product code AND the EasyOrder slug map to
+   the same rate (an order can arrive under either). Rates below the divider are
+   user-confirmed; the rest are derived from the historical median commission/unit
+   and SHOULD be verified against Safqa, then corrected here if needed.
+
+   ⚠️ NOTE ON ACCURACY: real Safqa commission has some per-order spread (multi-unit,
+   promos, variants), so a fixed rate is ~98% accurate, not cent-perfect. Existing
+   orders KEEP their realized commission (see the COALESCE(NULLIF(existing,0),…)
+   guards) — auto-commission only FILLS orders that have none yet, so historical
+   figures stay exact while new orders no longer need a CSV. */
+const COMMISSION_RATES = {
+  /* ── User-confirmed fixed rates ─────────────────────────────────────────── */
+  QSMEFF3: 273, BWTJZ:       273,   // بوتجاز / Stove
+  OAOPRJR: 300, 'HZM-LTDFY': 300,   // حزام التدفئة / Heating belt
+  YQASPQV: 266, 'FRSH-LTNZYF': 266, // فرشة التنظيف / Cleaning brush
+  /* ── Derived from historical median commission/unit — VERIFY with Safqa ──── */
+  EAADYOP: 490,   // سماعة miniso x33 / Headset
+  B3MVO7Q: 440,   // كاميرا 1080p / Camera
+  NUEXTPK: 199,   // جهاز التنظيف بالبخار / Steam cleaner
+  BWKB7SE: 200,   // قطاعة سليزر / Slicer
+};
+/* Net commission for an order: rate(primary SKU) × quantity. Returns 0 when the
+   SKU is unknown (so we NEVER fall back to writing the gross COD). */
+function commissionFor(sku, quantity) {
+  const code = String(sku == null ? '' : sku).split(',')[0].trim().toUpperCase();
+  const rate = COMMISSION_RATES[code];
+  if (!rate) return 0;
+  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  return rate * qty;
+}
+
 /* ── Primary ("hero/hook") product attribution ──────────────────────────────
    Safqa concatenates multi-item orders — SKUs as "A, B" and product names as
    "(1) Product A -- (1) Product B" — yet bills ONE commission per ORDER (no
@@ -360,10 +399,15 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   const statusAr    = resolveStatusAr(order?.status_ar, status);
   const statusClass = classifySafqaStatus(status);
   /* The live Safqa orderHook's `total` is the GROSS COD value, NOT the marketer
-     commission — callers from that path pass opts.totalIsGross so we store 0 (the
-     real commission is set authoritatively from the Safqa CSV/export's العمولة).
-     The CSV import passes the already-correct commission, so it omits the flag. */
-  const total       = opts.totalIsGross ? 0 : num(order?.total);
+     commission. Instead of storing it (or 0), AUTO-COMMISSION from the SKU:
+     commission = COMMISSION_RATES[sku] × quantity (ends the manual-CSV dependency).
+     totalIsGross marks the Safqa-webhook path → auto-calculate. The CSV import omits
+     the flag and passes the already-correct العمولة, which still wins. Unknown SKU →
+     0 (never the gross). The upsert/merge guards below PRESERVE any existing realized
+     commission, so this only fills orders that have none yet. */
+  const total       = opts.totalIsGross
+    ? commissionFor(order?.sku ?? order?.SKU, order?.quantity ?? order?.qty ?? order?.Qty)
+    : num(order?.total);
   /* Marketer normalisation — Safqa marks organic/own-store sales with a literal
      '-' (or leaves it blank). Those are the MAIN ACCOUNT's orders, so canonicalise
      '-'/empty/null → 'main_account' AT INGEST. Without this they accumulate as '-'
@@ -413,7 +457,8 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
     const merged = await pool.query(
       `UPDATE external_affiliate_orders e
           SET status=$3, status_ar=$4, status_class=$5,
-              total        = COALESCE(NULLIF($6::numeric, 0), e.total),
+              /* PRESERVE existing realized commission; only fill when it's still 0. */
+              total        = COALESCE(NULLIF(e.total, 0), $6::numeric),
               marketer     = COALESCE(NULLIF($7, 'main_account'), e.marketer),
               product_name = COALESCE($8, e.product_name),
               sku          = COALESCE($9, e.sku),
@@ -448,10 +493,10 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
      DO UPDATE SET status       = EXCLUDED.status,
                    status_ar    = EXCLUDED.status_ar,
                    status_class = EXCLUDED.status_class,
-                   /* Never let a 0/placeholder overwrite a real commission, nor the
-                      'main_account' placeholder clobber a real marketer (the live
-                      Safqa orderHook sends GROSS total + may omit the marketer). */
-                   total        = COALESCE(NULLIF(EXCLUDED.total, 0),               external_affiliate_orders.total),
+                   /* PRESERVE existing realized commission — a re-fired webhook
+                      (auto-commission) must never overwrite a value already set;
+                      only fill when the stored commission is still 0. */
+                   total        = COALESCE(NULLIF(external_affiliate_orders.total, 0), EXCLUDED.total),
                    marketer     = COALESCE(NULLIF(EXCLUDED.marketer, 'main_account'), external_affiliate_orders.marketer),
                    product_name = COALESCE(EXCLUDED.product_name, external_affiliate_orders.product_name),
                    sku          = COALESCE(EXCLUDED.sku,          external_affiliate_orders.sku),
@@ -488,15 +533,14 @@ async function updateSafqaStatusByPhone(order, businessId) {
   const statusAr    = resolveStatusAr(order?.status_ar, status);
   const statusClass = classifySafqaStatus(status);
   const sku         = primarySku(order?.sku ?? order?.SKU ?? null);
-  /* NOTE: Safqa's webhook `total` is the GROSS order value (COD), NOT the marketer
-     commission — verified against the Safqa export's العمولة column (e.g. webhook
-     total 835/1388 vs real commission ~280-340). Writing it into `total` inflated
-     PROFIT. So this status webhook updates STATUS ONLY and NEVER touches `total`;
-     the authoritative commission comes solely from the Safqa CSV/export (العمولة)
-     via recordSafqaOrder / the reconciliation import. */
+  /* Safqa's webhook `total` is the GROSS COD, NOT commission — we IGNORE it and
+     AUTO-COMMISSION the matched order from its own SKU (COMMISSION_RATES × qty), so
+     no manual CSV is ever needed. We fill ONLY when the order still has no
+     commission (COALESCE(NULLIF(total,0), …)) so a realized value is never lost. */
 
   const { rows } = await pool.query(
-    `SELECT id, external_id FROM external_affiliate_orders
+    `SELECT id, external_id, sku AS row_sku, quantity AS row_qty
+       FROM external_affiliate_orders
       WHERE business_id = $1 AND network = 'safqa' AND client_phone = $2
         AND ($3::text IS NULL OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($3)))
       ORDER BY (status_class IN ('delivered','returned','cancelled')) ASC,  -- OPEN orders first
@@ -508,16 +552,49 @@ async function updateSafqaStatusByPhone(order, businessId) {
     return { ok: true, matched: false, reason: 'no matching EasyOrder-created row for phone' };
   }
 
+  /* Net commission from the matched order's product SKU (slug or Safqa code). */
+  const autoCommission = commissionFor(rows[0].row_sku, rows[0].row_qty);
+
   await pool.query(
     `UPDATE external_affiliate_orders
         SET status       = $1,
             status_ar    = COALESCE($2, status_ar),
             status_class = $3,
+            total        = COALESCE(NULLIF(total, 0), $6::numeric),
             updated_at   = NOW()
       WHERE id = $4 AND business_id = $5`,
-    [status, statusAr, statusClass, rows[0].id, businessId]
+    [status, statusAr, statusClass, rows[0].id, businessId, autoCommission]
   );
   return { ok: true, matched: true, externalId: rows[0].external_id, statusClass };
+}
+
+/* ── Ghost-order auto-purge ──────────────────────────────────────────────────
+   A "ghost" = an order that never synced to Safqa: NO Safqa serial (external_id
+   not 'sk-…') AND NO commission (total=0), past the grace window. It can never
+   earn a commission, so it must never appear in the financials — the SAFQA_BACKED
+   predicate already EXCLUDES it from every dashboard query the instant it has no
+   serial + no commission (so it isn't counted even as "pending"). This routine is
+   the cleanup half: it TRANSITIONS aged ghosts to a `quarantined` state so the
+   table stays clean and they're auditable/revivable. A ghost that LATER syncs to
+   Safqa gains a serial/commission and is excluded from this purge automatically.
+   Idempotent, all-tenant, safe to run on a schedule. */
+async function purgeGhostOrders({ graceHours = 24 } = {}) {
+  try {
+    await pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS quarantined BOOLEAN NOT NULL DEFAULT FALSE`);
+    const { rowCount } = await pool.query(
+      `UPDATE external_affiliate_orders
+          SET quarantined = TRUE, updated_at = NOW()
+        WHERE network = 'safqa' AND NOT quarantined
+          AND external_id NOT LIKE 'sk-%' AND COALESCE(total, 0) = 0
+          AND COALESCE(created_at, updated_at) < NOW() - ($1 || ' hours')::interval`,
+      [String(graceHours)]
+    );
+    if (rowCount) console.log(`[ghostPurge] quarantined ${rowCount} ghost order(s) (no Safqa serial + no commission, > ${graceHours}h old)`);
+    return rowCount;
+  } catch (err) {
+    console.error('[ghostPurge] failed:', err.message);
+    return 0;
+  }
 }
 
 /**
@@ -1589,6 +1666,9 @@ module.exports = {
   // Safqa webhook (push) architecture:
   recordSafqaOrder,
   updateSafqaStatusByPhone,
+  purgeGhostOrders,
+  commissionFor,
+  COMMISSION_RATES,
   normalizePhone,
   aggregateSafqaFromDb,
   aggregateSafqaBreakdowns,
