@@ -216,6 +216,35 @@ function classifySafqaStatus(status) {
   return SAFQA_STATUS_CLASS[String(status || '').trim().toLowerCase()] || 'pending';
 }
 
+/* Canonical Arabic label per Safqa status — used ONLY as a FALLBACK when the
+   payload carries no status_ar (e.g. EasyOrder-created rows, or a webhook that
+   omits it). Safqa's own status_ar always takes precedence when present, so this
+   never overwrites a real value — it only fills blanks so the dashboard (rejection
+   chart, status display) never shows "غير محدد" for a known status. */
+const SAFQA_STATUS_AR = {
+  pending:           'قيد المراجعة',
+  skip:              'قيد المراجعة',
+  preparing:         'قيد التحضير',
+  printing:          'قيد الطباعة',
+  shipped:           'تم الشحن',
+  holding:           'معلّق',
+  ask_to_exchange:   'طلب استبدال',
+  available:         'متاح للتوصيل',
+  collected:         'تم التوصيل',
+  returned1:         'مرتجع',
+  returned2:         'مرتجع',
+  ask_to_return:     'جاري الاسترجاع',
+  returned_exchange: 'مرتجع استبدال',
+  declined1:         'ملغي',
+  declined2:         'ملغي',
+};
+/* Resolve the Arabic label: prefer the payload's, fall back to the status map. */
+function resolveStatusAr(rawAr, status) {
+  const ar = rawAr == null ? '' : String(rawAr).trim();
+  if (ar !== '') return ar;
+  return SAFQA_STATUS_AR[String(status || '').trim().toLowerCase()] || null;
+}
+
 /* Canonical marketer code. Safqa uses '-' (or blank) for organic / own-store
    orders → the MAIN ACCOUNT. Normalise those to 'main_account' so the dashboard's
    "الحساب الأساسي" filter (marketer = 'main_account') aggregates them correctly.
@@ -292,7 +321,7 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   if (businessId == null) return { ok: false, reason: 'missing tenant' };
 
   const status      = String(order?.status ?? '').trim().toLowerCase();
-  const statusAr    = order?.status_ar != null ? String(order.status_ar) : null;
+  const statusAr    = resolveStatusAr(order?.status_ar, status);
   const statusClass = classifySafqaStatus(status);
   /* The live Safqa orderHook's `total` is the GROSS COD value, NOT the marketer
      commission — callers from that path pass opts.totalIsGross so we store 0 (the
@@ -334,10 +363,17 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
      exact regression that inflated the affiliate dashboard.
      Guard: when THIS external_id is NEW and an OPEN (pending/confirmed) row for the
      same tenant + phone already exists under a DIFFERENT key, UPDATE that row and
-     SKIP the insert. Strictly gated to EXACTLY ONE open phone-match so genuine
-     re-orders on the same phone are never wrongly merged. Commission (total) is
-     filled COALESCE-style so a real value never reverts to 0. */
-  if (clientPhone) {
+     SKIP the insert. Commission (total) is filled COALESCE-style so a real value
+     never reverts to 0.
+
+     IMPORTANT — only run this for SECONDARY arrivals (Safqa CSV/webhook landing on
+     an order EasyOrder already created). It MUST be skipped on the EasyOrder
+     CREATION path (opts.primaryCreate): EO fires first, so any open same-phone row
+     is a DIFFERENT order (a genuine re-order by a repeat customer) and merging it
+     would silently drop the new order + its commission. Phone alone cannot tell a
+     re-order from a cross-channel duplicate (the SKU/product differ across channels
+     too), so the source flag is the only safe discriminator. */
+  if (clientPhone && !opts.primaryCreate) {
     const merged = await pool.query(
       `UPDATE external_affiliate_orders e
           SET status=$3, status_ar=$4, status_class=$5,
@@ -413,7 +449,7 @@ async function updateSafqaStatusByPhone(order, businessId) {
   if (!phone) return { ok: false, matched: false, reason: 'missing client phone' };
 
   const status      = String(order?.status ?? '').trim().toLowerCase();
-  const statusAr    = order?.status_ar != null ? String(order.status_ar) : null;
+  const statusAr    = resolveStatusAr(order?.status_ar, status);
   const statusClass = classifySafqaStatus(status);
   const sku         = primarySku(order?.sku ?? order?.SKU ?? null);
   /* NOTE: Safqa's webhook `total` is the GROSS order value (COD), NOT the marketer

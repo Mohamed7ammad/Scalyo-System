@@ -107,11 +107,24 @@ function resolveMarketerCode(body, knownCodes = []) {
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);   // longest first → "adham_pro" beats "adham"
 
-  /* 1 — aggressive: any known code appearing anywhere in any tracking field. */
+  /* 1 — aggressive, but token-aware so a SHORT code can't hijack an unrelated word
+     (e.g. code 'sara' must NOT match 'mascara'). A field matches a code when:
+       • the whole field equals the code, OR
+       • a token (field split on non-alphanumerics) equals the code — this is what
+         catches "adham_botagaz", "facebook.com/adham", "adham|stove", OR
+       • the code is ≥5 chars and appears as a substring of a token (kept aggressive
+         for real name-slugs like 'adham' → 'adhamx', where a 5+ char coincidence is
+         negligible). Shorter codes require an exact token to avoid false positives. */
   const haystacks = collectTrackingStrings(body);
+  const matches = (field, needle) => {
+    if (field === needle) return true;
+    const tokens = field.split(/[^a-z0-9]+/i).filter(Boolean);
+    if (tokens.includes(needle)) return true;
+    return needle.length >= 5 && tokens.some((t) => t.includes(needle));
+  };
   for (const code of codes) {
     const needle = code.toLowerCase();
-    if (haystacks.some((h) => h === needle || h.includes(needle))) return code;
+    if (haystacks.some((h) => matches(h, needle))) return code;
   }
 
   /* 2 — fall back to the single best raw extract. */

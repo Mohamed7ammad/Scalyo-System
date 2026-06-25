@@ -317,7 +317,11 @@ async function ingestEasyOrderAffiliate(body, businessId) {
     client_phone1: f.Phone,
   };
 
-  const r = await recordSafqaOrder(syntheticOrder, businessId, { fullBody: body });
+  /* primaryCreate: this IS the order's creation event, so recordSafqaOrder must
+     NOT phone-merge it into a prior open order (a repeat customer's earlier order
+     is a DIFFERENT order, not a cross-channel duplicate). Idempotency for a
+     double-fired webhook is still guaranteed by the external_id ON CONFLICT. */
+  const r = await recordSafqaOrder(syntheticOrder, businessId, { fullBody: body, primaryCreate: true });
   if (!r.ok) return { ok: false, status: 400, payload: { error: r.reason || 'ingest failed' } };
   console.log(`✅  EasyOrder→affiliate: ${r.inserted ? 'created' : 'updated'} order "${externalId}" ` +
               `(tenant ${businessId}, marketer="${syntheticOrder.marketer ?? '∅'}", sku="${syntheticOrder.sku ?? '∅'}")`);

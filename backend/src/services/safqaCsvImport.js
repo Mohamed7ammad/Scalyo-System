@@ -255,6 +255,19 @@ async function importSafqaGrid(grid0, businessId, opts = {}) {
         matchedByPhone++;
         updated++;
         matchedKeepIds.push(pm.externalId);   // its id isn't a CSV serial → protect from --replace
+        /* updateSafqaStatusByPhone updates STATUS ONLY — it is shared with the live
+           Safqa webhook, whose `total` is GROSS COD and must never be written. But
+           the CSV's `total` IS the authoritative marketer commission (العمولة), so
+           write it here; otherwise an EasyOrder-created order that phone-matches the
+           sheet would keep total=0 forever and never show its commission. Guarded to
+           > 0 so a blank/0 cell never clobbers an existing real commission. */
+        if (Number(order.total) > 0) {
+          await pool.query(
+            `UPDATE external_affiliate_orders SET total = $1, updated_at = NOW()
+               WHERE network = 'safqa' AND external_id = $2 AND business_id = $3`,
+            [order.total, pm.externalId, bid]
+          );
+        }
       } else {
         /* 2. No existing order for this phone → upsert by serial (idempotent within
            the CSV source: a re-import of the same sheet updates the same row). */
