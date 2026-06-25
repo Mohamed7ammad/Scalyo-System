@@ -616,12 +616,23 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
       SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total / GREATEST(COALESCE(quantity,1),1)) AS unit_rate
         FROM external_affiliate_orders WHERE business_id = $1 AND network = 'safqa' AND total > 0
     )`;
-  /* Effective commission per order: realized when present, else expected (only for
-     commission-earning statuses). NULL when neither applies → SUM ignores it. */
+  /* Effective commission per order: realized when present, else expected — but the
+     expected fallback applies ONLY to genuine Safqa orders (external_id LIKE 'sk-%'
+     OR an already-realized commission). An EasyOrder-only row that was never synced
+     to Safqa (UUID, total=0 — a "ghost") must NEVER receive an expected Safqa
+     commission, otherwise it inflates PROFIT. NULL when nothing applies → SUM skips. */
   const EFF = `COALESCE(NULLIF(o.total, 0),
-      CASE WHEN o.status_class IN ('confirmed','delivered')
+      CASE WHEN o.status_class IN ('confirmed','delivered') AND o.external_id LIKE 'sk-%'
            THEN ROUND(COALESCE(_r.unit_rate, _g.unit_rate) * GREATEST(COALESCE(o.quantity,1),1))
            ELSE NULL END)`;
+  /* ── GHOST EXCLUSION (Safqa-backed filter) ───────────────────────────────────
+     The dashboard mirrors the Safqa wallet, so a row counts ONLY when it is backed
+     by Safqa: it has a Safqa serial ('sk-…') OR a realized commission. EasyOrder
+     rows that were never synced to Safqa (UUID + total=0 — test/unsynced "ghosts")
+     are excluded from EVERY financial metric and order count. Permanent + self-
+     maintaining: a ghost that later syncs to Safqa gains a serial/commission and is
+     then automatically included. */
+  const SAFQA_BACKED = `(o.external_id LIKE 'sk-%' OR COALESCE(o.total, 0) > 0)`;
 
   /* Two tenant-scoped reads:
        1) the pure Safqa-order buckets (counts + EFFECTIVE-commission revenue by class)
@@ -641,7 +652,7 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
     FROM external_affiliate_orders o
     CROSS JOIN _global _g
     LEFT JOIN _rates _r ON _r.canon = ${cleanName('o.product_name')}
-    WHERE o.business_id = $1 AND o.network = 'safqa'`;
+    WHERE o.business_id = $1 AND o.network = 'safqa' AND ${SAFQA_BACKED}`;
 
   /* The order-bucket read is the single most likely silent failure point (e.g. a
      live external_affiliate_orders table created BEFORE the created_at column
@@ -839,6 +850,10 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
   const where = `
     FROM external_affiliate_orders
     WHERE network = 'safqa' AND business_id = $1
+      /* GHOST EXCLUSION (see aggregateSafqaFromDb): Safqa-backed rows only — a serial
+         or a realized commission. Un-synced EasyOrder ghosts (UUID + total=0) are
+         excluded from products / governorates / daily / rejections alike. */
+      AND (external_id LIKE 'sk-%' OR COALESCE(total, 0) > 0)
       AND ($2::date IS NULL OR COALESCE(created_at, updated_at)::date >= $2::date)
       AND ($3::date IS NULL OR COALESCE(created_at, updated_at)::date <= $3::date)
       AND ($4::text IS NULL OR product_name = $4
