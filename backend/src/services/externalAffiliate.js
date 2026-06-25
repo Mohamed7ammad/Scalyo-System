@@ -211,6 +211,42 @@ const SAFQA_STATUS_CLASS = {
   returned_exchange: 'returned',
   declined1:         'cancelled',   // call-center cancellation — NOT confirmed
   declined2:         'cancelled',
+  /* ── Completeness: additional English variants Safqa / EasyOrder also emit.
+     Missing keys silently fell through to 'pending', so a 'processing' order was
+     EXCLUDED from the CONFIRMED (in-progress) profit bucket — a real undercount. */
+  processing:        'confirmed',
+  confirmed:         'confirmed',
+  out_for_delivery:  'confirmed',
+  delivered:         'delivered',
+  completed:         'delivered',
+  received:          'delivered',
+  returned:          'returned',
+  return:            'returned',
+  cancelled:         'cancelled',
+  canceled:          'cancelled',
+  declined:          'cancelled',
+  rejected:          'cancelled',
+  /* ── Arabic statuses — the CSV import and some webhook payloads send Arabic
+     directly (e.g. 'جار التحضير', 'في الشحن'). Without these they fell to 'pending'
+     and dropped out of the in-progress aggregation. */
+  'جار التحضير':     'confirmed',
+  'قيد التحضير':     'confirmed',
+  'قيد التجهيز':     'confirmed',
+  'في الشحن':        'confirmed',
+  'قيد الشحن':       'confirmed',
+  'تم الشحن':        'confirmed',
+  'خرج للتوصيل':     'confirmed',
+  'تم التحصيل':      'delivered',
+  'تم التوصيل':      'delivered',
+  'تم التسليم':      'delivered',
+  'مرتجع':           'returned',
+  'جار الاسترجاع':   'returned',
+  'مرفوض':           'cancelled',
+  'ملغي':            'cancelled',
+  'ملغى':            'cancelled',
+  'معلق':            'pending',
+  'قيد المعالجة':    'pending',
+  'قيد المراجعة':    'pending',
 };
 function classifySafqaStatus(status) {
   return SAFQA_STATUS_CLASS[String(status || '').trim().toLowerCase()] || 'pending';
@@ -549,24 +585,63 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   /* Marketer predicate; $n is the referralCodes param position. */
   const refPred   = (n) => ` AND ($${n}::text[] IS NULL OR marketer = ANY($${n}::text[]))`;
 
+  /* ── EXPECTED-COMMISSION VALUATION (root-cause fix for the regressing PROFIT) ──
+     Safqa's webhook payload carries only the GROSS COD, never the marketer
+     commission (verified: raw.total=694 gross, no commission/net field). The real
+     commission arrives ONLY from the lagging Safqa CSV reconciliation (العمولة).
+     So an order that flows through the LIVE pipeline (EasyOrder create → Safqa
+     status webhook advances it to preparing/shipped) sits at total=0 until a CSV
+     import lands — making PROFIT (IN PROGRESS / DELIVERED) undercount, and the gap
+     GROWS as new orders arrive. THAT is the "regression".
+
+     Fix: value every commission-earning order at COALESCE(realized total, EXPECTED
+     commission). Expected = the product's median realized commission PER UNIT ×
+     quantity (Safqa pays a fixed per-product marketer commission and shows exactly
+     this expected value for in-progress orders in its wallet). Realized `total`
+     always wins when present, so delivered/reconciled orders are unaffected and the
+     figure converges to cent-exact as the CSV reconciles. Estimation is applied
+     ONLY to confirmed/delivered orders (a cancelled/returned/pending order earns
+     nothing, so it keeps its realized-or-zero value). Rates are computed tenant-
+     wide (NOT date-filtered) so a narrow date range still values orders correctly. */
+  const RATES_CTE = `
+    WITH _rates AS (
+      SELECT ${cleanName('product_name')} AS canon,
+             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total / GREATEST(COALESCE(quantity,1),1)) AS unit_rate
+        FROM external_affiliate_orders
+       WHERE business_id = $1 AND network = 'safqa' AND total > 0
+         AND ${cleanName('product_name')} IS NOT NULL AND ${cleanName('product_name')} <> ''
+       GROUP BY 1
+    ),
+    _global AS (
+      SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total / GREATEST(COALESCE(quantity,1),1)) AS unit_rate
+        FROM external_affiliate_orders WHERE business_id = $1 AND network = 'safqa' AND total > 0
+    )`;
+  /* Effective commission per order: realized when present, else expected (only for
+     commission-earning statuses). NULL when neither applies → SUM ignores it. */
+  const EFF = `COALESCE(NULLIF(o.total, 0),
+      CASE WHEN o.status_class IN ('confirmed','delivered')
+           THEN ROUND(COALESCE(_r.unit_rate, _g.unit_rate) * GREATEST(COALESCE(o.quantity,1),1))
+           ELSE NULL END)`;
+
   /* Two tenant-scoped reads:
-       1) the pure Safqa-order buckets (counts + revenue by status_class)
-       2) total Meta ad spend (expenses.meta_sync = TRUE) — drives ADS/CPP/Net.
-     Safqa pushes the marketer's earnings inside `total`, so every "profit" here
-     is a sum of `total` over the relevant status bucket (no separate field). */
+       1) the pure Safqa-order buckets (counts + EFFECTIVE-commission revenue by class)
+       2) total Meta ad spend (expenses.meta_sync = TRUE) — drives ADS/CPP/Net. */
   const ORDER_AGG_SELECT = `
+    ${RATES_CTE}
     SELECT
-      COUNT(*)::int                                            AS total,
-      COUNT(*) FILTER (WHERE status_class = 'delivered')::int  AS delivered,
-      COUNT(*) FILTER (WHERE status_class = 'confirmed')::int  AS confirmed_only,
-      COUNT(*) FILTER (WHERE status_class = 'returned')::int   AS returned,
-      COUNT(*) FILTER (WHERE status_class = 'pending')::int    AS pending,
-      COUNT(*) FILTER (WHERE LOWER(status) = 'holding')::int   AS on_hold,
-      COALESCE(SUM(total), 0)                                                          AS revenue_all,
-      COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0) AS revenue_confirmed,
-      COALESCE(SUM(total) FILTER (WHERE status_class = 'delivered'), 0)                AS revenue_delivered
-    FROM external_affiliate_orders
-    WHERE business_id = $1 AND network = 'safqa'`;
+      COUNT(*)::int                                              AS total,
+      COUNT(*) FILTER (WHERE o.status_class = 'delivered')::int  AS delivered,
+      COUNT(*) FILTER (WHERE o.status_class = 'confirmed')::int  AS confirmed_only,
+      COUNT(*) FILTER (WHERE o.status_class = 'returned')::int   AS returned,
+      COUNT(*) FILTER (WHERE o.status_class = 'pending')::int    AS pending,
+      COUNT(*) FILTER (WHERE LOWER(o.status) = 'holding')::int   AS on_hold,
+      COALESCE(SUM(${EFF}), 0)                                                            AS revenue_all,
+      COALESCE(SUM(${EFF}) FILTER (WHERE o.status_class IN ('confirmed','delivered')), 0) AS revenue_confirmed,
+      COALESCE(SUM(${EFF}) FILTER (WHERE o.status_class = 'delivered'), 0)                AS revenue_delivered
+    FROM external_affiliate_orders o
+    CROSS JOIN _global _g
+    LEFT JOIN _rates _r ON _r.canon = ${cleanName('o.product_name')}
+    WHERE o.business_id = $1 AND o.network = 'safqa'`;
 
   /* The order-bucket read is the single most likely silent failure point (e.g. a
      live external_affiliate_orders table created BEFORE the created_at column
@@ -785,7 +860,7 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
   const REV  = `COALESCE(SUM(total) FILTER (WHERE ${DELV}), 0)`;
 
   try {
-    const [dailyR, govR, rejR, prodR, adR] = await Promise.all([
+    const [dailyR, govR, rejR, prodR, grR, adR] = await Promise.all([
       pool.query(`
         SELECT TO_CHAR(COALESCE(created_at, updated_at)::date, 'YYYY-MM-DD') AS date,
                COUNT(*)::int                              AS orders,
@@ -835,9 +910,25 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
                /* Confirmed-bucket commission (in-pipeline + delivered, EXCLUDES
                   returns — mirrors the top grid's revenue_confirmed). Used to derive
                   the per-product Profit-In-Progress / Future-Balance / Forecasted-Net. */
-               COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0) AS confirmed_revenue
+               COALESCE(SUM(total) FILTER (WHERE status_class IN ('confirmed','delivered')), 0) AS confirmed_revenue,
+               /* EXPECTED-COMMISSION inputs (see aggregateSafqaFromDb): this product's
+                  median realised commission per unit, plus the unit count of orders
+                  still missing their commission (total=0) in each money bucket — so JS
+                  can value them at expected = rate × units (Safqa's wallet logic). */
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total / GREATEST(COALESCE(quantity,1),1))
+                 FILTER (WHERE total > 0)                                              AS unit_rate,
+               COALESCE(SUM(GREATEST(COALESCE(quantity,1),1))
+                 FILTER (WHERE ${DELV} AND COALESCE(total,0) = 0), 0)::int             AS zero_delivered_units,
+               COALESCE(SUM(GREATEST(COALESCE(quantity,1),1))
+                 FILTER (WHERE status_class IN ('confirmed','delivered') AND COALESCE(total,0) = 0), 0)::int AS zero_pipe_units
         ${where}
         GROUP BY group_key ORDER BY delivered_revenue DESC`, params),
+      /* Tenant-wide global median commission/unit — fallback rate for products that
+         have no funded orders of their own yet. */
+      pool.query(`
+        SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total / GREATEST(COALESCE(quantity,1),1)) AS unit_rate
+          FROM external_affiliate_orders WHERE business_id = $1 AND network = 'safqa' AND total > 0`,
+        [businessId]),
       /* Meta campaign-level spend for THIS tenant (the affiliate's own ad spend),
          date-filtered on expense_date. Attributed per product in JS by the
          naming convention: campaign name CONTAINS the product SKU. Strictly
@@ -884,6 +975,8 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
       .filter((c) => c.spend > 0)
       .filter((c) => !selCampU || c.name === selCampU);
     const r2 = (x) => Math.round(num(x) * 100) / 100;
+    /* Tenant-wide fallback commission/unit for products without funded orders. */
+    const globalRate = num(grR.rows[0] && grR.rows[0].unit_rate);
 
     const products = prodR.rows.map((r) => {
       const delivered   = num(r.delivered);
@@ -891,8 +984,14 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
       const confirmed   = num(r.confirmed);
       const totalOrders = num(r.total_orders);
       const resolved    = delivered + returned;
-      const revenue     = Math.round(num(r.delivered_revenue));   // commission realised on delivery
       const sku         = (r.sku || '').trim();
+
+      /* EXPECTED-COMMISSION valuation (same root-cause fix as the top grid): orders
+         still awaiting their commission (total=0) are valued at this product's
+         median realised commission/unit × their units, so PROFIT (DELIVERED / IN
+         PROGRESS) doesn't undercount live orders before a CSV reconciliation. */
+      const unitRate = num(r.unit_rate) || globalRate;
+      const revenue  = Math.round(num(r.delivered_revenue) + unitRate * num(r.zero_delivered_units));
 
       /* Product Ad Spend = Σ spend of campaigns whose name contains this SKU. */
       let adSpend = 0;
@@ -920,7 +1019,7 @@ async function aggregateSafqaBreakdowns(businessId, opts = {}) {
          futureBalance    = profitInProgress × DR  (expected to still convert).
          netProfit        = delivered revenue − attributed ad spend  (realised).
          forecastedNet    = netProfit + futureBalance  (realised + expected). */
-      const confirmedRevenue = Math.round(num(r.confirmed_revenue));
+      const confirmedRevenue = Math.round(num(r.confirmed_revenue) + unitRate * num(r.zero_pipe_units));
       const profitInProgress = Math.max(0, confirmedRevenue - revenue);
       const futureBalance    = Math.round(profitInProgress * drDec);
       const netProfit        = Math.round(revenue - adSpend);
