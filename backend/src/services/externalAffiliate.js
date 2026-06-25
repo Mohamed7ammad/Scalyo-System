@@ -325,10 +325,12 @@ function normalizeMarketer(raw) {
    guards) — auto-commission only FILLS orders that have none yet, so historical
    figures stay exact while new orders no longer need a CSV. */
 const COMMISSION_RATES = {
-  /* ── User-confirmed fixed rates ─────────────────────────────────────────── */
-  QSMEFF3: 273, BWTJZ:       273,   // بوتجاز / Stove
+  /* ── Aligned to the live EO base-cost commission (selling − base) so the FALLBACK
+     matches what `calc_commission` produces for the same products. Only used when an
+     order has no base cost yet; once a base cost is set the exact calc wins. ──────── */
+  QSMEFF3: 300, BWTJZ:       300,   // بوتجاز / Stove   (was 273)
   OAOPRJR: 300, 'HZM-LTDFY': 300,   // حزام التدفئة / Heating belt
-  YQASPQV: 266, 'FRSH-LTNZYF': 266, // فرشة التنظيف / Cleaning brush
+  YQASPQV: 281, 'FRSH-LTNZYF': 281, // فرشة التنظيف / Cleaning brush (was 266)
   /* ── Derived from historical median commission/unit — VERIFY with Safqa ──── */
   EAADYOP: 490,   // سماعة miniso x33 / Headset
   B3MVO7Q: 440,   // كاميرا 1080p / Camera

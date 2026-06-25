@@ -205,14 +205,19 @@ function extractItemBaseCost(body) {
 function calcExactCommission(body) {
   const grossCod = money(body?.total_cost ?? body?.totalCost ?? body?.total) ?? 0;
   if (grossCod <= 0) return 0;
-  /* PRIMARY: top-level expense = base + shipping → commission = total_cost − expense
-     (quantity-safe). Guard: expense must be below the gross so commission stays > 0. */
-  const topExpense = money(body?.expense);
-  if (topExpense != null && topExpense < grossCod) return Math.round(grossCod - topExpense);
-  /* FALLBACK: per-item product.expense (base only) → subtract shipping ourselves. */
   const shipping = money(body?.shipping_cost ?? body?.shippingCost) ?? 0;
+  /* PRIMARY: top-level `expense` = base + shipping → commission = total_cost − expense
+     (quantity-safe). ⚠️ CRITICAL GUARD: a real base cost exists ONLY when
+     expense > shipping. If expense == shipping the merchant set NO base cost (EO
+     returns shipping alone), so total_cost − expense would be the WHOLE selling price
+     — we must NOT treat that as commission. Fall through to per-item, then fixed-rate. */
+  const topExpense = money(body?.expense);
+  if (topExpense != null && topExpense > shipping && topExpense < grossCod) {
+    return Math.round(grossCod - topExpense);
+  }
+  /* FALLBACK: per-item product.expense (pure base, no shipping) → subtract shipping. */
   const base = extractItemBaseCost(body);
-  if (base != null) { const c = (grossCod - shipping) - base; return c > 0 ? Math.round(c) : 0; }
+  if (base != null && base > 0) { const c = (grossCod - shipping) - base; return c > 0 ? Math.round(c) : 0; }
   return 0;
 }
 
