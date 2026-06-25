@@ -168,51 +168,52 @@ function extractOrderFields(body) {
   };
 }
 
-/* ── EXACT auto-commission — base/buying-cost extractor ───────────────────────
-   Commission = (gross COD − shipping) − base cost = selling price − base cost.
-   ⚠️ CRITICAL: read ONLY explicit BUYING/BASE-cost keys. In EasyOrder the SELLING
-   price lives in `cost`, `price`, `sale_price`, and `cart_items[].price` — those
-   must NEVER be used as the base. The merchant enters the base ("تكلفة المنتج")
-   manually; once a test order confirms the exact JSON key it lands in, ensure it
-   is in BASE_COST_KEYS below (top-level or per cart item). */
-const BASE_COST_KEYS = [
-  'product_cost', 'base_cost', 'buying_cost', 'buying_price',
-  'cost_price', 'purchase_price', 'wholesale_cost', 'wholesale_price',
-];
+/* ── EXACT auto-commission — EasyOrder cost extraction ────────────────────────
+   Commission = selling price − base cost. EasyOrder exposes the base cost under the
+   key `expense` (confirmed from a live payload):
+     • TOP-LEVEL `expense` = base cost + shipping, ALREADY aggregated over every item
+       and quantity. So commission = total_cost − expense — shipping cancels and it
+       is quantity-safe by construction. This is the PRIMARY path.
+         e.g. total_cost 664 − expense 364 = 300  ( = selling 579 − base 279 ).
+     • PER-ITEM `cart_items[].product.expense` = per-unit base cost (NO shipping):
+       base = Σ(expense × qty); commission = (total_cost − shipping) − base. FALLBACK.
+   ⚠️ CRITICAL: the SELLING price lives in `cost` / `price` / `sale_price` /
+   `cart_items[].price` (all 579 here) — those are NEVER the base cost. */
 function money(v) {
   if (v == null) return null;
   const n = Number(String(v).replace(/[^0-9.]/g, ''));
   return Number.isFinite(n) && n > 0 ? n : null;
 }
-/* Whole-order base cost (order-level field if present, else Σ per-item × qty), or
-   null when the merchant hasn't entered a base cost (→ fixed-rate fallback later). */
-function extractBaseCost(body) {
-  if (!body || typeof body !== 'object') return null;
-  for (const k of BASE_COST_KEYS) { const v = money(body[k]); if (v != null) return v; }
-  const items = Array.isArray(body.cart_items) ? body.cart_items : [];
+/* Per-item base cost (Σ over cart items × qty) from EasyOrder's per-item `expense`
+   (with a few defensive aliases), or null when none is present. */
+function extractItemBaseCost(body) {
+  const items = Array.isArray(body?.cart_items) ? body.cart_items : [];
   let sum = 0, found = false;
   for (const it of items) {
     const qty = Math.max(1, parseInt(it?.quantity ?? it?.qty ?? 1, 10) || 1);
     let unit = null;
-    for (const k of BASE_COST_KEYS) {
-      unit = money(it?.[k]) ?? money(it?.product?.[k]);
+    for (const k of ['expense', 'buying_price', 'cost_price', 'base_cost', 'purchase_price', 'product_cost']) {
+      unit = money(it?.product?.[k]) ?? money(it?.[k]);
       if (unit != null) break;
     }
     if (unit != null) { sum += unit * qty; found = true; }
   }
   return found ? sum : null;
 }
-/* The EXACT net commission for an order, computed from its real EasyOrder costs.
-   Returns 0 when no base cost is present (so the Safqa webhook falls back to the
-   fixed COMMISSION_RATES dictionary) or when the maths is degenerate. */
+/* EXACT net commission from the order's real EasyOrder costs. Returns 0 when no base
+   cost is present (→ the Safqa webhook falls back to the fixed COMMISSION_RATES). */
 function calcExactCommission(body) {
   const grossCod = money(body?.total_cost ?? body?.totalCost ?? body?.total) ?? 0;
+  if (grossCod <= 0) return 0;
+  /* PRIMARY: top-level expense = base + shipping → commission = total_cost − expense
+     (quantity-safe). Guard: expense must be below the gross so commission stays > 0. */
+  const topExpense = money(body?.expense);
+  if (topExpense != null && topExpense < grossCod) return Math.round(grossCod - topExpense);
+  /* FALLBACK: per-item product.expense (base only) → subtract shipping ourselves. */
   const shipping = money(body?.shipping_cost ?? body?.shippingCost) ?? 0;
-  const baseCost = extractBaseCost(body);
-  if (baseCost == null || grossCod <= 0) return 0;
-  const sellingPrice = grossCod - shipping;            // = product price, no shipping
-  const commission   = sellingPrice - baseCost;        // selling − base
-  return commission > 0 ? Math.round(commission) : 0;
+  const base = extractItemBaseCost(body);
+  if (base != null) { const c = (grossCod - shipping) - base; return c > 0 ? Math.round(c) : 0; }
+  return 0;
 }
 
 /* ── Assignment helpers ───────────────────────────────────────────────────────
@@ -621,3 +622,5 @@ router.post('/safqa/:businessId', async (req, res) => {
 });
 
 module.exports = router;
+/* Exposed for unit tests / reuse (does not affect the router mount). */
+module.exports.calcExactCommission = calcExactCommission;
