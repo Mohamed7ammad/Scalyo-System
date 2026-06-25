@@ -168,6 +168,53 @@ function extractOrderFields(body) {
   };
 }
 
+/* ── EXACT auto-commission — base/buying-cost extractor ───────────────────────
+   Commission = (gross COD − shipping) − base cost = selling price − base cost.
+   ⚠️ CRITICAL: read ONLY explicit BUYING/BASE-cost keys. In EasyOrder the SELLING
+   price lives in `cost`, `price`, `sale_price`, and `cart_items[].price` — those
+   must NEVER be used as the base. The merchant enters the base ("تكلفة المنتج")
+   manually; once a test order confirms the exact JSON key it lands in, ensure it
+   is in BASE_COST_KEYS below (top-level or per cart item). */
+const BASE_COST_KEYS = [
+  'product_cost', 'base_cost', 'buying_cost', 'buying_price',
+  'cost_price', 'purchase_price', 'wholesale_cost', 'wholesale_price',
+];
+function money(v) {
+  if (v == null) return null;
+  const n = Number(String(v).replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+/* Whole-order base cost (order-level field if present, else Σ per-item × qty), or
+   null when the merchant hasn't entered a base cost (→ fixed-rate fallback later). */
+function extractBaseCost(body) {
+  if (!body || typeof body !== 'object') return null;
+  for (const k of BASE_COST_KEYS) { const v = money(body[k]); if (v != null) return v; }
+  const items = Array.isArray(body.cart_items) ? body.cart_items : [];
+  let sum = 0, found = false;
+  for (const it of items) {
+    const qty = Math.max(1, parseInt(it?.quantity ?? it?.qty ?? 1, 10) || 1);
+    let unit = null;
+    for (const k of BASE_COST_KEYS) {
+      unit = money(it?.[k]) ?? money(it?.product?.[k]);
+      if (unit != null) break;
+    }
+    if (unit != null) { sum += unit * qty; found = true; }
+  }
+  return found ? sum : null;
+}
+/* The EXACT net commission for an order, computed from its real EasyOrder costs.
+   Returns 0 when no base cost is present (so the Safqa webhook falls back to the
+   fixed COMMISSION_RATES dictionary) or when the maths is degenerate. */
+function calcExactCommission(body) {
+  const grossCod = money(body?.total_cost ?? body?.totalCost ?? body?.total) ?? 0;
+  const shipping = money(body?.shipping_cost ?? body?.shippingCost) ?? 0;
+  const baseCost = extractBaseCost(body);
+  if (baseCost == null || grossCod <= 0) return 0;
+  const sellingPrice = grossCod - shipping;            // = product price, no shipping
+  const commission   = sellingPrice - baseCost;        // selling − base
+  return commission > 0 ? Math.round(commission) : 0;
+}
+
 /* ── Assignment helpers ───────────────────────────────────────────────────────
    Persist one order to an agent (tenant-scoped). Returns the updated row.       */
 async function assignOrderTo(orderId, businessId, email) {
@@ -296,6 +343,12 @@ async function ingestEasyOrderAffiliate(body, businessId) {
   const knownCodes = await loadMarketerCodes(businessId);
   const marketer = resolveMarketerCode(body, knownCodes) || 'main_account';
 
+  /* EXACT commission from EasyOrder's real costs (selling − base). HELD in
+     calc_commission (NOT total) so this order can't enter the financials until
+     Safqa accepts it; the Safqa-touch paths then promote it. 0 when no base cost
+     was entered → the Safqa webhook falls back to the fixed COMMISSION_RATES. */
+  const calcCommission = calcExactCommission(body);
+
   /* Build a Safqa-shaped order object so recordSafqaOrder handles the upsert,
      status classification, phone normalisation and full-envelope raw capture. */
   const syntheticOrder = {
@@ -303,7 +356,8 @@ async function ingestEasyOrderAffiliate(body, businessId) {
     serial_number: externalId,
     status:        'pending',          // created — call-center confirmation not done yet
     status_ar:     'قيد المعالجة',
-    total:         0,                  // commission unknown until Safqa confirms
+    total:         0,                  // stays 0 — commission is held in calc_commission
+    calc_commission: calcCommission,   // exact (selling − base); promoted on Safqa touch
     /* Attribution: the canonical media-buyer resolved from utm_campaign / referral
        (see resolveMarketerCode above). Orders with no attributable buyer are
        ORGANIC → 'main_account' (not null/'-') so the dashboard can isolate them via

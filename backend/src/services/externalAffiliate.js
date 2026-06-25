@@ -163,6 +163,11 @@ pool.query(`
      status. Stored NORMALISED (digits-only, last 11) for reliable cross-source
      matching. NULL on legacy/CSV rows. */
   .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS client_phone VARCHAR(50)`))
+  /* calc_commission — the EXACT net commission computed at EasyOrder creation from
+     the order's real costs (selling − base). It is HELD here (not in `total`) so an
+     unsynced ghost never enters the financials; the Safqa-touch paths promote it
+     into `total` the moment Safqa accepts the order. Default 0 = "not computed". */
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS calc_commission NUMERIC(12,2) DEFAULT 0`))
   .then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS external_affiliate_orders_phone_idx
       ON external_affiliate_orders (business_id, client_phone)
@@ -434,6 +439,10 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   const quantity    = Number.isFinite(parseInt(qtyRaw, 10)) ? parseInt(qtyRaw, 10) : null;
   /* Customer phone — the matching key for the Safqa status webhook. */
   const clientPhone = normalizePhone(pick('client_phone1', 'client_phone', 'phone', 'client_phone2', 'mobile'));
+  /* EXACT pre-computed commission held from the EasyOrder creation (selling − base).
+     Stored but NOT promoted to `total` here — it stays "held" until Safqa touches
+     the order (so a ghost never enters the financials). 0 when not provided. */
+  const calcCommission = num(order?.calc_commission);
 
   /* ── CROSS-CHANNEL DEDUP (EasyOrder UUID ⨯ Safqa serial) ─────────────────────
      The SAME physical order can arrive under two different keys: the EasyOrder
@@ -457,8 +466,9 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
     const merged = await pool.query(
       `UPDATE external_affiliate_orders e
           SET status=$3, status_ar=$4, status_class=$5,
-              /* PRESERVE existing realized commission; only fill when it's still 0. */
-              total        = COALESCE(NULLIF(e.total, 0), $6::numeric),
+              /* Promote on Safqa touch: keep realized → else the EO-held exact
+                 commission → else the new (fixed-rate) value. Never overwrites. */
+              total        = COALESCE(NULLIF(e.total, 0), NULLIF(e.calc_commission, 0), $6::numeric),
               marketer     = COALESCE(NULLIF($7, 'main_account'), e.marketer),
               product_name = COALESCE($8, e.product_name),
               sku          = COALESCE($9, e.sku),
@@ -487,16 +497,21 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
   const { rows } = await pool.query(
     `INSERT INTO external_affiliate_orders
        (network, external_id, business_id, status, status_ar, status_class, total, marketer,
-        product_name, sku, governorate, note, quantity, client_phone, raw, updated_at)
-     VALUES ('safqa', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, NOW())
+        product_name, sku, governorate, note, quantity, client_phone, raw, calc_commission, updated_at)
+     VALUES ('safqa', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, NOW())
      ON CONFLICT (network, external_id, business_id)
      DO UPDATE SET status       = EXCLUDED.status,
                    status_ar    = EXCLUDED.status_ar,
                    status_class = EXCLUDED.status_class,
-                   /* PRESERVE existing realized commission — a re-fired webhook
-                      (auto-commission) must never overwrite a value already set;
-                      only fill when the stored commission is still 0. */
-                   total        = COALESCE(NULLIF(external_affiliate_orders.total, 0), EXCLUDED.total),
+                   /* PROMOTE on Safqa touch, never overwrite: keep a realized value,
+                      else promote the EO-held exact commission, else take the new
+                      (fixed-rate) value. So the order shows its EXACT commission the
+                      moment Safqa accepts it, and is never clobbered afterwards. */
+                   total        = COALESCE(NULLIF(external_affiliate_orders.total, 0),
+                                           NULLIF(external_affiliate_orders.calc_commission, 0),
+                                           EXCLUDED.total),
+                   /* Keep the EO-held exact commission available for promotion. */
+                   calc_commission = COALESCE(NULLIF(EXCLUDED.calc_commission, 0), external_affiliate_orders.calc_commission),
                    marketer     = COALESCE(NULLIF(EXCLUDED.marketer, 'main_account'), external_affiliate_orders.marketer),
                    product_name = COALESCE(EXCLUDED.product_name, external_affiliate_orders.product_name),
                    sku          = COALESCE(EXCLUDED.sku,          external_affiliate_orders.sku),
@@ -508,7 +523,7 @@ async function recordSafqaOrder(order, businessId, opts = {}) {
                    updated_at   = NOW()
      RETURNING (xmax = 0) AS inserted`,
     [externalId, businessId, status, statusAr, statusClass, total, marketer,
-     productName, sku, governorate, note, quantity, clientPhone, JSON.stringify(rawToStore ?? {})]
+     productName, sku, governorate, note, quantity, clientPhone, JSON.stringify(rawToStore ?? {}), calcCommission]
   );
   return { ok: true, inserted: rows[0]?.inserted === true, externalId, statusClass };
 }
@@ -539,7 +554,7 @@ async function updateSafqaStatusByPhone(order, businessId) {
      commission (COALESCE(NULLIF(total,0), …)) so a realized value is never lost. */
 
   const { rows } = await pool.query(
-    `SELECT id, external_id, sku AS row_sku, quantity AS row_qty
+    `SELECT id, external_id, sku AS row_sku, quantity AS row_qty, calc_commission AS row_calc
        FROM external_affiliate_orders
       WHERE business_id = $1 AND network = 'safqa' AND client_phone = $2
         AND ($3::text IS NULL OR UPPER(TRIM(COALESCE(sku,''))) = UPPER(TRIM($3)))
@@ -552,8 +567,12 @@ async function updateSafqaStatusByPhone(order, businessId) {
     return { ok: true, matched: false, reason: 'no matching EasyOrder-created row for phone' };
   }
 
-  /* Net commission from the matched order's product SKU (slug or Safqa code). */
-  const autoCommission = commissionFor(rows[0].row_sku, rows[0].row_qty);
+  /* Commission to PROMOTE into total: prefer the EXACT EO-held value (selling −
+     base, computed at creation); fall back to the fixed-rate dictionary when no
+     base cost was provided. The UPDATE keeps any already-realized value. */
+  const promoted = num(rows[0].row_calc) > 0
+    ? num(rows[0].row_calc)
+    : commissionFor(rows[0].row_sku, rows[0].row_qty);
 
   await pool.query(
     `UPDATE external_affiliate_orders
@@ -563,7 +582,7 @@ async function updateSafqaStatusByPhone(order, businessId) {
             total        = COALESCE(NULLIF(total, 0), $6::numeric),
             updated_at   = NOW()
       WHERE id = $4 AND business_id = $5`,
-    [status, statusAr, statusClass, rows[0].id, businessId, autoCommission]
+    [status, statusAr, statusClass, rows[0].id, businessId, promoted]
   );
   return { ok: true, matched: true, externalId: rows[0].external_id, statusClass };
 }
