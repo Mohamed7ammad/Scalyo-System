@@ -692,60 +692,25 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
   /* Marketer predicate; $n is the referralCodes param position. */
   const refPred   = (n) => ` AND ($${n}::text[] IS NULL OR marketer = ANY($${n}::text[]))`;
 
-  /* ── EXPECTED-COMMISSION VALUATION (root-cause fix for the regressing PROFIT) ──
-     Safqa's webhook payload carries only the GROSS COD, never the marketer
-     commission (verified: raw.total=694 gross, no commission/net field). The real
-     commission arrives ONLY from the lagging Safqa CSV reconciliation (العمولة).
-     So an order that flows through the LIVE pipeline (EasyOrder create → Safqa
-     status webhook advances it to preparing/shipped) sits at total=0 until a CSV
-     import lands — making PROFIT (IN PROGRESS / DELIVERED) undercount, and the gap
-     GROWS as new orders arrive. THAT is the "regression".
-
-     Fix: value every commission-earning order at COALESCE(realized total, EXPECTED
-     commission). Expected = the product's median realized commission PER UNIT ×
-     quantity (Safqa pays a fixed per-product marketer commission and shows exactly
-     this expected value for in-progress orders in its wallet). Realized `total`
-     always wins when present, so delivered/reconciled orders are unaffected and the
-     figure converges to cent-exact as the CSV reconciles. Estimation is applied
-     ONLY to confirmed/delivered orders (a cancelled/returned/pending order earns
-     nothing, so it keeps its realized-or-zero value). Rates are computed tenant-
-     wide (NOT date-filtered) so a narrow date range still values orders correctly. */
-  const RATES_CTE = `
-    WITH _rates AS (
-      SELECT ${cleanName('product_name')} AS canon,
-             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total / GREATEST(COALESCE(quantity,1),1)) AS unit_rate
-        FROM external_affiliate_orders
-       WHERE business_id = $1 AND network = 'safqa' AND total > 0
-         AND ${cleanName('product_name')} IS NOT NULL AND ${cleanName('product_name')} <> ''
-       GROUP BY 1
-    ),
-    _global AS (
-      SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total / GREATEST(COALESCE(quantity,1),1)) AS unit_rate
-        FROM external_affiliate_orders WHERE business_id = $1 AND network = 'safqa' AND total > 0
-    )`;
-  /* Effective commission per order: realized when present, else expected — but the
-     expected fallback applies ONLY to genuine Safqa orders (external_id LIKE 'sk-%'
-     OR an already-realized commission). An EasyOrder-only row that was never synced
-     to Safqa (UUID, total=0 — a "ghost") must NEVER receive an expected Safqa
-     commission, otherwise it inflates PROFIT. NULL when nothing applies → SUM skips. */
-  const EFF = `COALESCE(NULLIF(o.total, 0),
-      CASE WHEN o.status_class IN ('confirmed','delivered') AND o.external_id LIKE 'sk-%'
-           THEN ROUND(COALESCE(_r.unit_rate, _g.unit_rate) * GREATEST(COALESCE(o.quantity,1),1))
-           ELSE NULL END)`;
+  /* ── REALIZED-ONLY commission (no estimation) ────────────────────────────────
+     Commission per order = the value stored in `total`. EasyOrder now writes the
+     exact calc_commission on every order (selling − base) and the Safqa webhook
+     promotes it, so every legitimate order already carries its real commission —
+     there is nothing to estimate. The previous EXPECTED-commission valuation
+     estimated zero-commission Safqa-webhook duplicate rows at a fixed rate, which
+     INFLATED in-progress profit; removing it makes the dashboard a pure mirror of
+     realized commission, matching the Safqa wallet. */
+  const EFF = `COALESCE(o.total, 0)`;
   /* ── GHOST EXCLUSION (Safqa-backed filter) ───────────────────────────────────
-     The dashboard mirrors the Safqa wallet, so a row counts ONLY when it is backed
-     by Safqa: it has a Safqa serial ('sk-…') OR a realized commission. EasyOrder
-     rows that were never synced to Safqa (UUID + total=0 — test/unsynced "ghosts")
-     are excluded from EVERY financial metric and order count. Permanent + self-
-     maintaining: a ghost that later syncs to Safqa gains a serial/commission and is
-     then automatically included. */
-  const SAFQA_BACKED = `(o.external_id LIKE 'sk-%' OR COALESCE(o.total, 0) > 0)`;
+     A row counts ONLY when it is backed by Safqa: a Safqa serial (external_id 'sk-…'
+     OR the injected safqa_serial), or a realized commission. Unsynced EasyOrder
+     ghosts (UUID + total=0 + no serial) are excluded from every metric. */
+  const SAFQA_BACKED = `(o.external_id LIKE 'sk-%' OR o.safqa_serial IS NOT NULL OR COALESCE(o.total, 0) > 0)`;
 
   /* Two tenant-scoped reads:
-       1) the pure Safqa-order buckets (counts + EFFECTIVE-commission revenue by class)
+       1) the pure Safqa-order buckets (counts + realized-commission revenue by class)
        2) total Meta ad spend (expenses.meta_sync = TRUE) — drives ADS/CPP/Net. */
   const ORDER_AGG_SELECT = `
-    ${RATES_CTE}
     SELECT
       COUNT(*)::int                                              AS total,
       COUNT(*) FILTER (WHERE o.status_class = 'delivered')::int  AS delivered,
@@ -757,8 +722,6 @@ async function aggregateSafqaFromDb(businessId, connected = false, opts = {}) {
       COALESCE(SUM(${EFF}) FILTER (WHERE o.status_class IN ('confirmed','delivered')), 0) AS revenue_confirmed,
       COALESCE(SUM(${EFF}) FILTER (WHERE o.status_class = 'delivered'), 0)                AS revenue_delivered
     FROM external_affiliate_orders o
-    CROSS JOIN _global _g
-    LEFT JOIN _rates _r ON _r.canon = ${cleanName('o.product_name')}
     WHERE o.business_id = $1 AND o.network = 'safqa' AND ${SAFQA_BACKED}`;
 
   /* The order-bucket read is the single most likely silent failure point (e.g. a
