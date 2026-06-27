@@ -592,32 +592,33 @@ router.post('/safqa/:businessId', async (req, res) => {
        status + client_phone1 (+commission `total`). Match the existing row by
        phone and update its status/commission — do NOT create a new marketer-less,
        sku-less row. */
+    /* ── SAFQA = SUPPLEMENT ONLY ─────────────────────────────────────────────────
+       EasyOrder is the PRIMARY source (it owns marketer + commission). The Safqa
+       webhook must only MATCH the existing EasyOrder row (by phone) and inject the
+       serial + confirm status — it must NEVER spawn a standalone sk- row, which was
+       the "duplicate factory" behind the dual-webhook clash. */
     const matchRes = await updateSafqaStatusByPhone(order, businessId);
     if (matchRes.matched) {
       return res.status(200).json({
-        ok: true, action: 'status_updated',
-        external_id: matchRes.externalId, status_class: matchRes.statusClass,
+        ok: true, action: 'supplemented', external_id: matchRes.externalId,
+        safqa_serial: matchRes.safqaSerial, status_class: matchRes.statusClass,
       });
     }
 
-    /* No EasyOrder-created row for this phone. DEFAULT (safe): fall back to the
-       legacy create-by-serial behaviour so Safqa-only tenants (no EasyOrder
-       webhook yet) keep ingesting — this can never duplicate, because an order
-       that DID come through EasyOrder always phone-matches above. Once EVERY
-       affiliate tenant is on the double-webhook, set SAFQA_CREATE_ON_NO_MATCH=false
-       to strictly skip instead. Always 200 so Safqa never retry-storms. */
-    const strictSkip = String(process.env.SAFQA_CREATE_ON_NO_MATCH).toLowerCase() === 'false';
-    if (!strictSkip) {
-      /* totalIsGross: Safqa's webhook `total` is the GROSS COD value, not the
-         marketer commission — don't store it as commission (it would inflate
-         PROFIT). The real commission is set later from the Safqa CSV (العمولة). */
+    /* No EasyOrder row for this phone yet (e.g. Safqa push arrived before EasyOrder's,
+       or a Safqa-only order). DEFAULT: SKIP — do NOT create an sk- row (that's what
+       produced the duplicates). The order is ingested when its EasyOrder webhook
+       arrives, and the next Safqa push then supplements its serial. Opt back into the
+       legacy create ONLY with SAFQA_CREATE_ON_NO_MATCH=true. Always 200 (no retry-storm). */
+    const allowCreate = String(process.env.SAFQA_CREATE_ON_NO_MATCH).toLowerCase() === 'true';
+    if (allowCreate) {
       const created = await recordSafqaOrder(order, businessId, { fullBody: body, totalIsGross: true });
-      console.log(`ℹ️  Safqa webhook: no phone match → legacy create (external_id=${created.externalId}, tenant ${businessId})`);
+      console.log(`ℹ️  Safqa webhook: no phone match → legacy create (opt-in) external_id=${created.externalId}, tenant ${businessId}`);
       return res.status(200).json({ ok: true, action: created.inserted ? 'created' : 'updated', external_id: created.externalId, status_class: created.statusClass });
     }
-    console.warn(
-      `⚠️  Safqa webhook: no EasyOrder row matched phone (${matchRes.reason}) — status update SKIPPED (strict mode). ` +
-      `serial=${order.serial_number ?? order._id}, tenant ${businessId}.`
+    console.log(
+      `ℹ️  Safqa webhook: no EasyOrder row for phone (${matchRes.reason}) — supplement SKIPPED (no sk- row created). ` +
+      `serial=${order.serial_number ?? order._id}, tenant ${businessId}. Will supplement once EasyOrder ingests it.`
     );
     return res.status(200).json({ ok: true, action: 'skipped_no_match', reason: matchRes.reason });
   } catch (err) {

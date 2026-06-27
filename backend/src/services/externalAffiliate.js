@@ -168,6 +168,11 @@ pool.query(`
      unsynced ghost never enters the financials; the Safqa-touch paths promote it
      into `total` the moment Safqa accepts the order. Default 0 = "not computed". */
   .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS calc_commission NUMERIC(12,2) DEFAULT 0`))
+  /* safqa_serial — the Safqa order code ('sk-…') stored ON the canonical EasyOrder
+     row. Single-row architecture: EasyOrder owns money+marketer, the Safqa webhook
+     only INJECTS this serial (+confirms status) into the existing row instead of
+     spawning a separate sk- row. NULL until a Safqa push supplements the order. */
+  .then(() => pool.query(`ALTER TABLE external_affiliate_orders ADD COLUMN IF NOT EXISTS safqa_serial VARCHAR(80)`))
   .then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS external_affiliate_orders_phone_idx
       ON external_affiliate_orders (business_id, client_phone)
@@ -576,17 +581,21 @@ async function updateSafqaStatusByPhone(order, businessId) {
     ? num(rows[0].row_calc)
     : commissionFor(rows[0].row_sku, rows[0].row_qty);
 
+  /* SUPPLEMENT role: inject the Safqa serial onto the canonical EO row so we have
+     the Safqa routing key WITHOUT spawning a separate sk- row. Filled once and kept. */
+  const safqaSerial = String(order?.serial_number ?? order?.serialNumber ?? order?.serial ?? '').trim() || null;
   await pool.query(
     `UPDATE external_affiliate_orders
         SET status       = $1,
             status_ar    = COALESCE($2, status_ar),
             status_class = $3,
             total        = COALESCE(NULLIF(total, 0), $6::numeric),
+            safqa_serial = COALESCE(safqa_serial, $7),
             updated_at   = NOW()
       WHERE id = $4 AND business_id = $5`,
-    [status, statusAr, statusClass, rows[0].id, businessId, promoted]
+    [status, statusAr, statusClass, rows[0].id, businessId, promoted, safqaSerial]
   );
-  return { ok: true, matched: true, externalId: rows[0].external_id, statusClass };
+  return { ok: true, matched: true, externalId: rows[0].external_id, statusClass, safqaSerial };
 }
 
 /* ── Ghost-order auto-purge ──────────────────────────────────────────────────
