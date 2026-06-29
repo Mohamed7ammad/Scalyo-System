@@ -1044,15 +1044,38 @@ export default function DashboardPage() {
   };
 
   // Role-agnostic out-of-stock check. Admins get the exact `stock_quantity`;
-  // employees receive only the derived `in_stock` boolean. Returns false when
-  // the product can't be resolved (still loading / not linked to the catalog),
-  // so we never block on missing data.
+  // employees receive the derived `stock_status`. Returns false when the product
+  // can't be resolved (still loading / not linked to the catalog), so we never
+  // block on missing data.
   const isOutOfStock = (shortName: string): boolean => {
     const found = findCatalogProduct(shortName);
     if (!found) return false;
     if (typeof found.stock_quantity === 'number') return found.stock_quantity === 0;
-    if (typeof found.in_stock === 'boolean')       return !found.in_stock;
-    return false;
+    return found.stock_status === 'OUT_OF_STOCK';
+  };
+
+  // Resolve a product to the employee-facing 3-tier stock state. Admins carry the
+  // exact `stock_quantity`, so we derive the same tiers from it for consistency;
+  // employees carry the pre-computed `stock_status` (+ `low_stock_count` in the
+  // 1–5 band). Returns null when the product isn't resolvable yet.
+  type EmployeeStock =
+    | { tier: 'IN_STOCK' }
+    | { tier: 'LOW_STOCK'; count: number }
+    | { tier: 'OUT_OF_STOCK' };
+  const getEmployeeStockStatus = (shortName: string): EmployeeStock | null => {
+    const found = findCatalogProduct(shortName);
+    if (!found) return null;
+    if (typeof found.stock_quantity === 'number') {
+      if (found.stock_quantity === 0) return { tier: 'OUT_OF_STOCK' };
+      if (found.stock_quantity <= 5)  return { tier: 'LOW_STOCK', count: found.stock_quantity };
+      return { tier: 'IN_STOCK' };
+    }
+    switch (found.stock_status) {
+      case 'OUT_OF_STOCK': return { tier: 'OUT_OF_STOCK' };
+      case 'LOW_STOCK':    return { tier: 'LOW_STOCK', count: found.low_stock_count ?? 0 };
+      case 'IN_STOCK':     return { tier: 'IN_STOCK' };
+      default:             return null;
+    }
   };
 
   // Selecting a product filter pill. For employees, picking an out-of-stock
@@ -2382,7 +2405,7 @@ export default function DashboardPage() {
                 // order-derived price only when the product isn't linked to inventory.
                 const price = getCatalogPrice(p) ?? productPriceMap[p];
                 const stock = getStock(p);
-                const outOfStock = isOutOfStock(p);
+                const empStock = getEmployeeStockStatus(p);
                 const isActive = activeProduct === p;
                 return (
                   <button
@@ -2400,8 +2423,9 @@ export default function DashboardPage() {
                         ${isActive ? 'text-indigo-200' : 'text-slate-400 dark:text-slate-500'}`}>
                         ({count})
                       </span>
-                      {/* Admins see the exact count; employees see only an
-                          out-of-stock label (never the real number). */}
+                      {/* Admins see the exact count. Employees see a persistent
+                          3-tier status label — never the raw number, except the
+                          exact remaining count inside the LOW_STOCK (1–5) band. */}
                       {isAdmin && stock !== null && (
                         <span className={`text-xs font-bold
                           ${stock === 0
@@ -2412,7 +2436,23 @@ export default function DashboardPage() {
                           [{stock}]
                         </span>
                       )}
-                      {!isAdmin && outOfStock && (
+                      {!isAdmin && empStock?.tier === 'IN_STOCK' && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
+                          text-[10px] font-bold bg-emerald-100 text-emerald-700
+                          dark:bg-emerald-900/40 dark:text-emerald-300">
+                          <span className="w-1 h-1 rounded-full bg-emerald-500" />
+                          متوفر في المخزن
+                        </span>
+                      )}
+                      {!isAdmin && empStock?.tier === 'LOW_STOCK' && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
+                          text-[10px] font-bold bg-amber-100 text-amber-700
+                          dark:bg-amber-900/40 dark:text-amber-300">
+                          <span className="w-1 h-1 rounded-full bg-amber-500" />
+                          متبقي {empStock.count} قطع فقط
+                        </span>
+                      )}
+                      {!isAdmin && empStock?.tier === 'OUT_OF_STOCK' && (
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
                           text-[10px] font-bold bg-red-100 text-red-700
                           dark:bg-red-900/40 dark:text-red-300">

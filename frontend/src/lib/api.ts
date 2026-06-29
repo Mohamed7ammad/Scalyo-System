@@ -227,10 +227,12 @@ export interface Product {
   sku:            string;
   cost_price?:    number | string; // pg returns NUMERIC as string — use parseFloat(). Admin-only.
   selling_price:  number | string;
-  // Admins receive the exact count; non-admins (employees) receive ONLY the
-  // derived `in_stock` boolean — the backend never ships them the real number.
-  stock_quantity?: number;
-  in_stock?:      boolean;
+  // Admins receive the exact `stock_quantity`. Non-admins (employees) receive a
+  // 3-tier `stock_status` instead; the exact number is exposed via
+  // `low_stock_count` ONLY in the LOW_STOCK band (1–5 units).
+  stock_quantity?:  number;
+  stock_status?:    'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
+  low_stock_count?: number | null;
   image_url:      string | null;
   aliases:        string[];        // external campaign codes that map to this product
   created_at:     string;

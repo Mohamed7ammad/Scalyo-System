@@ -51,17 +51,28 @@ function normalizeAliases(raw) {
 }
 
 // GET /api/products — all authenticated roles (agents need it for the manual
-// order modal). SECURITY: non-admins never receive cost_price (COGS) NOR the
-// exact stock_quantity. Employees must never see real stock numbers, so we
-// project a derived `in_stock` boolean instead and never ship the raw count.
-// The `(stock_quantity > 0)` comparison happens inside Postgres, so the actual
-// integer never leaves the database for a non-admin caller.
+// order modal). SECURITY: non-admins never receive cost_price (COGS). Stock is
+// exposed as a 3-tier status, NOT the raw count:
+//   • stock_quantity  > 5  → 'IN_STOCK'     (number hidden)
+//   • stock_quantity 1..5  → 'LOW_STOCK'    (exact count exposed as low_stock_count)
+//   • stock_quantity == 0  → 'OUT_OF_STOCK' (number hidden)
+// Only the LOW_STOCK band intentionally leaks the integer (so employees can warn
+// customers "X left"). The IN_STOCK / OUT_OF_STOCK bands collapse to a CASE label
+// inside Postgres, so the real number never leaves the DB for those rows.
+const NON_ADMIN_PRODUCT_COLS = `
+  id, name, sku, aliases, selling_price, image_url, created_at, business_id,
+  CASE
+    WHEN stock_quantity > 5 THEN 'IN_STOCK'
+    WHEN stock_quantity > 0 THEN 'LOW_STOCK'
+    ELSE 'OUT_OF_STOCK'
+  END AS stock_status,
+  CASE WHEN stock_quantity BETWEEN 1 AND 5 THEN stock_quantity ELSE NULL END AS low_stock_count
+`;
+
 router.get('/', authenticate, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
-    const cols = isAdmin
-      ? '*'
-      : 'id, name, sku, aliases, selling_price, image_url, created_at, business_id, (stock_quantity > 0) AS in_stock';
+    const cols = isAdmin ? '*' : NON_ADMIN_PRODUCT_COLS;
     const result = await pool.query(
       `SELECT ${cols} FROM products WHERE business_id = $1 ORDER BY name ASC`,
       [req.user.business_id]
