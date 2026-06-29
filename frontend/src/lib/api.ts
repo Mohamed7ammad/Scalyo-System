@@ -1226,6 +1226,8 @@ export interface BostaFollowUpOrder {
   cod:            number;
   city:           string;
   updatedAt:      string | null;
+  /** Comma-separated product name(s) from the matching local order(s); '' when unmatched. */
+  product:             string;
   /** Local order id (null when no matching order in our DB). */
   order_id:            number | null;
   /** Merchant follow-up note saved locally. */

@@ -709,30 +709,47 @@ async function enrichWithLocalOrder(rows, businessId) {
     r.order_id            = null;
     r.return_note         = '';
     r.return_shipping_fee = 0;
+    r.product             = '';   // comma-separated product name(s) for this parcel
   }
 
   if (tracking.length === 0) return;
 
   try {
     const { rows: locals } = await pool.query(
-      `SELECT id, "BostaTrackingCode", return_note, return_shipping_fee
+      `SELECT id, "BostaTrackingCode", "ProductName", return_note, return_shipping_fee
        FROM   orders
        WHERE  "BostaTrackingCode" = ANY($1::text[])
          AND  business_id = $2`,
       [tracking, businessId]
     );
 
-    const byTracking = new Map(
-      locals.map((o) => [String(o.BostaTrackingCode), o])
-    );
+    /* One tracking number can map to several local order rows (e.g. multiple
+       items shipped under one parcel). Keep the first matched row for the
+       editable fields (note / fee / order_id), but aggregate the DISTINCT
+       product names across all rows into one comma-separated string.          */
+    const byTracking      = new Map();   // tracking → first order row (note/fee/id)
+    const productsByTrack = new Map();   // tracking → ordered Set of product names
+    for (const o of locals) {
+      const key = String(o.BostaTrackingCode);
+      if (!byTracking.has(key)) byTracking.set(key, o);
+
+      const name = (o.ProductName ?? '').trim();
+      if (name) {
+        if (!productsByTrack.has(key)) productsByTrack.set(key, new Set());
+        productsByTrack.get(key).add(name);
+      }
+    }
 
     for (const r of rows) {
-      const o = byTracking.get(String(r.trackingNumber));
+      const key = String(r.trackingNumber);
+      const o   = byTracking.get(key);
       if (o) {
         r.order_id            = o.id;
         r.return_note         = o.return_note ?? '';
         r.return_shipping_fee = Number(o.return_shipping_fee ?? 0) || 0;
       }
+      const names = productsByTrack.get(key);
+      if (names && names.size) r.product = [...names].join('، ');
     }
     console.log(`[bosta/follow-ups] merged ${byTracking.size}/${tracking.length} tracking numbers with local orders`);
   } catch (err) {
