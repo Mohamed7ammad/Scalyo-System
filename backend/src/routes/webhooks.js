@@ -2,7 +2,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const pool    = require('../config/db');
 const { enrichDeliveryRate } = require('../services/bostaEnrich');
-const { recordSafqaOrder, updateSafqaStatusByPhone } = require('../services/externalAffiliate');
+const { recordSafqaOrder, updateSafqaStatusByPhone, adoptOrphanByPhoneProduct } = require('../services/externalAffiliate');
 const { extractReferralCode, resolveMarketerCode } = require('../utils/referral');
 
 /* Tenant's known media-buyer referral codes (users.referral_code). Used to
@@ -377,6 +377,19 @@ async function ingestEasyOrderAffiliate(body, businessId) {
     client_phone1: f.Phone,
   };
 
+  /* ── LAYER 1: ORPHAN ADOPTION ───────────────────────────────────────────────
+     A Safqa-only order for this customer+product may already exist as an orphan sk-
+     row (created by the Safqa webhook on no-match, no EO attribution yet). Adopt it
+     in place — stamp the marketer + exact calc_commission onto it and keep its Safqa
+     serial — instead of inserting a parallel UUID row (which would recreate the
+     duplicate factory). Only fires when a matching open orphan exists. */
+  const adopt = await adoptOrphanByPhoneProduct(syntheticOrder, businessId);
+  if (adopt.adopted) {
+    console.log(`✅  EasyOrder→affiliate: ADOPTED orphan "${adopt.externalId}" ` +
+                `(tenant ${businessId}, marketer="${syntheticOrder.marketer ?? '∅'}") — no duplicate row created`);
+    return { ok: true, status: 200, payload: { success: true, adopted: true, external_id: adopt.externalId, marketer: syntheticOrder.marketer } };
+  }
+
   /* primaryCreate: this IS the order's creation event, so recordSafqaOrder must
      NOT phone-merge it into a prior open order (a repeat customer's earlier order
      is a DIFFERENT order, not a cross-channel duplicate). Idempotency for a
@@ -605,20 +618,28 @@ router.post('/safqa/:businessId', async (req, res) => {
       });
     }
 
-    /* No EasyOrder row for this phone yet (e.g. Safqa push arrived before EasyOrder's,
-       or a Safqa-only order). DEFAULT: SKIP — do NOT create an sk- row (that's what
-       produced the duplicates). The order is ingested when its EasyOrder webhook
-       arrives, and the next Safqa push then supplements its serial. Opt back into the
-       legacy create ONLY with SAFQA_CREATE_ON_NO_MATCH=true. Always 200 (no retry-storm). */
-    const allowCreate = String(process.env.SAFQA_CREATE_ON_NO_MATCH).toLowerCase() === 'true';
+    /* ── LAYER 2: ORPHAN CREATION (no EasyOrder row for this phone) ───────────────
+       Either the Safqa push beat EasyOrder's, OR this is a genuine Safqa-ONLY order
+       (e.g. the حزام التدفئة flow that never enters EasyOrder). Historically we SKIPPED
+       to avoid the duplicate factory — but that silently DROPPED legitimate Safqa-only
+       orders (the under-count). It is now SAFE to create the orphan, because the
+       EasyOrder webhook's LAYER-1 adoption guard will fold itself into this sk- row if
+       it ever arrives (instead of inserting a twin), and the LAYER-3 hourly sweep
+       cleans up any pair its match misses. Auto-commission from COMMISSION_RATES × qty
+       (totalIsGross) — no manual CSV. Serial-keyed → idempotent. primaryCreate skips
+       the blind phone-merge. Gated by SAFQA_RECONCILE so rollout is controlled. The
+       legacy SAFQA_CREATE_ON_NO_MATCH flag still works for back-compat. */
+    const allowCreate =
+      String(process.env.SAFQA_RECONCILE).toLowerCase() === 'true' ||
+      String(process.env.SAFQA_CREATE_ON_NO_MATCH).toLowerCase() === 'true';
     if (allowCreate) {
-      const created = await recordSafqaOrder(order, businessId, { fullBody: body, totalIsGross: true });
-      console.log(`ℹ️  Safqa webhook: no phone match → legacy create (opt-in) external_id=${created.externalId}, tenant ${businessId}`);
-      return res.status(200).json({ ok: true, action: created.inserted ? 'created' : 'updated', external_id: created.externalId, status_class: created.statusClass });
+      const created = await recordSafqaOrder(order, businessId, { fullBody: body, totalIsGross: true, primaryCreate: true });
+      console.log(`🆕 Safqa webhook: no EasyOrder match → ORPHAN created external_id=${created.externalId} (tenant ${businessId}, auto-commission). Layer-1 will adopt if EasyOrder arrives.`);
+      return res.status(200).json({ ok: true, action: created.inserted ? 'orphan_created' : 'updated', external_id: created.externalId, status_class: created.statusClass });
     }
     console.log(
-      `ℹ️  Safqa webhook: no EasyOrder row for phone (${matchRes.reason}) — supplement SKIPPED (no sk- row created). ` +
-      `serial=${order.serial_number ?? order._id}, tenant ${businessId}. Will supplement once EasyOrder ingests it.`
+      `ℹ️  Safqa webhook: no EasyOrder row for phone (${matchRes.reason}) — orphan creation DISABLED (set SAFQA_RECONCILE=true). ` +
+      `serial=${order.serial_number ?? order._id}, tenant ${businessId}.`
     );
     return res.status(200).json({ ok: true, action: 'skipped_no_match', reason: matchRes.reason });
   } catch (err) {

@@ -598,6 +598,96 @@ async function updateSafqaStatusByPhone(order, businessId) {
   return { ok: true, matched: true, externalId: rows[0].external_id, statusClass, safqaSerial };
 }
 
+/* Canonical product key — strip a leading "(N) قطعة " prefix and any " - variant"
+   suffix so an EasyOrder product string and a Safqa one compare equal. */
+const CANON_PRODUCT = (c) => `TRIM(regexp_replace(regexp_replace(${c}, '^\\s*(\\(\\s*\\d+\\s*\\)\\s*)?(قطعة\\s+)?', ''), '\\s+[-–—].*$', ''))`;
+
+/* ── LAYER 1: ORPHAN ADOPTION ────────────────────────────────────────────────
+   When the EasyOrder creation webhook arrives, a Safqa-ONLY order for the same
+   customer + product may ALREADY exist as an orphan sk- row (created by the Safqa
+   webhook on no-match, with NO EO attribution yet → calc_commission=0). To avoid
+   spawning a duplicate UUID row (the old "duplicate factory"), ADOPT that orphan in
+   place: stamp it with the EasyOrder marketer + exact calc_commission, keeping its
+   Safqa serial. Only OPEN (pending/confirmed) orphans with no EO data are eligible,
+   matched by phone + CANONICAL product, so a repeat customer's settled order is
+   never hijacked. Returns { adopted, externalId? }. */
+async function adoptOrphanByPhoneProduct(order, businessId) {
+  if (businessId == null) return { adopted: false };
+  const phone = normalizePhone(order?.client_phone1 ?? order?.client_phone ?? order?.phone ?? order?.mobile);
+  if (!phone) return { adopted: false };
+  const productName = primaryProductName(order?.product_name ?? order?.products ?? order?.product ?? null);
+  const calc     = num(order?.calc_commission);
+  const marketer = normalizeMarketer(order?.marketer);
+  const { rows } = await pool.query(
+    `SELECT id, external_id FROM external_affiliate_orders
+      WHERE business_id = $1 AND network = 'safqa' AND external_id LIKE 'sk-%'
+        AND COALESCE(calc_commission, 0) = 0
+        AND status_class IN ('pending','confirmed')
+        AND client_phone = $2
+        AND ($3::text IS NULL OR ${CANON_PRODUCT('product_name')} = ${CANON_PRODUCT('$3::text')})
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [businessId, phone, productName]);
+  if (!rows.length) return { adopted: false };
+  await pool.query(
+    `UPDATE external_affiliate_orders
+        SET marketer        = COALESCE(NULLIF($2, 'main_account'), marketer),
+            calc_commission = $3::numeric,
+            /* promote to total if it has none yet, so the order stays financially live */
+            total           = COALESCE(NULLIF(total, 0), NULLIF($3::numeric, 0), total),
+            product_name    = COALESCE(product_name, $4),
+            sku             = COALESCE(sku, $5),
+            updated_at      = NOW()
+      WHERE id = $1`,
+    [rows[0].id, marketer, calc, productName, primarySku(order?.sku ?? order?.SKU ?? null)]);
+  return { adopted: true, externalId: rows[0].external_id };
+}
+
+/* ── LAYER 3: DB ORPHAN⨯TWIN RECONCILIATION (safety net) ──────────────────────
+   The Safqa public API is push-only (GET 404), so there is nothing to PULL — the
+   webhook is the only live source. Layer-1 adoption normally prevents twins, but if
+   its phone+product match misses (formatting drift) an orphan sk- and a late EO
+   UUID row for the SAME order can coexist. This sweep — over the DATABASE — folds
+   any such pair OLDER than graceHours into the serial-keyed sk- row (the Safqa
+   truth): copy the EO marketer + calc_commission onto the sk-, then delete the EO
+   twin. The grace window leaves in-flight orders (EO arriving seconds after Safqa)
+   for Layer-1 to adopt first. Idempotent; safe to run hourly. */
+async function reconcileOrphanTwins(businessId, { graceHours = 6 } = {}) {
+  if (businessId == null) return { merged: 0 };
+  const { rows } = await pool.query(
+    `SELECT DISTINCT ON (sk.id)
+            sk.id AS sk_id, eo.id AS eo_id, eo.marketer AS eo_marketer, eo.calc_commission AS eo_calc
+       FROM external_affiliate_orders sk
+       JOIN external_affiliate_orders eo
+         ON eo.business_id = sk.business_id AND eo.network = 'safqa'
+        AND eo.external_id NOT LIKE 'sk-%'
+        AND eo.client_phone = sk.client_phone
+        AND ${CANON_PRODUCT('eo.product_name')} = ${CANON_PRODUCT('sk.product_name')}
+      WHERE sk.business_id = $1 AND sk.network = 'safqa'
+        AND sk.external_id LIKE 'sk-%' AND COALESCE(sk.calc_commission, 0) = 0
+        AND sk.updated_at < NOW() - ($2 || ' hours')::interval
+      ORDER BY sk.id, ABS(EXTRACT(EPOCH FROM (COALESCE(eo.created_at, eo.updated_at) - COALESCE(sk.created_at, sk.updated_at))))`,
+    [businessId, String(graceHours)]);
+  const usedEo = new Set();
+  let merged = 0;
+  for (const p of rows) {
+    if (usedEo.has(p.eo_id)) continue;          // each EO twin folded once
+    usedEo.add(p.eo_id);
+    await pool.query(
+      `UPDATE external_affiliate_orders
+          SET marketer        = COALESCE(NULLIF($2, 'main_account'), marketer),
+              calc_commission = $3::numeric,
+              total           = COALESCE(NULLIF(total, 0), NULLIF($3::numeric, 0), total),
+              updated_at      = NOW()
+        WHERE id = $1`,
+      [p.sk_id, p.eo_marketer, num(p.eo_calc)]);
+    await pool.query(`DELETE FROM external_affiliate_orders WHERE id = $1`, [p.eo_id]);
+    merged++;
+  }
+  if (merged) console.log(`[safqaReconcile] tenant ${businessId}: folded ${merged} orphan⨯EO twin pair(s) into their sk- row (grace ${graceHours}h)`);
+  return { merged };
+}
+
 /* ── Ghost-order auto-purge ──────────────────────────────────────────────────
    A "ghost" = an order that never synced to Safqa: NO Safqa serial (external_id
    not 'sk-…') AND NO commission (total=0), past the grace window. It can never
@@ -1659,6 +1749,8 @@ module.exports = {
   // Safqa webhook (push) architecture:
   recordSafqaOrder,
   updateSafqaStatusByPhone,
+  adoptOrphanByPhoneProduct,   // Layer 1: EO adopts an existing orphan sk- (no twin)
+  reconcileOrphanTwins,        // Layer 3: hourly DB safety-net folds missed twins
   purgeGhostOrders,
   commissionFor,
   COMMISSION_RATES,
