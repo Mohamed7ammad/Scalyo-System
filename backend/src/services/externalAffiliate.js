@@ -651,8 +651,14 @@ async function adoptOrphanByPhoneProduct(order, businessId) {
    any such pair OLDER than graceHours into the serial-keyed sk- row (the Safqa
    truth): copy the EO marketer + calc_commission onto the sk-, then delete the EO
    twin. The grace window leaves in-flight orders (EO arriving seconds after Safqa)
-   for Layer-1 to adopt first. Idempotent; safe to run hourly. */
-async function reconcileOrphanTwins(businessId, { graceHours = 6 } = {}) {
+   for Layer-1 to adopt first. Idempotent; safe to run hourly.
+
+   CRITICAL SAFETY — creation-time proximity: a TRUE twin (one order, two webhooks)
+   is created near-simultaneously, whereas a REPEAT customer re-orders days apart.
+   Without this guard the cron would match a rebuild sk- row (calc=0) against a later
+   EO re-order of the same product and wrongly DELETE that genuine new order. So only
+   fold pairs whose created_at are within proximityHours (12h) of each other. */
+async function reconcileOrphanTwins(businessId, { graceHours = 6, proximityHours = 12 } = {}) {
   if (businessId == null) return { merged: 0 };
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (sk.id)
@@ -663,11 +669,13 @@ async function reconcileOrphanTwins(businessId, { graceHours = 6 } = {}) {
         AND eo.external_id NOT LIKE 'sk-%'
         AND eo.client_phone = sk.client_phone
         AND ${CANON_PRODUCT('eo.product_name')} = ${CANON_PRODUCT('sk.product_name')}
+        /* same-order proximity → never fold a repeat customer's later re-order */
+        AND ABS(EXTRACT(EPOCH FROM (COALESCE(eo.created_at, eo.updated_at) - COALESCE(sk.created_at, sk.updated_at)))) < $3 * 3600
       WHERE sk.business_id = $1 AND sk.network = 'safqa'
         AND sk.external_id LIKE 'sk-%' AND COALESCE(sk.calc_commission, 0) = 0
         AND sk.updated_at < NOW() - ($2 || ' hours')::interval
       ORDER BY sk.id, ABS(EXTRACT(EPOCH FROM (COALESCE(eo.created_at, eo.updated_at) - COALESCE(sk.created_at, sk.updated_at))))`,
-    [businessId, String(graceHours)]);
+    [businessId, String(graceHours), proximityHours]);
   const usedEo = new Set();
   let merged = 0;
   for (const p of rows) {
