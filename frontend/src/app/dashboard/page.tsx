@@ -116,7 +116,6 @@ export default function DashboardPage() {
   const [followUpsLoading, setFollowUpsLoading] = useState(false);
   const [followUps,        setFollowUps]        = useState<BostaFollowUps | null>(null);
   const [followUpsError,   setFollowUpsError]   = useState('');
-  const [followUpsTab,     setFollowUpsTab]     = useState<'action_required' | 'returning'>('action_required');
   const [followUpsSearch,  setFollowUpsSearch]  = useState('');
   /* Per-row editable draft for notes / return-shipping fee, keyed by trackingNumber */
   const [followUpEdits,    setFollowUpEdits]    = useState<Record<string, { return_note: string; return_shipping_fee: string }>>({});
@@ -443,12 +442,6 @@ export default function DashboardPage() {
     try {
       const res = await getBostaFollowUps();
       setFollowUps(res.data);
-      // Default to whichever bucket has items
-      setFollowUpsTab(
-        res.data.counts.action_required === 0 && res.data.counts.returning > 0
-          ? 'returning'
-          : 'action_required'
-      );
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
@@ -530,7 +523,6 @@ export default function DashboardPage() {
           );
         return {
           ...prev,
-          returning: patch(prev.returning),
           action_required: patch(prev.action_required),
         };
       });
@@ -2196,35 +2188,16 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* Tabs */}
+              {/* Header chip — action-needed only. Returned parcels now live on
+                  the dedicated "إدارة تحصيل المرتجعات" page. */}
               {followUps && !followUpsLoading && !followUpsError && (
                 <div className="flex items-center gap-2 px-6 pt-4 shrink-0">
-                  <button
-                    onClick={() => setFollowUpsTab('action_required')}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all
-                      ${followUpsTab === 'action_required'
-                        ? 'bg-amber-500 text-white shadow-sm'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300'}`}
-                  >
+                  <span className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-amber-500 text-white shadow-sm">
                     في انتظار متابعتك
-                    <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-xs font-bold
-                      ${followUpsTab === 'action_required' ? 'bg-white text-amber-600' : 'bg-amber-500 text-white'}`}>
+                    <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-xs font-bold bg-white text-amber-600">
                       {followUps.counts.action_required}
                     </span>
-                  </button>
-                  <button
-                    onClick={() => setFollowUpsTab('returning')}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all
-                      ${followUpsTab === 'returning'
-                        ? 'bg-rose-500 text-white shadow-sm'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300'}`}
-                  >
-                    مرتجعاتك العائدة
-                    <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-xs font-bold
-                      ${followUpsTab === 'returning' ? 'bg-white text-rose-600' : 'bg-rose-500 text-white'}`}>
-                      {followUps.counts.returning}
-                    </span>
-                  </button>
+                  </span>
                 </div>
               )}
 
@@ -2241,10 +2214,7 @@ export default function DashboardPage() {
                     {followUpsError}
                   </div>
                 ) : (() => {
-                  const allRows: BostaFollowUpOrder[] =
-                    followUpsTab === 'returning'
-                      ? followUps?.returning ?? []
-                      : followUps?.action_required ?? [];
+                  const allRows: BostaFollowUpOrder[] = followUps?.action_required ?? [];
 
                   const q = followUpsSearch.trim().toLowerCase();
                   const rows = q

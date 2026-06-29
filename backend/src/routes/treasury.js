@@ -106,6 +106,18 @@ pool.query(`
     ON treasury_transactions (purchase_order_id)
     WHERE purchase_order_id IS NOT NULL
 `))
+/* Link to a return_collections row. Auto-generated 'return_collection' revenue
+   rows (100% of the fee an agent collects on a returned parcel) carry this so the
+   mark-paid insert is idempotent (one treasury row per collection, ON CONFLICT
+   DO UPDATE). See routes/returnCollections.js. */
+.then(() => pool.query(`
+  ALTER TABLE treasury_transactions ADD COLUMN IF NOT EXISTS return_collection_id INTEGER
+`))
+.then(() => pool.query(`
+  CREATE UNIQUE INDEX IF NOT EXISTS treasury_return_collection_uidx
+    ON treasury_transactions (return_collection_id)
+    WHERE return_collection_id IS NOT NULL
+`))
 .then(() => console.log('✅  Treasury: table + all partial indexes ready'))
 .then(() => backfillTreasury())
 .catch((err) => console.warn('⚠️   Treasury schema migration:', err.message));

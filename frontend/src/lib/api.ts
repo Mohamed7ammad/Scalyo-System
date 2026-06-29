@@ -1238,11 +1238,11 @@ export interface BostaFollowUpOrder {
 
 export interface BostaFollowUps {
   action_required: BostaFollowUpOrder[];
-  returning:       BostaFollowUpOrder[];
-  counts:          { action_required: number; returning: number };
+  counts:          { action_required: number };
 }
 
-/** Fetch Bosta shipments needing action + parcels being returned. Admin only. */
+/** Fetch Bosta shipments needing action (في انتظار متابعتك). Returned parcels now
+    live exclusively on the Return-Collection page. Admin / shipping_followups. */
 export const getBostaFollowUps = () =>
   api.get<BostaFollowUps>('/api/bosta/follow-ups');
 
@@ -1267,6 +1267,70 @@ export const saveFollowUpAction = (
     `/api/bosta/follow-ups/${encodeURIComponent(trackingNumber)}`,
     data,
   );
+
+/* ── Return Collection Management (إدارة تحصيل المرتجعات) ───────────────────── */
+export type ReturnCollectionStatus = 'pending' | 'no_answer' | 'follow_up' | 'paid';
+
+export interface ReturnCollection {
+  id:                  number;
+  order_id:            number | null;
+  customer_name:       string | null;
+  phone:               string | null;
+  tracking_number:     string | null;
+  product_name:        string | null;
+  status:              ReturnCollectionStatus;
+  collected_amount:    number | string;   // pg NUMERIC may arrive as string
+  employee_commission: number | string;
+  notes:               string | null;
+  handled_by:          string | null;     // users.id
+  handler_name:        string | null;     // joined display name
+  handler_email:       string | null;
+  created_at:          string;
+  updated_at:          string;
+}
+
+export interface ReturnAnalyticsRow {
+  agent_user_id:           string;
+  agent_name:              string | null;
+  agent_email:             string | null;
+  total_collected:         number;
+  total_commission_earned: number;
+  total_paid:              number;
+  remaining_balance:       number;
+}
+
+export interface ReturnAnalytics {
+  is_admin: boolean;
+  agents:   ReturnAnalyticsRow[];
+  totals:   Omit<ReturnAnalyticsRow, 'agent_user_id' | 'agent_name' | 'agent_email'>;
+}
+
+/** List return-collection records, optionally filtered by workflow status. */
+export const getReturnCollections = (status?: ReturnCollectionStatus) =>
+  api.get<ReturnCollection[]>('/api/return-collections', { params: status ? { status } : {} });
+
+/** Move a record through pending → no_answer → follow_up and/or edit notes. */
+export const updateReturnCollection = (
+  id: number,
+  data: { status?: Exclude<ReturnCollectionStatus, 'paid'>; notes?: string },
+) =>
+  api.patch<ReturnCollection>(`/api/return-collections/${id}`, data);
+
+/** Mark a return collected: 100% → treasury, 40% accrued as agent commission. */
+export const payReturnCollection = (id: number, collected_amount: number) =>
+  api.post<ReturnCollection>(`/api/return-collections/${id}/pay`, { collected_amount });
+
+/** Pull/refresh returned parcels from the Bosta returning bucket. */
+export const syncReturnCollections = () =>
+  api.post<{ synced: number; fetched: number }>('/api/return-collections/sync');
+
+/** Per-agent collection + commission settlement analytics. */
+export const getReturnAnalytics = () =>
+  api.get<ReturnAnalytics>('/api/return-collections/analytics');
+
+/** Admin: pay an agent against their accrued return commission (partial allowed). */
+export const settleAgentCommission = (data: { agent_user_id: string; amount: number; notes?: string }) =>
+  api.post<{ remaining_after: number }>('/api/return-collections/settle', data);
 
 /* ── External Affiliate Network credentials (affiliate plan exclusive) ─────── */
 export type AffiliateNetworkId = 'taager' | 'safqa';

@@ -109,6 +109,16 @@ const NAV_ITEMS: NavItem[] = [
     ],
   },
   {
+    href: '/dashboard/returns-collection', label: 'إدارة تحصيل المرتجعات',
+    subLabel: 'Returns', requiredPermission: 'shipping_followups',
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M3 10h11a6 6 0 016 6v1M3 10l5 5m-5-5l5-5M21 12a9 9 0 01-9 9" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/staff', label: 'إدارة الموظفين',
     subLabel: 'Team', adminOnly: true,
     icon: (

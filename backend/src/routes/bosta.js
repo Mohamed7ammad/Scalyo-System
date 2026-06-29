@@ -584,6 +584,78 @@ function mapDelivery(d) {
   };
 }
 
+/* ── Reusable Bosta follow-up bucket fetch (module scope) ────────────────────
+   Lifted out of the /follow-ups handler so the Return-Collection sync can reuse
+   the exact same authoritative bucket logic. Each tab/bucket POSTs an exact
+   `stateCodes` payload to /deliveries/search; everything returned belongs to that
+   bucket — no local scanning, regex, or status-string heuristics. Deduped by
+   tracking number, paginated until a short page (or the safety cap) is reached. */
+const BOSTA_FOLLOWUP_PAGE_SIZE = 50;   // matches the dashboard's own page size
+const BOSTA_FOLLOWUP_MAX_PAGES = 20;   // safety cap → up to 1000 deliveries per bucket
+
+/* Pull the delivery list out of whichever envelope Bosta used. */
+const extractDeliveryList = (data) =>
+  data?.data?.deliveries ??
+  data?.deliveries       ??
+  data?.data?.list       ??
+  data?.data             ??
+  (Array.isArray(data) ? data : null);
+
+/* One POST /deliveries/search call → parsed delivery list (or null). */
+async function runDeliverySearch(creds, body) {
+  const r = await withAuthRetry(creds, (auth) =>
+    axios.post(`${BOSTA_APP_BASE}/deliveries/search`, body, {
+      headers: { ...BOSTA_APP_HEADERS, Authorization: auth },
+      timeout: 15_000,
+    })
+  );
+  return extractDeliveryList(r.data);
+}
+
+async function fetchFollowupBucket(creds, stateCodes, label) {
+  const out  = [];
+  const seen = new Set();
+  for (let page = 1; page <= BOSTA_FOLLOWUP_MAX_PAGES; page++) {
+    let list;
+    try {
+      list = await runDeliverySearch(creds, { limit: BOSTA_FOLLOWUP_PAGE_SIZE, page, sortBy: '-updatedAt', stateCodes });
+    } catch (err) {
+      console.warn(
+        `[bosta/follow-ups] ${label} fetch stopped at page ${page}: ` +
+        `HTTP ${err.response?.status ?? 'ERR'} ${err.response?.data?.message ?? err.message}`
+      );
+      if (page === 1) throw err;   // total failure on first page → bubble up
+      break;
+    }
+    if (!Array.isArray(list) || list.length === 0) break;
+    for (const d of list) {
+      const m   = mapDelivery(d);
+      const key = m.trackingNumber || `${m.customer}|${m.phone}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(m);
+    }
+    console.log(`[bosta/follow-ups] ${label} page ${page} → +${list.length} (total ${out.length})`);
+    if (list.length < BOSTA_FOLLOWUP_PAGE_SIZE) break;   // last page reached
+  }
+  return out;
+}
+
+/* Fetch + enrich the authoritative "returning" bucket for a business. Used by the
+   Return-Collection sync (routes/returnCollections.js) to materialize rows. Throws
+   a coded error when Bosta isn't configured so the caller can surface a 400.     */
+async function fetchReturningParcels(businessId) {
+  const creds = await readBostaCreds(businessId);
+  if (!creds.bearerToken && !(creds.email && creds.password)) {
+    const err = new Error('Bosta غير مهيأ. الرجاء حفظ التوكن (Bearer) أو البريد/كلمة المرور في إعدادات الشحن.');
+    err.code = 'BOSTA_NOT_CONFIGURED';
+    throw err;
+  }
+  const returning = await fetchFollowupBucket(creds, RETURNING_STATE_CODES, 'returning');
+  await enrichWithLocalOrder(returning, businessId);
+  return returning;
+}
+
 router.get('/follow-ups', authenticate, requireAdminOrPermission('shipping_followups'), async (req, res) => {
   const creds = await readBostaCreds(req.user.business_id);
 
@@ -593,106 +665,31 @@ router.get('/follow-ups', authenticate, requireAdminOrPermission('shipping_follo
     });
   }
 
-  const headersFor = (auth) => ({ ...BOSTA_APP_HEADERS, Authorization: auth });
-
-  const PAGE_SIZE = 50;   // matches the dashboard's own page size
-  const MAX_PAGES = 20;   // safety cap → up to 1000 deliveries per bucket
-
-  /* Pull the delivery list out of whichever envelope Bosta used. */
-  const extractList = (data) =>
-    data?.data?.deliveries ??
-    data?.deliveries       ??
-    data?.data?.list       ??
-    data?.data             ??
-    (Array.isArray(data) ? data : null);
-
-  /* One POST /deliveries/search call → parsed delivery list (or null). */
-  const runSearch = async (body) => {
-    const r = await withAuthRetry(creds, (auth) =>
-      axios.post(`${BOSTA_APP_BASE}/deliveries/search`, body, {
-        headers: headersFor(auth),
-        timeout: 15_000,
-      })
-    );
-    return extractList(r.data);
-  };
-
-  /* ── AUTHORITATIVE bucket fetch ────────────────────────────────────────────
-     Both follow-up buckets are reverse-engineered from the Bosta dashboard's
-     own network requests: each tab POSTs an exact `stateCodes` payload to
-     /deliveries/search. Everything the payload returns belongs to that bucket —
-     no local scanning, regex, or status-string heuristics. Deduped by tracking
-     number, paginated until a short page (or the safety cap) is reached.        */
-  const fetchBucketByStateCodes = async (stateCodes, label) => {
-    const out  = [];
-    const seen = new Set();
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      let list;
-      try {
-        list = await runSearch({ limit: PAGE_SIZE, page, sortBy: '-updatedAt', stateCodes });
-      } catch (err) {
-        console.warn(
-          `[bosta/follow-ups] ${label} fetch stopped at page ${page}: ` +
-          `HTTP ${err.response?.status ?? 'ERR'} ${err.response?.data?.message ?? err.message}`
-        );
-        if (page === 1) throw err;   // total failure on first page → bubble up
-        break;
-      }
-      if (!Array.isArray(list) || list.length === 0) break;
-      for (const d of list) {
-        const m   = mapDelivery(d);
-        const key = m.trackingNumber || `${m.customer}|${m.phone}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(m);
-      }
-      console.log(`[bosta/follow-ups] ${label} page ${page} → +${list.length} (total ${out.length})`);
-      if (list.length < PAGE_SIZE) break;   // last page reached
-    }
-    return out;
-  };
-
-  let returning;
+  /* في انتظار متابعتك — authoritative action-required stateCodes. Returned
+     parcels are NO LONGER handled here; they live exclusively in the dedicated
+     Return-Collection page (POST /api/return-collections/sync).                  */
   let action_required;
   try {
-    /* مرتجعاتك العائدة — authoritative returning stateCodes. */
-    returning = await fetchBucketByStateCodes(RETURNING_STATE_CODES, 'returning');
-    /* في انتظار متابعتك — authoritative action-required stateCodes. */
-    action_required = await fetchBucketByStateCodes(ACTION_REQUIRED_STATE_CODES, 'action_required');
+    action_required = await fetchFollowupBucket(creds, ACTION_REQUIRED_STATE_CODES, 'action_required');
   } catch (err) {
     console.error(`[bosta/follow-ups] fatal: ${err.response?.status ?? 'ERR'} ${err.message}`);
     return res.status(502).json({
       error: 'تعذّر جلب قائمة الشحنات من Bosta. تحقّق من صلاحية التوكن (Bearer) في الإعدادات.',
       action_required: [],
-      returning: [],
-      counts: { action_required: 0, returning: 0 },
+      counts: { action_required: 0 },
     });
   }
 
-  /* De-overlap: a parcel surfacing in both payloads is treated as returning
-     (the more specific bucket) and dropped from action_required.               */
-  const returningKeys = new Set(returning.map((r) => r.trackingNumber).filter(Boolean));
-  action_required = action_required.filter(
-    (r) => !(r.trackingNumber && returningKeys.has(r.trackingNumber))
-  );
-
-  console.log(
-    `[bosta/follow-ups] bucketed: ${action_required.length} action_required, ` +
-    `${returning.length} returning (both via authoritative stateCodes)`
-  );
-
-  /* ── Step E: merge local DB data (notes, return shipping fee, order id) ──
+  /* ── Merge local DB data (notes, return shipping fee, order id, product) ──
      Match Bosta deliveries to our orders by tracking number so the frontend
      can show + edit the merchant's own follow-up data inline.                */
-  await enrichWithLocalOrder([...returning, ...action_required], req.user.business_id);
+  await enrichWithLocalOrder(action_required, req.user.business_id);
+
+  console.log(`[bosta/follow-ups] ${action_required.length} action_required (authoritative stateCodes)`);
 
   return res.json({
     action_required,
-    returning,
-    counts: {
-      action_required: action_required.length,
-      returning:       returning.length,
-    },
+    counts: { action_required: action_required.length },
   });
 });
 
@@ -1148,3 +1145,4 @@ async function reconcileInTransitOrders(businessId) {
 
 module.exports = router;
 module.exports.reconcileInTransitOrders = reconcileInTransitOrders;
+module.exports.fetchReturningParcels = fetchReturningParcels;
