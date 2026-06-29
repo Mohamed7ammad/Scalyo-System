@@ -76,6 +76,7 @@ export default function ReturnsCollectionPage() {
   const [records,  setRecords]  = useState<ReturnCollection[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [activeTab, setActiveTab] = useState<ReturnCollectionStatus>('pending');
+  const [search,   setSearch]   = useState('');
   const [analytics, setAnalytics] = useState<ReturnAnalytics | null>(null);
   const [syncing,  setSyncing]  = useState(false);
   const [toast,    setToast]    = useState<Toast | null>(null);
@@ -136,10 +137,18 @@ export default function ReturnsCollectionPage() {
     return c;
   }, [records]);
 
-  const visibleRows = useMemo(
-    () => records.filter((r) => r.status === activeTab),
-    [records, activeTab],
-  );
+  const visibleRows = useMemo(() => {
+    const inTab = records.filter((r) => r.status === activeTab);
+    const q = search.trim().toLowerCase();
+    if (!q) return inTab;
+    // Quick search by phone / customer name / tracking number — for when a
+    // customer calls the agent back.
+    return inTab.filter((r) =>
+      (r.phone ?? '').toLowerCase().includes(q) ||
+      (r.customer_name ?? '').toLowerCase().includes(q) ||
+      (r.tracking_number ?? '').toLowerCase().includes(q),
+    );
+  }, [records, activeTab, search]);
 
   /* ── Actions ─────────────────────────────────────────────────────────────── */
   const handleStatus = async (row: ReturnCollection, status: Exclude<ReturnCollectionStatus, 'paid'>) => {
@@ -327,6 +336,33 @@ export default function ReturnsCollectionPage() {
             </div>
           </div>
         )}
+
+        {/* Quick search — by name / phone / tracking number (client-side) */}
+        <div className="relative max-w-md">
+          <svg className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="بحث بالاسم، رقم الهاتف، أو رقم التتبع..."
+            className="w-full pr-9 pl-9 py-2 rounded-xl text-sm bg-slate-50 dark:bg-slate-800
+              border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200
+              outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition"
+              aria-label="مسح البحث"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
 
         {/* Queue tabs */}
         <div className="flex flex-wrap items-center gap-2">
