@@ -225,15 +225,27 @@ export interface Product {
   id:             string;         // UUID
   name:           string;
   sku:            string;
-  cost_price:     number | string; // pg returns NUMERIC as string — use parseFloat()
+  cost_price?:    number | string; // pg returns NUMERIC as string — use parseFloat(). Admin-only.
   selling_price:  number | string;
-  stock_quantity: number;
+  // Admins receive the exact count; non-admins (employees) receive ONLY the
+  // derived `in_stock` boolean — the backend never ships them the real number.
+  stock_quantity?: number;
+  in_stock?:      boolean;
   image_url:      string | null;
   aliases:        string[];        // external campaign codes that map to this product
   created_at:     string;
 }
 
-export type ProductPayload = Omit<Product, 'id' | 'created_at'>;
+// The create/update payload always carries the full admin-editable shape.
+export type ProductPayload = {
+  name:           string;
+  sku:            string;
+  cost_price:     number | string;
+  selling_price:  number | string;
+  stock_quantity: number;
+  image_url:      string | null;
+  aliases:        string[];
+};
 
 export const getProducts = () =>
   api.get<Product[]>('/api/products');

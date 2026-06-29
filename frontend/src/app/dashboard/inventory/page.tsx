@@ -250,7 +250,7 @@ export default function InventoryPage() {
       sku:            p.sku,
       cost_price:     String(parseN(p.cost_price)),
       selling_price:  String(parseN(p.selling_price)),
-      stock_quantity: String(p.stock_quantity),
+      stock_quantity: String(p.stock_quantity ?? 0),
       image_url:      p.image_url ?? '',
       aliases:        Array.isArray(p.aliases) ? p.aliases : [],
     });
@@ -420,10 +420,10 @@ export default function InventoryPage() {
 
   const stats = useMemo(() => {
     const totalProducts  = products.length;
-    const stockValue     = products.reduce((s, p) => s + parseN(p.selling_price) * p.stock_quantity, 0);
-    const totalCOGS      = products.reduce((s, p) => s + parseN(p.cost_price)    * p.stock_quantity, 0);
-    const lowStockCount  = products.filter((p) => p.stock_quantity > 0 && p.stock_quantity <= 10).length;
-    const outOfStock     = products.filter((p) => p.stock_quantity === 0).length;
+    const stockValue     = products.reduce((s, p) => s + parseN(p.selling_price) * (p.stock_quantity ?? 0), 0);
+    const totalCOGS      = products.reduce((s, p) => s + parseN(p.cost_price)    * (p.stock_quantity ?? 0), 0);
+    const lowStockCount  = products.filter((p) => (p.stock_quantity ?? 0) > 0 && (p.stock_quantity ?? 0) <= 10).length;
+    const outOfStock     = products.filter((p) => (p.stock_quantity ?? 0) === 0).length;
     return { totalProducts, stockValue, totalCOGS, lowStockCount, outOfStock };
   }, [products]);
 
@@ -692,7 +692,7 @@ export default function InventoryPage() {
                           <td className="px-4 py-3.5">
                             <span className="text-sm font-semibold text-slate-700 dark:text-slate-300"
                               dir="ltr">
-                              {fmtPrice(parseN(product.cost_price) * product.stock_quantity)} ج.م
+                              {fmtPrice(parseN(product.cost_price) * (product.stock_quantity ?? 0))} ج.م
                             </span>
                           </td>
                         )}
@@ -722,9 +722,9 @@ export default function InventoryPage() {
                         {/* Stock */}
                         <td className="px-4 py-3.5">
                           <div className="flex flex-col items-start gap-1">
-                            <StockBadge qty={product.stock_quantity} />
+                            <StockBadge qty={product.stock_quantity ?? 0} />
                             <span className="text-xs text-slate-400 dark:text-slate-600 pr-1">
-                              {product.stock_quantity} قطعة
+                              {product.stock_quantity ?? 0} قطعة
                             </span>
                           </div>
                         </td>
@@ -769,7 +769,7 @@ export default function InventoryPage() {
               <span>
                 إجمالي وحدات المخزون:{' '}
                 <span className="font-semibold text-slate-600 dark:text-slate-300">
-                  {products.reduce((s, p) => s + p.stock_quantity, 0).toLocaleString('en-US')}
+                  {products.reduce((s, p) => s + (p.stock_quantity ?? 0), 0).toLocaleString('en-US')}
                 </span>
               </span>
             </div>

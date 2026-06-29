@@ -51,14 +51,17 @@ function normalizeAliases(raw) {
 }
 
 // GET /api/products — all authenticated roles (agents need it for the manual
-// order modal). SECURITY: non-admins never receive cost_price (COGS); they get
-// only the safe fields needed to pick a product and show stock badges.
+// order modal). SECURITY: non-admins never receive cost_price (COGS) NOR the
+// exact stock_quantity. Employees must never see real stock numbers, so we
+// project a derived `in_stock` boolean instead and never ship the raw count.
+// The `(stock_quantity > 0)` comparison happens inside Postgres, so the actual
+// integer never leaves the database for a non-admin caller.
 router.get('/', authenticate, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
     const cols = isAdmin
       ? '*'
-      : 'id, name, sku, aliases, selling_price, stock_quantity, image_url, created_at, business_id';
+      : 'id, name, sku, aliases, selling_price, image_url, created_at, business_id, (stock_quantity > 0) AS in_stock';
     const result = await pool.query(
       `SELECT ${cols} FROM products WHERE business_id = $1 ORDER BY name ASC`,
       [req.user.business_id]

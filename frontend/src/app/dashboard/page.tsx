@@ -92,6 +92,12 @@ export default function DashboardPage() {
   const [invDraft,  setInvDraft]  = useState<Record<string, string>>({});
   const [invSaving, setInvSaving] = useState<string | null>(null);
   const [products,  setProducts]  = useState<Product[]>([]);
+  // Mandatory out-of-stock alert for employees. `oosModal` holds the product
+  // name currently shown in the blocking modal (null = hidden); `oosAck` tracks
+  // products the employee already acknowledged this session so the alert fires
+  // once per product, not on every click.
+  const [oosModal,  setOosModal]  = useState<string | null>(null);
+  const [oosAck,    setOosAck]    = useState<Set<string>>(new Set());
 
   const [shippingModal,   setShippingModal]   = useState(false);
   const [shippingLoading, setShippingLoading] = useState(false);
@@ -1032,7 +1038,37 @@ export default function DashboardPage() {
 
   const getStock = (shortName: string): number | null => {
     const found = findCatalogProduct(shortName);
-    return found !== undefined ? found.stock_quantity : null;
+    // Admins receive the exact count; for employees the backend strips it, so
+    // this is `undefined` → null (the numeric badge is admin-gated anyway).
+    return found?.stock_quantity ?? null;
+  };
+
+  // Role-agnostic out-of-stock check. Admins get the exact `stock_quantity`;
+  // employees receive only the derived `in_stock` boolean. Returns false when
+  // the product can't be resolved (still loading / not linked to the catalog),
+  // so we never block on missing data.
+  const isOutOfStock = (shortName: string): boolean => {
+    const found = findCatalogProduct(shortName);
+    if (!found) return false;
+    if (typeof found.stock_quantity === 'number') return found.stock_quantity === 0;
+    if (typeof found.in_stock === 'boolean')       return !found.in_stock;
+    return false;
+  };
+
+  // Selecting a product filter pill. For employees, picking an out-of-stock
+  // product raises the mandatory red alert (once per product per session) so
+  // they stop confirming orders on a depleted SKU.
+  const handleSelectProduct = (p: string) => {
+    setActiveProduct(p);
+    if (!isAdmin && p !== 'كل المنتجات' && isOutOfStock(p) && !oosAck.has(p)) {
+      setOosModal(p);
+    }
+  };
+
+  // The single acknowledgement action — the only way to dismiss the alert.
+  const acknowledgeOutOfStock = () => {
+    if (oosModal) setOosAck((prev) => new Set(prev).add(oosModal));
+    setOosModal(null);
   };
 
   // Official master selling price from the catalog — stable, unlike order
@@ -1841,6 +1877,50 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* ── Mandatory Out-of-Stock Alert (employees only) ─────────────
+            Blocking modal: no backdrop-click / escape / close button. The ONLY
+            way out is the single acknowledgement button. */}
+        {oosModal && !isAdmin && (
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60]
+              flex items-center justify-center p-4"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="oos-title"
+          >
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
+              w-full max-w-sm p-7 text-center border-2 border-red-500/60" dir="rtl">
+              {/* Red alert icon */}
+              <div className="inline-flex items-center justify-center w-16 h-16
+                rounded-full bg-red-100 dark:bg-red-900/40 mb-4">
+                <svg className="w-9 h-9 text-red-600 dark:text-red-400"
+                  fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4
+                       a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z" />
+                </svg>
+              </div>
+
+              <h2 id="oos-title" className="text-xl font-extrabold text-red-600 dark:text-red-400 mb-1.5">
+                الكمية خلصت حاليا
+              </h2>
+              <p className="text-sm font-semibold text-slate-600 dark:text-slate-300 mb-6">
+                {oosModal}
+              </p>
+
+              <button
+                onClick={acknowledgeOutOfStock}
+                autoFocus
+                className="w-full py-3 rounded-xl text-sm font-bold text-white
+                  bg-red-600 hover:bg-red-700 active:bg-red-800
+                  shadow-lg shadow-red-500/30 transition-all duration-150"
+              >
+                تمام هوقف تاكيدات عليه
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ── Bosta Shipping Modal ─────────────────────────────────── */}
         {shippingModal && (
           <div
@@ -2302,11 +2382,12 @@ export default function DashboardPage() {
                 // order-derived price only when the product isn't linked to inventory.
                 const price = getCatalogPrice(p) ?? productPriceMap[p];
                 const stock = getStock(p);
+                const outOfStock = isOutOfStock(p);
                 const isActive = activeProduct === p;
                 return (
                   <button
                     key={p}
-                    onClick={() => setActiveProduct(p)}
+                    onClick={() => handleSelectProduct(p)}
                     className={`px-3 py-2 rounded-xl text-sm font-medium transition text-right
                       ${isActive
                         ? 'bg-indigo-600 text-white shadow-sm'
@@ -2319,6 +2400,8 @@ export default function DashboardPage() {
                         ${isActive ? 'text-indigo-200' : 'text-slate-400 dark:text-slate-500'}`}>
                         ({count})
                       </span>
+                      {/* Admins see the exact count; employees see only an
+                          out-of-stock label (never the real number). */}
                       {isAdmin && stock !== null && (
                         <span className={`text-xs font-bold
                           ${stock === 0
@@ -2327,6 +2410,14 @@ export default function DashboardPage() {
                               ? 'text-amber-500'
                               : isActive ? 'text-emerald-300' : 'text-emerald-600'}`}>
                           [{stock}]
+                        </span>
+                      )}
+                      {!isAdmin && outOfStock && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
+                          text-[10px] font-bold bg-red-100 text-red-700
+                          dark:bg-red-900/40 dark:text-red-300">
+                          <span className="w-1 h-1 rounded-full bg-red-500" />
+                          نفذت الكمية
                         </span>
                       )}
                     </div>
