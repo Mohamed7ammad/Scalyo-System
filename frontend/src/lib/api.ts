@@ -180,9 +180,11 @@ export const distributeOrders = (
 ) =>
   api.post<DistributeResult>('/api/orders/distribute', { mode, allocations });
 
-/** Distribute all unassigned 'جديد' orders evenly across present agents. */
-export const autoDistributeOrders = () =>
-  api.post<AutoDistributeResult>('/api/orders/auto-distribute');
+/** Distribute all unassigned 'جديد' orders evenly across present agents.
+ *  `lost: true` scopes the round-robin to the isolated lost-order queue ONLY
+ *  (the dedicated "تأكيد الطلبات المفقودة" page); omitted/false → live queue only. */
+export const autoDistributeOrders = (lost = false) =>
+  api.post<AutoDistributeResult>('/api/orders/auto-distribute', lost ? { lost: true } : {});
 
 /** Transfer specific orders to a target agent (by their DB user id). */
 export const transferOrders = (orderIds: number[], targetAgentId: number) =>

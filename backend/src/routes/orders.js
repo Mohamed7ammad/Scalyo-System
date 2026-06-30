@@ -511,14 +511,20 @@ const getShortName = (name) => { return name ? name.trim().split(/\s+/).slice(0,
    round-robin across every active + present agent, inside a transaction.      */
 router.post('/auto-distribute', authenticate, requireAdmin, async (req, res) => {
   const businessId = req.user.business_id;
+  /* LOST-ORDER ISOLATION: live distribution must NEVER pull lost orders, and the
+     dedicated lost page's "توزيع الطلبات المفقودة" button must touch ONLY lost orders.
+     Same endpoint, scoped by the queue: lost=true → is_lost_order TRUE, else FALSE. */
+  const lostOnly = req.body?.lost === true || String(req.body?.lost).toLowerCase() === 'true';
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    /* 1. ALL 'جديد' orders — regardless of current AssignedTo value */
+    /* 1. ALL 'جديد' orders in THIS queue (live or lost) — regardless of AssignedTo */
     const unassignedResult = await client.query(
-      `SELECT id FROM orders WHERE "Status" = 'جديد' AND business_id = $1 ORDER BY id ASC`,
-      [businessId]
+      `SELECT id FROM orders
+        WHERE "Status" = 'جديد' AND business_id = $1 AND is_lost_order = $2
+        ORDER BY id ASC`,
+      [businessId, lostOnly]
     );
     const orderIds = unassignedResult.rows.map((r) => r.id);
 
@@ -611,9 +617,13 @@ router.post('/distribute', authenticate, requireAdmin, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    /* 1. All pending 'جديد' orders for this tenant, stable order. */
+    /* 1. All pending LIVE 'جديد' orders for this tenant, stable order. Lost orders
+       are excluded here — they're distributed only from the dedicated lost page via
+       /auto-distribute { lost: true }, never through the live distribution modal. */
     const ordRes = await client.query(
-      `SELECT id FROM orders WHERE "Status" = 'جديد' AND business_id = $1 ORDER BY id ASC`,
+      `SELECT id FROM orders
+        WHERE "Status" = 'جديد' AND business_id = $1 AND is_lost_order = FALSE
+        ORDER BY id ASC`,
       [businessId]
     );
     const orderIds = ordRes.rows.map((r) => r.id);
@@ -795,90 +805,10 @@ router.delete('/bulk', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-/* ── POST /api/orders/bulk — CSV batch import (admin only) ──────────────────
-   Accepts a JSON array of pre-parsed order objects (FullName, Phone, City,
-   Address, ProductName, ProductPrice, Note).  Deduplicates by phone against
-   ALL existing orders in this tenant — a phone that already exists is silently
-   skipped.  New orders are round-robin assigned to present, active agents.
-   Returns { success: true, importedCount, skippedCount }.                    */
-router.post('/bulk', authenticate, requireAdmin, async (req, res) => {
-  const businessId = req.user.business_id;
-  const incoming   = req.body;
-
-  if (!Array.isArray(incoming) || incoming.length === 0) {
-    return res.status(400).json({ error: 'يجب إرسال مصفوفة من الطلبات' });
-  }
-
-  // Normalise phone numbers from the incoming batch (strip whitespace)
-  const rawPhones = incoming
-    .map((o) => String(o.Phone ?? o.phone ?? '').trim().replace(/\s/g, ''))
-    .filter(Boolean);
-
-  if (rawPhones.length === 0) {
-    return res.status(400).json({ error: 'لم يتم العثور على أرقام هواتف في الملف' });
-  }
-
-  try {
-    // Single query: which of these phones already exist in this tenant?
-    const existing = await pool.query(
-      `SELECT DISTINCT TRIM("Phone") AS phone
-         FROM orders
-        WHERE business_id = $1
-          AND TRIM("Phone") = ANY($2::text[])`,
-      [businessId, rawPhones]
-    );
-    const existingPhones = new Set(existing.rows.map((r) => r.phone));
-
-    // Present, active agents for round-robin assignment
-    const agentsRes = await pool.query(
-      `SELECT email FROM users
-        WHERE role = 'agent'
-          AND COALESCE(is_active,  true)  = true
-          AND COALESCE(is_absent, false)  = false
-          AND business_id = $1
-        ORDER BY id ASC`,
-      [businessId]
-    );
-    const agents = agentsRes.rows.map((r) => r.email);
-
-    // Filter: keep only orders whose phone is NOT already in the DB
-    const toInsert = incoming.filter((o) => {
-      const phone = String(o.Phone ?? o.phone ?? '').trim().replace(/\s/g, '');
-      return phone && !existingPhones.has(phone);
-    });
-
-    const skippedCount  = incoming.length - toInsert.length;
-    let   importedCount = 0;
-    let   agentIdx      = 0;
-
-    for (const o of toInsert) {
-      const phone      = String(o.Phone       ?? o.phone        ?? '').trim();
-      const fullName   = String(o.FullName    ?? o.name         ?? '').trim() || null;
-      const city       = String(o.City        ?? o.city         ?? '').trim() || null;
-      const address    = String(o.Address     ?? o.address      ?? '').trim() || null;
-      const product    = String(o.ProductName ?? o.product_name ?? '').trim() || null;
-      const price      = String(o.ProductPrice ?? o.price       ?? '').trim() || null;
-      const note       = String(o.Note        ?? o.notes        ?? '').trim() || null;
-      const assignedTo = agents.length > 0 ? agents[agentIdx % agents.length] : null;
-      agentIdx++;
-
-      await pool.query(
-        `INSERT INTO orders
-           ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice",
-            "Note", "DeliveryRate", "Status", "AssignedTo", order_source, business_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'بدون', 'جديد', $8, 'csv_import', $9)`,
-        [fullName, phone, city, address, product, price, note, assignedTo, businessId]
-      );
-      importedCount++;
-    }
-
-    console.log(`[Bulk Import] ✅ ${importedCount} imported, ${skippedCount} skipped (duplicates) — tenant ${businessId}`);
-    res.json({ success: true, importedCount, skippedCount });
-  } catch (err) {
-    console.error('[bulk-import]', err);
-    res.status(500).json({ error: 'خطأ في الخادم أثناء الاستيراد' });
-  }
-});
+/* NOTE: a second, shadowed `POST /api/orders/bulk` once lived here. Express matches
+   the FIRST registered route, so the richer handler above (composite phone+product
+   dedup, 3-day window, catalogue linking, is_lost_order tagging) always won and this
+   one was dead code. Removed to avoid confusion. */
 
 /* ── Strict whitelist of DB columns that PATCH is allowed to touch ──────────
    Any key in req.body that is NOT in this set is silently dropped before the

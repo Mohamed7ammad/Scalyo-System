@@ -5,7 +5,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import {
   getOrders, updateOrder, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
-  getStaff, distributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
+  getStaff, distributeOrders, autoDistributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
   bulkImportOrders, BulkImportResult,
@@ -152,6 +152,8 @@ export default function DashboardPage() {
   const [csvUploading,  setCsvUploading]  = useState(false);
   /* Bulk-upload target: false = طلبات فعلية (live), true = طلبات مفقودة (lost). */
   const [csvIsLost,     setCsvIsLost]     = useState(false);
+  /* Lost-order manual distribution (dedicated page only). */
+  const [assigningLost, setAssigningLost] = useState(false);
 
   /* ── Auth guard ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -763,6 +765,31 @@ export default function DashboardPage() {
     }
   };
 
+  /* Manually distribute the isolated lost orders to agents (dedicated page only).
+     Calls auto-distribute scoped to lost=true so live orders are never touched. */
+  const handleAssignLostOrders = async () => {
+    if (assigningLost) return;
+    setAssigningLost(true);
+    try {
+      const res = await autoDistributeOrders(true);
+      const { distributed, agentsCount } = res.data;
+      showToast(
+        distributed > 0
+          ? `تم توزيع ${distributed} طلب مفقود على ${agentsCount} موظف`
+          : 'لا توجد طلبات مفقودة بحالة «جديد» للتوزيع',
+        distributed > 0 ? 'success' : 'error',
+      );
+      if (distributed > 0) fetchOrders();
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل توزيع الطلبات المفقودة';
+      showToast(msg, 'error');
+    } finally {
+      setAssigningLost(false);
+    }
+  };
+
   const handleCreateOrder = async () => {
     if (!addForm.FullName.trim() || !addForm.Phone.trim()) {
       showToast('الاسم ورقم الهاتف مطلوبان', 'error');
@@ -1165,6 +1192,27 @@ export default function DashboardPage() {
                 إضافة طلبات مجمعة (Excel)
               </button>
             )}
+
+            {/* Lost-orders only: manually hand the isolated batch to agents when
+                ready — scoped to lost=true so the live auto-queue is never touched. */}
+            {lostMode && isAdmin && (
+              <button
+                onClick={handleAssignLostOrders}
+                disabled={assigningLost}
+                title="توزيع الطلبات المفقودة على الموظفين"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
+                  bg-amber-600 hover:bg-amber-700 active:bg-amber-800 disabled:opacity-50
+                  text-white text-sm font-semibold shadow-sm shadow-amber-500/20
+                  transition-all duration-150 active:scale-95"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                {assigningLost ? 'جارٍ التوزيع…' : 'توزيع الطلبات المفقودة'}
+              </button>
+            )}
+
             <button
               onClick={fetchOrders}
               title="تحديث الطلبات"
