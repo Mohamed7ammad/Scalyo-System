@@ -426,7 +426,22 @@ async function phase4AgencySchema() {
       ON orders (business_id, referral_code)
   `).catch(() => {});
 
-  console.log('✅  Phase 4: agency/team-management schema ready (role check, Phone, referral columns)');
+  /* ── 4d. Lost-order isolation flag ──────────────────────────────────────
+     Bulk-imported "lost"/historical orders must be kept OUT of the live
+     "تأكيد الطلبات" confirmation queue so they never disrupt the call-center
+     workflow. NOT NULL DEFAULT FALSE → every existing + future live order is
+     correctly 'false'; only a lost-batch import flips it true. Partial index
+     keeps the rare WHERE is_lost_order = true (the dedicated page) fast without
+     bloating the common is_lost_order = false path. */
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_lost_order BOOLEAN NOT NULL DEFAULT FALSE`).catch((err) =>
+    console.warn('⚠️   Phase 4: orders.is_lost_order skipped:', err.message)
+  );
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS orders_lost_tenant_idx
+      ON orders (business_id) WHERE is_lost_order = true
+  `).catch(() => {});
+
+  console.log('✅  Phase 4: agency/team-management schema ready (role check, Phone, referral, lost-order columns)');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

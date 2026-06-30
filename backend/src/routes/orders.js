@@ -112,9 +112,16 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "rejectionReason" VARCHA
 // GET /api/orders — all roles (strictly scoped to the caller's tenant)
 router.get('/', authenticate, async (req, res) => {
   try {
+    /* LOST-ORDER ISOLATION: the live "تأكيد الطلبات" queue must NEVER show
+       bulk-imported lost/historical orders. Default (no ?lost param) returns
+       ONLY live orders (is_lost_order = false); the dedicated lost-orders page
+       passes ?lost=true to fetch ONLY the isolated batch. */
+    const lostOnly = String(req.query.lost).toLowerCase() === 'true';
     const result = await pool.query(
-      'SELECT * FROM orders WHERE business_id = $1 ORDER BY "createdAt" DESC',
-      [req.user.business_id]
+      `SELECT * FROM orders
+        WHERE business_id = $1 AND is_lost_order = $2
+        ORDER BY "createdAt" DESC`,
+      [req.user.business_id, lostOnly]
     );
     res.json(result.rows);
   } catch (err) {
@@ -245,6 +252,12 @@ router.post('/bulk', authenticate, async (req, res) => {
   const rawList = Array.isArray(req.body) ? req.body
     : Array.isArray(req.body?.orders) ? req.body.orders
     : null;
+
+  /* Lost-order batch flag (from the upload modal's radio). When true, every
+     inserted row is tagged is_lost_order = true so it's isolated from the live
+     confirmation queue and only appears on the dedicated "الطلبات المفقودة" page.
+     A bare-array body (legacy callers) has no flag → defaults to live (false). */
+  const isLost = req.body?.is_lost_order === true || String(req.body?.is_lost_order).toLowerCase() === 'true';
 
   if (!rawList || rawList.length === 0) {
     return res.status(400).json({ error: 'لا توجد طلبات للاستيراد' });
@@ -383,13 +396,13 @@ router.post('/bulk', authenticate, async (req, res) => {
       const params = [];
       let i = 1;
       for (const c of toInsert) {
-        valuesSql.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, 'بدون', 'جديد', 'csv', $${i++}, 1)`);
+        valuesSql.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, 'بدون', 'جديد', 'csv', $${i++}, 1, ${isLost ? 'TRUE' : 'FALSE'})`);
         params.push(c.FullName, c.Phone, c.City, c.Address, c.ProductName, c.ProductPrice, c.Note, businessId);
       }
       const { rows } = await pool.query(
         `INSERT INTO orders
            ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "Note",
-            "DeliveryRate", "Status", order_source, business_id, quantity)
+            "DeliveryRate", "Status", order_source, business_id, quantity, is_lost_order)
          VALUES ${valuesSql.join(', ')}
          RETURNING id, "Phone"`,
         params
@@ -403,7 +416,7 @@ router.post('/bulk', authenticate, async (req, res) => {
        round-robin the new batch across them (starting from the lightest agent),
        so the import is spread evenly and fairly. Non-fatal: orders are already
        inserted, so an assignment hiccup must never fail the import.            */
-    if (imported.length) {
+    if (imported.length && !isLost) {
       try {
         const { rows: agents } = await pool.query(
           `SELECT u.email,
@@ -450,8 +463,10 @@ router.post('/bulk', authenticate, async (req, res) => {
 
     res.json({ success: true, importedCount, skippedCount, duplicateCount, invalidCount });
 
-    // Background: fill حالة الاستلام for each new order (throttled Bosta queue).
-    for (const o of imported) enrichDeliveryRate(o.id, o.Phone);
+    // Background: fill حالة الاستلام for each new LIVE order (throttled Bosta queue).
+    // Lost/historical batches are skipped — they're isolated from live ops and must
+    // not add load to the rate-limited Bosta consignee-ranking endpoint.
+    if (!isLost) for (const o of imported) enrichDeliveryRate(o.id, o.Phone);
   } catch (err) {
     console.error('[POST /orders/bulk] error:', err.message);
     res.status(500).json({ error: 'فشل استيراد الطلبات' });

@@ -35,6 +35,7 @@ export interface Order {
   depositAmount?: number;       // amount already paid (العربون / الديبوزت) in EGP
   unit_cost_price?: number;     // WAC locked at confirmation — used for accurate historical COGS
   no_answer_logs?: string[];    // ISO timestamps of logged call attempts (لا يرد)
+  is_lost_order?: boolean;      // true = bulk-imported lost/historical order, isolated from the live queue
 }
 
 export interface ShippingResultRow {
@@ -94,8 +95,11 @@ export interface RegisterPayload {
 export const register = (payload: RegisterPayload) =>
   api.post<{ token: string; user: User }>('/api/auth/register', payload);
 
-export const getOrders = () =>
-  api.get<Order[]>('/api/orders');
+/** Fetch the tenant's orders. `lost` omitted/false → LIVE confirmation queue
+ *  (excludes bulk-imported lost orders); `lost: true` → ONLY the isolated lost
+ *  batch (the dedicated "تأكيد الطلبات المفقودة" page). */
+export const getOrders = (lost?: boolean) =>
+  api.get<Order[]>('/api/orders', lost ? { params: { lost: true } } : undefined);
 
 /* ── Manual order creation (WhatsApp / Facebook / phone) ────────────────────── */
 export interface CreateOrderPayload {
@@ -1439,8 +1443,9 @@ export interface BulkImportResult {
 
 /** Import an array of pre-parsed orders. Phone-number deduplication is enforced
  *  server-side: any row whose phone already exists in the tenant is silently skipped.
- *  Admin only. */
-export const bulkImportOrders = (orders: Partial<Order>[]) =>
-  api.post<BulkImportResult>('/api/orders/bulk', orders);
+ *  `isLost` tags the whole batch as lost/historical orders (is_lost_order = true) so
+ *  they stay isolated from the live confirmation queue. Admin only. */
+export const bulkImportOrders = (orders: Partial<Order>[], isLost = false) =>
+  api.post<BulkImportResult>('/api/orders/bulk', { orders, is_lost_order: isLost });
 
 export default api;

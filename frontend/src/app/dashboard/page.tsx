@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import {
   getOrders, updateOrder, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
@@ -75,6 +75,12 @@ function bostaStr(v: unknown): string {
 
 export default function DashboardPage() {
   const router = useRouter();
+  /* LOST-ORDER VIEW: this same component serves two routes — /dashboard (live
+     confirmation queue) and /dashboard/lost-orders (the isolated lost batch).
+     `lostMode` is derived from the path and drives which set getOrders fetches,
+     the page title, and the default of the bulk-upload radio. */
+  const pathname = usePathname();
+  const lostMode = pathname?.startsWith('/dashboard/lost-orders') ?? false;
 
   const [user,          setUser]          = useState<User | null>(null);
   const [orders,        setOrders]        = useState<Order[]>([]);
@@ -144,6 +150,8 @@ export default function DashboardPage() {
   const [csvParsed,     setCsvParsed]     = useState<Partial<Order>[]>([]);
   const [csvFileName,   setCsvFileName]   = useState('');
   const [csvUploading,  setCsvUploading]  = useState(false);
+  /* Bulk-upload target: false = طلبات فعلية (live), true = طلبات مفقودة (lost). */
+  const [csvIsLost,     setCsvIsLost]     = useState(false);
 
   /* ── Auth guard ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -160,7 +168,7 @@ export default function DashboardPage() {
     try {
       setLoading(true);
       setError('');
-      const res = await getOrders();
+      const res = await getOrders(lostMode);
       setOrders(res.data);
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status;
@@ -174,14 +182,14 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, [router]);
+  }, [router, lostMode]);
 
   /* ── Silent background refresh (no spinner, no scroll reset) ── */
   // Surgically patches order state in-place so OrdersTable stays mounted,
   // scroll position is preserved, and no active filter/modal is disturbed.
   const silentRefresh = useCallback(async () => {
     try {
-      const res = await getOrders();
+      const res = await getOrders(lostMode);
       setOrders(res.data);             // functional-update not needed; full replace is fine
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status;
@@ -192,7 +200,7 @@ export default function DashboardPage() {
       }
       // All other errors are swallowed — never flash UI errors during a background poll
     }
-  }, [router]);
+  }, [router, lostMode]);
 
   // Initial load — shows spinner once on mount
   useEffect(() => { fetchOrders(); }, [fetchOrders]);
@@ -735,10 +743,10 @@ export default function DashboardPage() {
     if (!csvParsed.length) return;
     setCsvUploading(true);
     try {
-      const res = await bulkImportOrders(csvParsed);
+      const res = await bulkImportOrders(csvParsed, csvIsLost);
       const { importedCount, skippedCount } = res.data;
       showToast(
-        `تمت الإضافة! تم استيراد ${importedCount} طلب، وتجاهل ${skippedCount} طلب مكرر`,
+        `تمت الإضافة! تم استيراد ${importedCount} ${csvIsLost ? 'طلب مفقود' : 'طلب'}، وتجاهل ${skippedCount} طلب مكرر`,
         'success',
       );
       setShowCsvModal(false);
@@ -991,7 +999,7 @@ export default function DashboardPage() {
       const res = await forwardToShipping(allowOpenAll, idsToShip, payWithPoints);
       setShippingResult(res.data);
       // Refresh orders silently so statuses update without scroll disruption
-      const fresh = await import('@/lib/api').then((m) => m.getOrders());
+      const fresh = await import('@/lib/api').then((m) => m.getOrders(lostMode));
       setOrders(fresh.data);
     } catch (err: unknown) {
       const msg =
@@ -1115,11 +1123,15 @@ export default function DashboardPage() {
         {/* ── Page title row ─────────────────────────────────────────── */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold text-gray-900 dark:text-white leading-tight">سيستم تأكيد الطلبات</h1>
+            <h1 className="text-xl font-bold text-gray-900 dark:text-white leading-tight">
+              {lostMode ? 'تأكيد الطلبات المفقودة' : 'سيستم تأكيد الطلبات'}
+            </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-              {isAdmin
-                ? 'عرض جميع الطلبات وإدارة الفريق'
-                : `طلباتك — ${user?.email ?? ''}`}
+              {lostMode
+                ? 'طلبات مفقودة/تاريخية — معزولة عن طابور التأكيد المباشر'
+                : isAdmin
+                  ? 'عرض جميع الطلبات وإدارة الفريق'
+                  : `طلباتك — ${user?.email ?? ''}`}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -1139,7 +1151,7 @@ export default function DashboardPage() {
 
             {isAdmin && (
               <button
-                onClick={() => { setCsvParsed([]); setCsvFileName(''); setShowCsvModal(true); }}
+                onClick={() => { setCsvParsed([]); setCsvFileName(''); setCsvIsLost(lostMode); setShowCsvModal(true); }}
                 title="رفع ملفات Excel أو CSV"
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl
                   bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800
@@ -1228,6 +1240,38 @@ export default function DashboardPage() {
                 <p dir="ltr" className="font-mono">name, phone, city, address, product_name, price, notes</p>
                 <p className="mt-1">• رقم الهاتف إلزامي — الصفوف بدونه تُتجاهل تلقائياً.</p>
                 <p>• أي هاتف موجود مسبقاً في النظام يُتجاهل (لا تكرار).</p>
+              </div>
+
+              {/* Batch type — REQUIRED. Live orders enter the confirmation queue;
+                  lost orders are isolated on the dedicated "الطلبات المفقودة" page. */}
+              <div className="mb-4">
+                <p className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">نوع الطلبات في الملف:</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { val: false, label: 'طلبات فعلية', hint: 'تدخل طابور التأكيد', active: 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' },
+                    { val: true,  label: 'طلبات مفقودة', hint: 'معزولة عن العمليات', active: 'border-amber-500 bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300' },
+                  ].map((opt) => {
+                    const selected = csvIsLost === opt.val;
+                    return (
+                      <button
+                        key={String(opt.val)}
+                        type="button"
+                        onClick={() => setCsvIsLost(opt.val)}
+                        className={`flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl border-2 text-right transition
+                          ${selected ? opt.active : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600'}`}
+                      >
+                        <span className="flex items-center gap-1.5 text-sm font-semibold">
+                          <span className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 flex items-center justify-center
+                            ${selected ? 'border-current' : 'border-slate-300 dark:border-slate-600'}`}>
+                            {selected && <span className="w-1.5 h-1.5 rounded-full bg-current" />}
+                          </span>
+                          {opt.label}
+                        </span>
+                        <span className="text-[11px] opacity-80 pr-5">{opt.hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* File picker */}
