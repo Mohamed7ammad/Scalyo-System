@@ -32,10 +32,12 @@ const router = express.Router();
 /* Fixed 40% agent commission on every collected return fee. */
 const RETURN_COMMISSION_RATE = 0.40;
 
-/* Workflow states the agent queue is bucketed into. 'paid' is terminal. */
-const VALID_STATUSES   = ['pending', 'no_answer', 'follow_up', 'paid'];
+/* Workflow states the agent queue is bucketed into. 'paid' is terminal; 'refused'
+   is an archive state for customers who refuse to pay (kept for CRM/accounting
+   history instead of hard-deleting). */
+const VALID_STATUSES   = ['pending', 'no_answer', 'follow_up', 'paid', 'refused'];
 /* Statuses an agent may set via PATCH (paid goes through POST /:id/pay). */
-const PATCHABLE_STATUSES = ['pending', 'no_answer', 'follow_up'];
+const PATCHABLE_STATUSES = ['pending', 'no_answer', 'follow_up', 'refused'];
 
 /* ── Idempotent schema bootstrap (runs once at module load) ─────────────────
    Same pattern as products.js / treasury.js — every statement is IF NOT EXISTS. */
@@ -425,6 +427,50 @@ router.post('/settle', authenticate, requireAdmin, async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[return-collections settle]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  } finally {
+    client.release();
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════════════
+   DELETE /api/return-collections/:id
+   Permanently remove a record (e.g. customer refused to pay). If the record was
+   already marked paid it carries a 'return_collection' treasury revenue row — we
+   delete that in the same transaction so the company balance stays accurate.
+   The settlement ledger is a per-agent aggregate and is left untouched.
+
+   Admin-only: agents archive via PATCH status='refused' instead of hard-deleting.
+   ════════════════════════════════════════════════════════════════════════════ */
+router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  const { id }     = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    /* Drop any linked treasury revenue first (no-op for unpaid records). */
+    await client.query(
+      `DELETE FROM treasury_transactions
+       WHERE return_collection_id = $1 AND business_id = $2 AND source = 'return_collection'`,
+      [id, businessId]
+    );
+
+    const del = await client.query(
+      `DELETE FROM return_collections WHERE id = $1 AND business_id = $2 RETURNING id`,
+      [id, businessId]
+    );
+    if (!del.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'السجل غير موجود' });
+    }
+
+    await client.query('COMMIT');
+    res.json({ message: 'تم حذف السجل نهائياً', id: del.rows[0].id });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[return-collections DELETE]', err);
     res.status(500).json({ error: 'خطأ في الخادم' });
   } finally {
     client.release();

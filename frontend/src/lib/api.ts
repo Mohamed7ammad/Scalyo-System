@@ -1275,7 +1275,7 @@ export const saveFollowUpAction = (
   );
 
 /* ── Return Collection Management (إدارة تحصيل المرتجعات) ───────────────────── */
-export type ReturnCollectionStatus = 'pending' | 'no_answer' | 'follow_up' | 'paid';
+export type ReturnCollectionStatus = 'pending' | 'no_answer' | 'follow_up' | 'paid' | 'refused';
 
 export interface ReturnCollection {
   id:                  number;
@@ -1337,6 +1337,10 @@ export const getReturnAnalytics = () =>
 /** Admin: pay an agent against their accrued return commission (partial allowed). */
 export const settleAgentCommission = (data: { agent_user_id: string; amount: number; notes?: string }) =>
   api.post<{ remaining_after: number }>('/api/return-collections/settle', data);
+
+/** Permanently delete a return-collection record (e.g. customer refused to pay). */
+export const deleteReturnCollection = (id: number) =>
+  api.delete<{ message: string; id: number }>(`/api/return-collections/${id}`);
 
 /* ── External Affiliate Network credentials (affiliate plan exclusive) ─────── */
 export type AffiliateNetworkId = 'taager' | 'safqa';

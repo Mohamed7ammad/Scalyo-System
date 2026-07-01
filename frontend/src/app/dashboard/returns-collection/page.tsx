@@ -26,6 +26,7 @@ const TABS: { key: ReturnCollectionStatus; label: string; accent: string }[] = [
   { key: 'no_answer', label: 'لا يرد',           accent: 'slate'   },
   { key: 'follow_up', label: 'المتابعات',        accent: 'indigo'  },
   { key: 'paid',      label: 'تم الدفع',         accent: 'emerald' },
+  { key: 'refused',   label: 'تم الرفض',         accent: 'red'     },
 ];
 
 const parseN = (v: string | number | null | undefined): number => parseFloat(String(v ?? 0)) || 0;
@@ -62,9 +63,10 @@ const STATUS_BADGE: Record<ReturnCollectionStatus, string> = {
   no_answer: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
   follow_up: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
   paid:      'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
+  refused:   'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
 };
 const STATUS_LABEL: Record<ReturnCollectionStatus, string> = {
-  pending: 'بانتظار المتابعة', no_answer: 'لا يرد', follow_up: 'متابعة', paid: 'تم الدفع',
+  pending: 'بانتظار المتابعة', no_answer: 'لا يرد', follow_up: 'متابعة', paid: 'تم الدفع', refused: 'تم الرفض',
 };
 
 /* ══════════════════════════════════════════════════════════════════════════ */
@@ -81,6 +83,7 @@ export default function ReturnsCollectionPage() {
   const [syncing,  setSyncing]  = useState(false);
   const [toast,    setToast]    = useState<Toast | null>(null);
   const [busyRow,  setBusyRow]  = useState<number | null>(null);
+  const [copied,   setCopied]   = useState(false);
 
   /* Pay modal */
   const [payTarget, setPayTarget] = useState<ReturnCollection | null>(null);
@@ -132,7 +135,7 @@ export default function ReturnsCollectionPage() {
 
   /* ── Derived: bucket records by status for tab counts ────────────────────── */
   const counts = useMemo(() => {
-    const c: Record<ReturnCollectionStatus, number> = { pending: 0, no_answer: 0, follow_up: 0, paid: 0 };
+    const c: Record<ReturnCollectionStatus, number> = { pending: 0, no_answer: 0, follow_up: 0, paid: 0, refused: 0 };
     for (const r of records) c[r.status] = (c[r.status] ?? 0) + 1;
     return c;
   }, [records]);
@@ -170,6 +173,40 @@ export default function ReturnsCollectionPage() {
       setRecords((prev) => prev.map((r) => (r.id === row.id ? res.data : r)));
     } catch {
       showToast('تعذّر حفظ الملاحظة', 'error');
+    }
+  };
+
+  /* Copy the phone numbers of the currently filtered/visible rows. Strips the
+     Egyptian country code (+2 / 002) so the raw local number lands on the clipboard. */
+  const handleCopyNumbers = async () => {
+    const phones = visibleRows
+      .map((r) => (r.phone ?? '').trim())
+      .filter(Boolean)
+      .map((p) => p.replace(/^\+?2(?=0)/, '').replace(/^00?2(?=0)/, ''))
+      .join('\n');
+    if (!phones) { showToast('لا توجد أرقام لنسخها', 'error'); return; }
+    try {
+      await navigator.clipboard.writeText(phones);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      showToast('فشل في نسخ الأرقام', 'error');
+    }
+  };
+
+  /* Archive a record as refused (customer won't pay). Moves it out of the active
+     queues into the "تم الرفض" tab — no hard delete, history is preserved. */
+  const handleRefused = async (row: ReturnCollection) => {
+    if (!window.confirm('هل أنت متأكد من نقل هذا العميل إلى قائمة الرفض؟')) return;
+    setBusyRow(row.id);
+    try {
+      const res = await updateReturnCollection(row.id, { status: 'refused' });
+      setRecords((prev) => prev.map((r) => (r.id === row.id ? res.data : r)));
+      showToast('تم نقل العميل إلى قائمة الرفض', 'success');
+    } catch {
+      showToast('تعذّر تحديث الحالة', 'error');
+    } finally {
+      setBusyRow(null);
     }
   };
 
@@ -337,31 +374,45 @@ export default function ReturnsCollectionPage() {
           </div>
         )}
 
-        {/* Quick search — by name / phone / tracking number (client-side) */}
-        <div className="relative max-w-md">
-          <svg className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="بحث بالاسم، رقم الهاتف، أو رقم التتبع..."
-            className="w-full pr-9 pl-9 py-2 rounded-xl text-sm bg-slate-50 dark:bg-slate-800
-              border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200
-              outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
-          />
-          {search && (
-            <button
-              onClick={() => setSearch('')}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition"
-              aria-label="مسح البحث"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          )}
+        {/* Quick search (by name / phone / tracking number) + copy numbers */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[200px] max-w-md">
+            <svg className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="بحث بالاسم، رقم الهاتف، أو رقم التتبع..."
+              className="w-full pr-9 pl-9 py-2 rounded-xl text-sm bg-slate-50 dark:bg-slate-800
+                border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200
+                outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition"
+                aria-label="مسح البحث"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+          <button
+            onClick={handleCopyNumbers}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium shadow-sm transition whitespace-nowrap
+              ${copied ? 'bg-emerald-600 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}`}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              {copied
+                ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />}
+            </svg>
+            {copied ? 'تم النسخ!' : `نسخ الأرقام (${visibleRows.length})`}
+          </button>
         </div>
 
         {/* Queue tabs */}
@@ -440,8 +491,11 @@ export default function ReturnsCollectionPage() {
                         {activeTab === 'paid' && <td className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{fmt(r.collected_amount)} ج.م</td>}
                         {activeTab === 'paid' && <td className="px-4 py-3 font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">{fmt(r.employee_commission)} ج.م</td>}
                         <td className="px-4 py-3">
-                          {r.status === 'paid' ? (
-                            <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_BADGE.paid}`}>{STATUS_LABEL.paid}</span>
+                          {(r.status === 'paid' || r.status === 'refused') ? (
+                            /* Terminal states — badge only, no actions (archived). */
+                            <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_BADGE[r.status]}`}>
+                              {STATUS_LABEL[r.status]}
+                            </span>
                           ) : (
                             <div className="flex flex-wrap items-center gap-1.5">
                               {r.status !== 'no_answer' && (
@@ -459,6 +513,17 @@ export default function ReturnsCollectionPage() {
                               <button onClick={() => openPay(r)} disabled={busy}
                                 className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
                                 تم الدفع
+                              </button>
+                              {/* Refuse / archive — subtle red ban button (active rows only) */}
+                              <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"
+                                aria-label="رفض"
+                                className="inline-flex items-center gap-1 px-2 py-1.5 text-xs rounded-lg font-medium transition
+                                  text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 dark:hover:bg-red-600 disabled:opacity-50">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M18.364 5.636L5.636 18.364M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                رفض
                               </button>
                             </div>
                           )}
