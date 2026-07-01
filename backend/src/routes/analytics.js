@@ -768,14 +768,14 @@ router.get('/products-profitability', authenticate, async (req, res) => {
             ELSE 0 END
         ), 0)                                                               AS cogs,
         /* Exact per-AWB shipping (Phase B1 / Option C): the true Bosta deduction
-           (orders.actual_shipping_fee = priceAfterVat) for this product's
-           DELIVERED orders, on the SAME createdAt cohort as COGS/revenue so the
-           per-product margin reconciles. NULL (uncaptured) fees count as 0. */
-        COALESCE(SUM(
-          CASE WHEN o."Status" = 'تم التوصيل'
-            THEN COALESCE(o."actual_shipping_fee"::numeric, 0)
-            ELSE 0 END
-        ), 0)                                                               AS shipping_cost
+           (orders.actual_shipping_fee = priceAfterVat) for ALL of this product's
+           DISPATCHED orders — delivered AND returned/rejected. Bosta STILL charges
+           the shipping fee on failed/returned parcels, so gating this on
+           'تم التوصيل' understated cost and inflated profit. actual_shipping_fee is
+           only ever populated for parcels that actually shipped (captured per AWB
+           by tracking number), so a plain SUM is exact: orders that never left the
+           warehouse carry NULL → 0 and contribute nothing. */
+        COALESCE(SUM(COALESCE(o."actual_shipping_fee"::numeric, 0)), 0)      AS shipping_cost
       FROM   products p
       JOIN   orders   o ON (
         o.business_id = ${bizIdx}::integer

@@ -683,17 +683,22 @@ router.post('/bosta', async (req, res) => {
         [deliveredAt, order.id, businessId]
       );
       console.log(`✅  Order #${order.id} delivered_at stamped (no auto-revenue — recorded manually on bank settlement).`);
+    }
 
-      /* ── Phase B1: capture the EXACT per-AWB shipping fee ─────────────────
-         Pull priceAfterVat from Bosta's integrations API and store it on the
-         order (idempotent — only when not already set). Fully isolated in its
-         own try/catch + runs AFTER the 200 ack, so a Bosta API hiccup can never
-         affect the delivery status write or the webhook response. Any miss is
-         backfilled later by src/scripts/backfillShippingFees.js.            */
+    /* ── Phase B1: capture the EXACT per-AWB shipping fee ─────────────────────
+       Fire for ANY billable terminal state — delivered OR returned/return-bound.
+       Bosta charges the shipping fee on failed/returned parcels too, so capturing
+       it only on delivery understated the true shipping cost and inflated profit.
+       Pull priceAfterVat from Bosta's integrations API and store it on the order
+       (idempotent — only when not already set). Fully isolated in its own
+       try/catch + runs AFTER the 200 ack, so a Bosta API hiccup can never affect
+       the status write or the webhook response. Any miss is backfilled later by
+       src/scripts/backfillShippingFees.js.                                     */
+    if (canonical === 'delivered' || isReturnCanonical) {
       try {
         const fee = await captureActualShippingFee(trackingNumber, businessId);
         if (fee != null) {
-          console.log(`✅  Order #${order.id} actual_shipping_fee = ${fee} EGP (Bosta priceAfterVat).`);
+          console.log(`✅  Order #${order.id} actual_shipping_fee = ${fee} EGP (Bosta priceAfterVat, ${canonical}).`);
         } else {
           console.log(`[Bosta Webhook] actual_shipping_fee not captured for #${order.id} (already set or fee unavailable) — backfill will retry.`);
         }

@@ -1,11 +1,13 @@
 /* ─────────────────────────────────────────────────────────────────────────
    Backfill orders.actual_shipping_fee from Bosta (Phase B1).
 
-   For every DELIVERED order that has a Bosta tracking code but no captured
-   shipping fee yet, fetch the exact per-AWB priceAfterVat from Bosta's
-   integrations API and store it. Idempotent + re-runnable: only touches rows
-   where actual_shipping_fee IS NULL, so re-runs fill only newly-delivered
-   orders and never overwrite existing values.
+   For every DISPATCHED order (delivered OR returned/rejected) that has a Bosta
+   tracking code but no captured shipping fee yet, fetch the exact per-AWB
+   priceAfterVat from Bosta's integrations API and store it. Bosta charges the
+   shipping fee on failed/returned parcels too, so we backfill them as well —
+   omitting them understated true shipping cost. Idempotent + re-runnable: only
+   touches rows where actual_shipping_fee IS NULL, so re-runs fill only newly
+   captured orders and never overwrite existing values.
 
    Runs across ALL tenants (each order_id belongs to exactly one business);
    the Bosta api_key is read per-tenant from shipping_settings.
@@ -33,20 +35,25 @@ async function main() {
      (it is normally created by routes/bosta.js on server boot). */
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS actual_shipping_fee NUMERIC(10,2)`);
 
+  /* Dispatched terminal states that incur a real Bosta charge. Non-dispatched
+     statuses never have a tracking code, so the guard below excludes them anyway;
+     listing them keeps intent explicit. */
+  const DISPATCHED_STATUSES = ['تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'تم الرفض'];
+
   const { rows: targets } = await pool.query(`
     SELECT id, "BostaTrackingCode" AS tn, business_id
     FROM   orders
-    WHERE  "Status" = 'تم التوصيل'
+    WHERE  "Status" = ANY($1::text[])
       AND  actual_shipping_fee IS NULL
       AND  COALESCE(TRIM("BostaTrackingCode"), '') <> ''
-  `);
+  `, [DISPATCHED_STATUSES]);
 
   if (targets.length === 0) {
-    console.log('✅ Nothing to backfill — every delivered order already has a fee.');
+    console.log('✅ Nothing to backfill — every dispatched order already has a fee.');
     await pool.end();
     process.exit(0);
   }
-  console.log(`Found ${targets.length} delivered order(s) needing a shipping fee.\n`);
+  console.log(`Found ${targets.length} dispatched order(s) needing a shipping fee.\n`);
 
   /* api_key per tenant (one DB read each, cached). */
   const apiKeyByBiz = new Map();
@@ -86,9 +93,9 @@ async function main() {
       (COALESCE(o.sku,'')<>'' AND UPPER(o.sku)=UPPER(p.sku))
       OR (UPPER(TRIM(COALESCE(o."ProductName",'')))=UPPER(TRIM(p.name))
           AND NOT EXISTS (SELECT 1 FROM products px WHERE px.business_id=o.business_id AND COALESCE(o.sku,'')<>'' AND UPPER(px.sku)=UPPER(o.sku))))
-    WHERE  o."Status" = 'تم التوصيل' AND o.actual_shipping_fee IS NOT NULL
+    WHERE  o."Status" = ANY($1::text[]) AND o.actual_shipping_fee IS NOT NULL
     GROUP  BY p.name ORDER BY total DESC
-  `);
+  `, [DISPATCHED_STATUSES]);
   console.log('\nStored per-product shipping (actual_shipping_fee):');
   summary.forEach(r => console.log(`  ${String(r.product).slice(0,30).padEnd(32)} n=${r.n}  Σ=${Number(r.total).toFixed(2)}  avg=${r.avg}`));
 
