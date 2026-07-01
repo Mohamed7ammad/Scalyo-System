@@ -1,7 +1,6 @@
 const express = require('express');
 const crypto  = require('crypto');
 const pool    = require('../config/db');
-const { enrichDeliveryRate } = require('../services/bostaEnrich');
 const { recordSafqaOrder, updateSafqaStatusByPhone, adoptOrphanByPhoneProduct } = require('../services/externalAffiliate');
 const { extractReferralCode, resolveMarketerCode } = require('../utils/referral');
 
@@ -459,7 +458,8 @@ async function ingestEasyOrder(body, businessId, planType = 'ecommerce') {
     console.log(`ℹ️   EasyOrder webhook: order #${newOrder.id} left unassigned — no present agents`);
   }
 
-  enrichDeliveryRate(newOrder.id, f.Phone);   // background — fire-and-forget
+  // حالة الاستلام is filled later by the polite enrichment cron (rate-limit-safe),
+  // not fetched on-demand here.
   return { ok: true, status: 201, payload: { success: true, order: newOrder } };
 }
 

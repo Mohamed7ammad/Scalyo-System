@@ -39,6 +39,75 @@ function mapRanking(ranking) {
   return 'ضعيف';
 }
 
+/* Shared Bosta consignee-ranking request shape. */
+const BOSTA_RANKING_URL = 'https://app.bosta.co/api/v2/consignee/ranking';
+const bostaRankingHeaders = (bearerToken) => ({
+  // bearerToken already includes the "Bearer " prefix.
+  Authorization:          bearerToken,
+  Origin:                 'https://business.bosta.co',
+  Referer:                'https://business.bosta.co/',
+  'x-device-fingerprint': 'ko54zl',
+  'x-device-id':          '01KNF2HWY0F6XTPBF0YXGS0PVQ',
+  'User-Agent':           'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1 Edg/148.0.0.0',
+  Accept:                 'application/json, text/plain, */*',
+});
+
+/**
+ * SELF-CONTAINED single Bosta consignee-ranking lookup for ONE phone.
+ *
+ * No queue, no internal retry — the caller (the polite enrichment cron) owns all
+ * pacing, sleeping, and circuit-breaking. Returns the mapped Arabic DeliveryRate
+ * label ('ممتاز' | 'متوسط' | 'ضعيف' | 'جديد').
+ *
+ *   • HTTP 404                 → 'جديد' (no shipping history = new customer). This
+ *                                is a definitive answer, NOT an error.
+ *   • ranking present but the metrics are unreadable → throws Error{ unreadable:true }.
+ *   • 429 / 401 / 403 / 400 / network → throws the axios error with
+ *                                err.response.status intact so the caller can
+ *                                circuit-break (429/401/403) or soft-fail (else).
+ */
+async function fetchDeliveryRate(phone, bearerToken) {
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone) {
+    const e = new Error('empty/invalid phone');
+    e.unreadable = true;
+    throw e;
+  }
+  try {
+    const res = await axios.get(BOSTA_RANKING_URL, {
+      params:  { phone: formattedPhone },
+      headers: bostaRankingHeaders(bearerToken),
+      timeout: 10_000,
+    });
+
+    const payload =
+      (res.data && typeof res.data.data === 'object' && res.data.data !== null)
+        ? res.data.data
+        : (res.data || {});
+
+    const hasRankingKey =
+      Object.prototype.hasOwnProperty.call(payload, 'consigneRanking') ||
+      Object.prototype.hasOwnProperty.call(payload, 'consigneeRanking');
+    if (!hasRankingKey) {
+      const e = new Error('unrecognised Bosta response shape');
+      e.unreadable = true;
+      throw e;
+    }
+
+    const ranking = payload.consigneRanking ?? payload.consigneeRanking ?? null;
+    const mapped  = mapRanking(ranking);   // null ranking → 'جديد'
+    if (!mapped) {
+      const e = new Error('ranking present but metrics unreadable');
+      e.unreadable = true;
+      throw e;
+    }
+    return mapped;
+  } catch (err) {
+    if (err.response?.status === 404) return 'جديد';   // no history → new customer
+    throw err;   // 429/401/403/400/network/unreadable → caller decides
+  }
+}
+
 /* ── Throttled enrichment via the shared Bosta queue ─────────────────────────
    Bosta rate-limits the consignee-ranking endpoint (HTTP 429). Rather than keep
    a SEPARATE queue here, enrichment now funnels through the SAME global queue
@@ -190,4 +259,4 @@ async function processEnrichment(orderId, phone) {
   }
 }
 
-module.exports = { enrichDeliveryRate, formatPhone, mapRanking };
+module.exports = { enrichDeliveryRate, fetchDeliveryRate, formatPhone, mapRanking };

@@ -2,7 +2,6 @@ const express       = require('express');
 const pool          = require('../config/db');
 const authenticate  = require('../middleware/auth');
 const { requireAdmin, filterAgentFields } = require('../middleware/roleGuard');
-const { enrichDeliveryRate } = require('../services/bostaEnrich');
 
 const router = express.Router();
 
@@ -227,10 +226,10 @@ router.post('/', authenticate, async (req, res) => {
 
     console.log(`[Manual Order] ✅ #${order.id} created for tenant ${req.user.business_id}`);
 
-    // Respond with the (now-assigned) order, then enrich the delivery rating in
-    // the background (throttled queue).
+    // DeliveryRate (حالة الاستلام) is filled later by the polite, rate-limit-safe
+    // enrichment cron (cron/deliveryRateBackfill.js) — never fetched on-demand here,
+    // which used to burst past Bosta's limit and get the account blocked.
     res.status(201).json(order);
-    enrichDeliveryRate(order.id, order.Phone);
   } catch (err) {
     console.error('[POST /orders] create error:', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
@@ -463,10 +462,8 @@ router.post('/bulk', authenticate, async (req, res) => {
 
     res.json({ success: true, importedCount, skippedCount, duplicateCount, invalidCount });
 
-    // Background: fill حالة الاستلام for each new LIVE order (throttled Bosta queue).
-    // Lost/historical batches are skipped — they're isolated from live ops and must
-    // not add load to the rate-limited Bosta consignee-ranking endpoint.
-    if (!isLost) for (const o of imported) enrichDeliveryRate(o.id, o.Phone);
+    // حالة الاستلام is filled later by the polite enrichment cron — no on-demand
+    // Bosta calls here (they used to burst the rate limit on bulk imports).
   } catch (err) {
     console.error('[POST /orders/bulk] error:', err.message);
     res.status(500).json({ error: 'فشل استيراد الطلبات' });

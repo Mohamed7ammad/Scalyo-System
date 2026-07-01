@@ -1,7 +1,6 @@
 const cron  = require('node-cron');
 const axios = require('axios');
 const pool  = require('../config/db');
-const { enrichDeliveryRate } = require('./bostaEnrich');
 const { extractReferralCode } = require('../utils/referral');
 
 const SHEET_URL =
@@ -109,8 +108,9 @@ const startOrderSyncCron = () => {
           // The webhook already ingested this order → don't duplicate it from the sheet.
           crossChannelSkipped++;
         } else {
-          // Insert as 'بدون' (not-yet-checked). enrichDeliveryRate fires immediately
-          // after and overwrites it with the real Bosta rating within seconds.
+          // Insert as 'بدون' (not-yet-checked). The polite enrichment cron
+          // (cron/deliveryRateBackfill.js) fills the real Bosta rating later in a
+          // rate-limit-safe way — no on-demand fetch here.
           // orderData.DeliveryRate (always 'بدون' from the sheet) is intentionally ignored.
           const insertResult = await pool.query(
             `INSERT INTO orders
@@ -136,11 +136,10 @@ const startOrderSyncCron = () => {
           );
           insertedId = insertResult.rows[0]?.id;
           if (insertedId) {
-            // NEW row only — fire-and-forget enrichment (never on a duplicate).
-            enrichDeliveryRate(insertedId, orderData.Phone);
+            // NEW row — DeliveryRate stays 'بدون' until the enrichment cron fills it.
             syncedCount++;
           } else {
-            // Already imported by sheet_row_index conflict — mark synced, don't enrich.
+            // Already imported by sheet_row_index conflict — mark synced.
             skippedCount++;
           }
         }
