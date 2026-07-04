@@ -1454,4 +1454,60 @@ export interface BulkImportResult {
 export const bulkImportOrders = (orders: Partial<Order>[], isLost = false) =>
   api.post<BulkImportResult>('/api/orders/bulk', { orders, is_lost_order: isLost });
 
+/* ── After-Sales Service (خدمة ما بعد البيع) ─────────────────────── */
+/** The fixed status set — must mirror ALLOWED_STATUSES in routes/afterSales.js. */
+export const AFTER_SALES_STATUSES = [
+  'جاري العمل',
+  'تم حل المشكلة',
+  'استبدال',
+  'استرجاع',
+  'العميل لم يرد',
+  'المشكلة من العميل',
+] as const;
+export type AfterSalesStatus = (typeof AFTER_SALES_STATUSES)[number];
+
+export interface AfterSalesIssue {
+  id:                number;
+  customer_name:     string;
+  customer_phone:    string;
+  product_id:        string | null;   // UUID soft link to products
+  product_name:      string | null;   // snapshot — survives product rename/delete
+  issue_description: string | null;   // the Confirmation team's complaint text
+  status:            AfterSalesStatus;
+  after_sales_notes: string | null;   // the After-Sales team's resolution notes
+  created_by:        string | null;
+  created_by_name?:  string | null;   // resolved display name (GET join)
+  created_by_email?: string | null;
+  created_at:        string;
+  updated_at:        string;
+}
+
+export interface CreateAfterSalesPayload {
+  customer_name:     string;
+  customer_phone:    string;
+  product_id?:       string | null;
+  product_name?:     string | null;
+  issue_description: string;
+}
+
+export type UpdateAfterSalesPayload = Partial<
+  Pick<AfterSalesIssue,
+    'status' | 'after_sales_notes' | 'issue_description' |
+    'customer_name' | 'customer_phone' | 'product_id' | 'product_name'>
+>;
+
+/** List the tenant's issues, optionally narrowed to one product and/or status. */
+export const getAfterSalesIssues = (filters?: { product_id?: string; status?: AfterSalesStatus }) =>
+  api.get<AfterSalesIssue[]>('/api/after-sales', filters ? { params: filters } : undefined);
+
+export const createAfterSalesIssue = (data: CreateAfterSalesPayload) =>
+  api.post<AfterSalesIssue>('/api/after-sales', data);
+
+export const updateAfterSalesIssue = (id: number, data: UpdateAfterSalesPayload) =>
+  api.patch<AfterSalesIssue>(`/api/after-sales/${id}`, data);
+
+/** Admin only — agents close issues via status instead of deleting. */
+export const deleteAfterSalesIssue = (id: number) =>
+  api.delete<{ message: string; id: number }>(`/api/after-sales/${id}`);
+
 export default api;

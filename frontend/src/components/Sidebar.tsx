@@ -129,6 +129,16 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: '/dashboard/after-sales', label: 'خدمة ما بعد البيع',
+    subLabel: 'After-Sales',   // no role/permission flags — visible to every employee
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/staff', label: 'إدارة الموظفين',
     subLabel: 'Team', adminOnly: true,
     icon: (

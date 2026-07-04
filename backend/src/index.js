@@ -61,6 +61,7 @@ const affiliateRoutes       = require('./routes/affiliate');
 const safqaRoutes           = require('./routes/safqa');
 const easyorderRoutes       = require('./routes/easyorder');
 const returnCollectionsRoutes = require('./routes/returnCollections');
+const afterSalesRoutes        = require('./routes/afterSales');
 
 const app = express();
 
@@ -95,6 +96,7 @@ app.use('/api/affiliate',       affiliateRoutes); // external affiliate networks
 app.use('/api/safqa',           safqaRoutes); // Safqa CSV self-serve import (affiliate plan)
 app.use('/api/integrations/easyorder', easyorderRoutes); // EasyOrder per-tenant settings
 app.use('/api/return-collections', returnCollectionsRoutes); // returned-parcel fee collection + agent commission settlement
+app.use('/api/after-sales',      afterSalesRoutes); // post-delivery customer issue tracking (خدمة ما بعد البيع)
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
