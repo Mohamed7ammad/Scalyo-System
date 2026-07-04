@@ -17,11 +17,18 @@ const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
    a plain "2026-06-02" passes through unchanged. */
 const toDateInput = (v?: string | null) => (v ? String(v).slice(0, 10) : '');
 
-// All possible statuses — used in the admin full-edit modal only
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل'];
+// All possible statuses — used in the admin full-edit modal only.
+// INVARIANT: this list must contain EVERY status the system can ever write
+// (including the webhook-set return states). A <select> whose value is missing
+// from its options silently displays the first option ('جديد') — that exact
+// fallback made returned orders masquerade as new ones and invited admins to
+// overwrite 'تم الإرجاع' with 'جديد' in the DB.
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
 
-// Statuses agents (and inline table controls) are allowed to set manually.
-// 'تم الشحن' / 'تم التوصيل' are set automatically by the shipping API — never by hand.
+// Statuses agents AND admins may set from the inline table dropdown.
+// Everything from 'تم الشحن' onward is COURIER-OWNED (set by the shipping API /
+// Bosta webhook) and renders as a locked badge in the table for everyone —
+// admin overrides go through the full edit modal only.
 const MANUAL_STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع'];
 
 const STATUS_STYLES: Record<string, string> = {
@@ -734,7 +741,13 @@ function OrdersTable({
                   text-gray-900 dark:text-slate-200
                   focus:ring-2 focus:ring-indigo-400"
               >
-                {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                {/* Belt-and-braces: if the order somehow carries a status outside
+                    the list, render it as a real option instead of letting the
+                    <select> silently display 'جديد'. */}
+                {(STATUS_OPTIONS.includes(normStatus(editForm.Status ?? ''))
+                  ? STATUS_OPTIONS
+                  : [normStatus(editForm.Status ?? ''), ...STATUS_OPTIONS].filter(Boolean)
+                ).map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
 
@@ -1333,11 +1346,18 @@ const OrderRow = memo(function OrderRow({
         />
       </td>
 
-      {/* Status cell */}
+      {/* Status cell — courier-owned statuses ('تم الشحن' onward) are a locked
+          badge for EVERYONE, admins included. The inline dropdown previously
+          rendered for admins on ANY status, and since the return states were
+          missing from its options the <select> displayed 'جديد' — making
+          returned orders look new and letting one click overwrite the real
+          status in the DB. Admin overrides now live in the edit modal only. */}
       <td className="px-4 py-3">
-        {(role === 'admin' || MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status))) ? (
+        {MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status)) ? (
           <select
-            value={order.Status}
+            /* normalized so a stray space / RTL mark in the DB value can never
+               unmatch the options and fall back to displaying 'جديد' */
+            value={normStatus(order.Status)}
             onChange={(e) => onStatusChange(order, e.target.value)}
             className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer outline-none
               focus:ring-2 focus:ring-indigo-400 border-0
@@ -1345,7 +1365,7 @@ const OrderRow = memo(function OrderRow({
               dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
               ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
           >
-            {(role === 'admin' ? STATUS_OPTIONS : MANUAL_STATUS_OPTIONS).map((s) => (
+            {MANUAL_STATUS_OPTIONS.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>

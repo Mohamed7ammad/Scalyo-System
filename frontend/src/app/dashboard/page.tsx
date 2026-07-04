@@ -15,7 +15,11 @@ import {
 import OrdersTable from '@/components/OrdersTable';
 import * as XLSX from 'xlsx';
 
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن'];
+/* Status pills = OPERATIONAL QUEUES (exact current state, one per team action).
+   'جاري الإعادة' (in transit back to us) and 'تم الإرجاع' (physically received /
+   restocked) are courier-set states — surfaced here so returned parcels have a
+   dedicated queue instead of hiding under 'الكل'. */
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'جاري الإعادة', 'تم الإرجاع'];
 
 /* Every status that means the order successfully PASSED confirmation — used for
    a cumulative confirmation rate so the % doesn't collapse as orders move on to
@@ -27,12 +31,11 @@ const PASSED_CONFIRMATION = ['تم التأكيد', 'تم الشحن', 'تم ا�
    range instead of draining to zero as parcels get delivered or returned. */
 const PASSED_SHIPPING = ['تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
 
-/* Filter sentinels for the two cumulative (funnel) stat cards. Distinct from the
-   raw status literals on purpose: clicking a funnel card shows EVERY status in
-   its cumulative set, while the status pills below keep filtering by one exact
-   current status. */
-const CONFIRMED_FUNNEL_FILTER = 'فانل التأكيد';
-const SHIPPED_FUNNEL_FILTER   = 'فانل الشحن';
+/* NOTE (reporting vs operations): the card NUMBERS stay cumulative/funnel, but
+   card CLICKS are an operational gesture — they filter the table to the exact
+   snapshot status (e.g. orders sitting in 'تم التأكيد' awaiting dispatch). The
+   card ↔ table difference is reconciled by the snapshot sub-label on the card
+   itself, not by widening the table filter. */
 
 /* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
 const EGYPT_GOVERNORATES = [
@@ -913,14 +916,6 @@ export default function DashboardPage() {
         (a, b) => new Date(a.PostponedDate!).getTime() - new Date(b.PostponedDate!).getTime()
       );
     }
-    // Funnel cards: show every status inside the cumulative count, so the table
-    // row count always matches the number on the card that was clicked.
-    if (activeFilter === CONFIRMED_FUNNEL_FILTER) {
-      return dateScoped.filter((o) => PASSED_CONFIRMATION.includes(normStatus(o.Status)));
-    }
-    if (activeFilter === SHIPPED_FUNNEL_FILTER) {
-      return dateScoped.filter((o) => PASSED_SHIPPING.includes(normStatus(o.Status)));
-    }
     // Build on the date-scoped set so the table matches the date-aware counts.
     return dateScoped.filter(
       (o) => activeFilter === 'الكل' || normStatus(o.Status) === normStatus(activeFilter)
@@ -945,6 +940,10 @@ export default function DashboardPage() {
     rejected:  dateScoped.filter((o) => normStatus(o.Status) === 'تم الرفض').length,
     postponed: dateScoped.filter((o) => normStatus(o.Status) === 'مؤجل').length,
     noAnswer:  dateScoped.filter((o) => normStatus(o.Status) === 'لا يرد').length,
+    /* Snapshot queue sizes — feed the cards' operational sub-labels
+       (بانتظار الشحن / قيد الشحن الآن) and match what a card click shows. */
+    confirmed: dateScoped.filter((o) => normStatus(o.Status) === 'تم التأكيد').length,
+    shipped:   dateScoped.filter((o) => normStatus(o.Status) === 'تم الشحن').length,
     /* Funnel (cumulative) counts — both cards on the top row read as "how many
        orders ever reached this stage in the date range", so neither drains as
        orders progress downstream. Confirmed ⊇ shipped by construction; the gap
@@ -2575,8 +2574,9 @@ export default function DashboardPage() {
           <StatCard label="تم التأكيد" value={stats.confirmedCumulative}
             valueColor="text-emerald-600 dark:text-emerald-400"
             pct={pct(stats.confirmedCumulative)} pctLabel="نسبة التأكيد" pctPrimary
-            active={activeFilter === CONFIRMED_FUNNEL_FILTER}
-            onClick={() => setActiveFilter(CONFIRMED_FUNNEL_FILTER)} />
+            sub={`بانتظار الشحن: ${stats.confirmed}`}
+            active={activeFilter === 'تم التأكيد'}
+            onClick={() => setActiveFilter('تم التأكيد')} />
           <StatCard label="تم الرفض"   value={stats.rejected}
             valueColor="text-red-500 dark:text-red-400"
             pct={pct(stats.rejected)} pctLabel="نسبة الرفض" pctPrimary
@@ -2597,8 +2597,9 @@ export default function DashboardPage() {
               ? Math.round((stats.shippedCumulative / stats.confirmedCumulative) * 100)
               : 0}
             pctLabel="نسبة الشحن" pctPrimary
-            active={activeFilter === SHIPPED_FUNNEL_FILTER}
-            onClick={() => setActiveFilter(SHIPPED_FUNNEL_FILTER)} />
+            sub={`قيد الشحن الآن: ${stats.shipped}`}
+            active={activeFilter === 'تم الشحن'}
+            onClick={() => setActiveFilter('تم الشحن')} />
         </div>
 
         {/* ── Date range filter ─────────────────────────────────────── */}
@@ -2967,7 +2968,7 @@ export default function DashboardPage() {
 
 /* ── StatCard ─────────────────────────────────────────────────── */
 function StatCard({
-  label, value, valueColor, pct, pctLabel, pctPrimary, onClick, active,
+  label, value, valueColor, pct, pctLabel, pctPrimary, sub, onClick, active,
 }: {
   label:       string;
   value:       number;
@@ -2975,6 +2976,8 @@ function StatCard({
   pct?:        number;
   pctLabel?:   string;
   pctPrimary?: boolean;       // when true: % is the big number, count is secondary
+  sub?:        string;        // snapshot queue size — reconciles the cumulative
+                              // headline with what clicking the card shows
   onClick?:    () => void;
   active?:     boolean;
 }) {
@@ -3032,6 +3035,11 @@ function StatCard({
 
       {/* Label */}
       <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mt-2 leading-snug">{label}</div>
+
+      {/* Snapshot sub-label — the operational queue size behind the funnel number */}
+      {sub && (
+        <div className="text-xs font-semibold text-indigo-500 dark:text-indigo-400 mt-1 leading-snug">{sub}</div>
+      )}
     </div>
   );
 }
