@@ -22,6 +22,18 @@ const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', '�
    shipped/delivered. Mirrors the backend analytics `status_confirmed` set. */
 const PASSED_CONFIRMATION = ['تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
 
+/* Every status that means the order was DISPATCHED — the next funnel stage down.
+   The "تم الشحن" card counts this set so it reflects total shipped over the date
+   range instead of draining to zero as parcels get delivered or returned. */
+const PASSED_SHIPPING = ['تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
+
+/* Filter sentinels for the two cumulative (funnel) stat cards. Distinct from the
+   raw status literals on purpose: clicking a funnel card shows EVERY status in
+   its cumulative set, while the status pills below keep filtering by one exact
+   current status. */
+const CONFIRMED_FUNNEL_FILTER = 'فانل التأكيد';
+const SHIPPED_FUNNEL_FILTER   = 'فانل الشحن';
+
 /* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
 const EGYPT_GOVERNORATES = [
   'القاهرة', 'الجيزة', 'الإسكندرية', 'القليوبية', 'الشرقية', 'الدقهلية', 'البحيرة',
@@ -901,6 +913,14 @@ export default function DashboardPage() {
         (a, b) => new Date(a.PostponedDate!).getTime() - new Date(b.PostponedDate!).getTime()
       );
     }
+    // Funnel cards: show every status inside the cumulative count, so the table
+    // row count always matches the number on the card that was clicked.
+    if (activeFilter === CONFIRMED_FUNNEL_FILTER) {
+      return dateScoped.filter((o) => PASSED_CONFIRMATION.includes(normStatus(o.Status)));
+    }
+    if (activeFilter === SHIPPED_FUNNEL_FILTER) {
+      return dateScoped.filter((o) => PASSED_SHIPPING.includes(normStatus(o.Status)));
+    }
     // Build on the date-scoped set so the table matches the date-aware counts.
     return dateScoped.filter(
       (o) => activeFilter === 'الكل' || normStatus(o.Status) === normStatus(activeFilter)
@@ -922,16 +942,15 @@ export default function DashboardPage() {
   const stats = {
     total:     dateScoped.length,
     new:       dateScoped.filter((o) => normStatus(o.Status) === 'جديد').length,
-    confirmed: dateScoped.filter((o) => normStatus(o.Status) === 'تم التأكيد').length,
     rejected:  dateScoped.filter((o) => normStatus(o.Status) === 'تم الرفض').length,
     postponed: dateScoped.filter((o) => normStatus(o.Status) === 'مؤجل').length,
     noAnswer:  dateScoped.filter((o) => normStatus(o.Status) === 'لا يرد').length,
-    shipped:   dateScoped.filter((o) => normStatus(o.Status) === 'تم الشحن').length,
-    /* Cumulative: every order that ever passed confirmation (confirmed + shipped
-       + delivered + returning/returned). This is the numerator for the
-       confirmation rate so it reflects daily performance, not the shrinking
-       count of orders still sitting in 'تم التأكيد'. */
+    /* Funnel (cumulative) counts — both cards on the top row read as "how many
+       orders ever reached this stage in the date range", so neither drains as
+       orders progress downstream. Confirmed ⊇ shipped by construction; the gap
+       is exactly the orders confirmed but not yet dispatched. */
     confirmedCumulative: dateScoped.filter((o) => PASSED_CONFIRMATION.includes(normStatus(o.Status))).length,
+    shippedCumulative:   dateScoped.filter((o) => PASSED_SHIPPING.includes(normStatus(o.Status))).length,
   };
   const pct = (n: number) =>
     stats.total ? Math.round((n / stats.total) * 100) : 0;
@@ -2556,8 +2575,8 @@ export default function DashboardPage() {
           <StatCard label="تم التأكيد" value={stats.confirmedCumulative}
             valueColor="text-emerald-600 dark:text-emerald-400"
             pct={pct(stats.confirmedCumulative)} pctLabel="نسبة التأكيد" pctPrimary
-            active={activeFilter === 'تم التأكيد'}
-            onClick={() => setActiveFilter('تم التأكيد')} />
+            active={activeFilter === CONFIRMED_FUNNEL_FILTER}
+            onClick={() => setActiveFilter(CONFIRMED_FUNNEL_FILTER)} />
           <StatCard label="تم الرفض"   value={stats.rejected}
             valueColor="text-red-500 dark:text-red-400"
             pct={pct(stats.rejected)} pctLabel="نسبة الرفض" pctPrimary
@@ -2572,10 +2591,14 @@ export default function DashboardPage() {
             pct={pct(stats.noAnswer)} pctLabel="نسبة عدم الرد" pctPrimary
             active={activeFilter === 'لا يرد'}
             onClick={() => setActiveFilter('لا يرد')} />
-          <StatCard label="تم الشحن"  value={stats.shipped}
+          <StatCard label="تم الشحن"  value={stats.shippedCumulative}
             valueColor="text-teal-600 dark:text-teal-400"
-            active={activeFilter === 'تم الشحن'}
-            onClick={() => setActiveFilter('تم الشحن')} />
+            pct={stats.confirmedCumulative
+              ? Math.round((stats.shippedCumulative / stats.confirmedCumulative) * 100)
+              : 0}
+            pctLabel="نسبة الشحن" pctPrimary
+            active={activeFilter === SHIPPED_FUNNEL_FILTER}
+            onClick={() => setActiveFilter(SHIPPED_FUNNEL_FILTER)} />
         </div>
 
         {/* ── Date range filter ─────────────────────────────────────── */}
