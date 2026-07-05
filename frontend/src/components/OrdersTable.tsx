@@ -1160,13 +1160,17 @@ function OrdersTable({
    ═══════════════════════════════════════════════════════════════════════════
    Counts come pre-aggregated from GET /api/orders (per-phone, tenant-scoped,
    zero Bosta calls). First order → subtle "عميل جديد"; returning customer →
-   prominent breakdown so the confirmation team instantly sees loyalty vs.
-   past rejections. Numbers pass through Number() because node-pg can return
-   bigint aggregates as strings.                                              */
+   prominent 3-way breakdown. Cancellations (تم الرفض, free — caught on the
+   confirmation call) are shown separately from shipping returns
+   (تم الإرجاع / جاري الإعادة — parcel shipped & bounced, real fees lost),
+   because the latter is the critical red flag. Zero counters are hidden to
+   keep the name column tight. Numbers pass through Number() because node-pg
+   can return bigint aggregates as strings.                                   */
 function CustomerFrequencyBadge({ order }: { order: Order }) {
   const total     = Number(order.total_orders_count ?? 1);
   const delivered = Number(order.delivered_orders_count ?? 0);
-  const rejected  = Number(order.rejected_orders_count ?? 0);
+  const canceled  = Number(order.canceled_orders_count ?? 0);
+  const returned  = Number(order.returned_orders_count ?? 0);
 
   if (total <= 1) {
     return (
@@ -1187,8 +1191,15 @@ function CustomerFrequencyBadge({ order }: { order: Order }) {
         dark:bg-violet-900/30 dark:border-violet-700/50 dark:text-violet-300"
     >
       <span className="whitespace-nowrap">🔁 عميل متكرر ({total} طلبات)</span>
-      <span className="whitespace-nowrap text-emerald-600 dark:text-emerald-400">✅ مستلم: {delivered}</span>
-      <span className="whitespace-nowrap text-red-600 dark:text-red-400">❌ مرفوض: {rejected}</span>
+      {delivered > 0 && (
+        <span className="whitespace-nowrap text-emerald-600 dark:text-emerald-400">✅ مستلم: {delivered}</span>
+      )}
+      {canceled > 0 && (
+        <span className="whitespace-nowrap text-amber-600 dark:text-amber-400">⚠️ إلغاء: {canceled}</span>
+      )}
+      {returned > 0 && (
+        <span className="whitespace-nowrap text-red-600 dark:text-red-400">❌ مرتجع: {returned}</span>
+      )}
     </span>
   );
 }

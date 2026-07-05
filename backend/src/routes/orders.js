@@ -122,18 +122,24 @@ router.get('/', authenticate, async (req, res) => {
        compared digits-only — same normalisation as the bulk-import dedup — so
        "+20 10..." and "010..." count as one customer. Orders with no usable
        phone are NOT grouped together: they fall out of the LEFT JOIN and are
-       treated as a first order (total 1 / delivered 0 / rejected 0).          */
+       treated as a first order (total 1 / all breakdown counts 0).
+       Cancellations vs returns are SEPARATE on purpose: 'تم الرفض' happens on
+       the confirmation call and costs nothing, while 'تم الإرجاع'/'جاري الإعادة'
+       means a parcel actually shipped and came back — real shipping fees lost,
+       the strongest red flag for the team.                                    */
     const result = await pool.query(
       `SELECT o.*,
               COALESCE(h.total_orders_count,     1) AS total_orders_count,
               COALESCE(h.delivered_orders_count, 0) AS delivered_orders_count,
-              COALESCE(h.rejected_orders_count,  0) AS rejected_orders_count
+              COALESCE(h.canceled_orders_count,  0) AS canceled_orders_count,
+              COALESCE(h.returned_orders_count,  0) AS returned_orders_count
          FROM orders o
          LEFT JOIN (
            SELECT regexp_replace(COALESCE("Phone", ''), '\\D', '', 'g') AS phone_key,
                   COUNT(*)::int                                                        AS total_orders_count,
                   COUNT(*) FILTER (WHERE TRIM("Status") = 'تم التوصيل')::int            AS delivered_orders_count,
-                  COUNT(*) FILTER (WHERE TRIM("Status") IN ('تم الرفض', 'تم الإرجاع'))::int AS rejected_orders_count
+                  COUNT(*) FILTER (WHERE TRIM("Status") = 'تم الرفض')::int              AS canceled_orders_count,
+                  COUNT(*) FILTER (WHERE TRIM("Status") IN ('تم الإرجاع', 'جاري الإعادة'))::int AS returned_orders_count
              FROM orders
             WHERE business_id = $1
             GROUP BY 1
