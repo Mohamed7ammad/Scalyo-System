@@ -116,10 +116,31 @@ router.get('/', authenticate, async (req, res) => {
        ONLY live orders (is_lost_order = false); the dedicated lost-orders page
        passes ?lost=true to fetch ONLY the isolated batch. */
     const lostOnly = String(req.query.lost).toLowerCase() === 'true';
+    /* CUSTOMER FREQUENCY (local-only — zero Bosta calls): per-phone history
+       aggregated over ALL of the tenant's orders (live + lost/historical) so
+       the confirmation team sees the customer's real track record. Phones are
+       compared digits-only — same normalisation as the bulk-import dedup — so
+       "+20 10..." and "010..." count as one customer. Orders with no usable
+       phone are NOT grouped together: they fall out of the LEFT JOIN and are
+       treated as a first order (total 1 / delivered 0 / rejected 0).          */
     const result = await pool.query(
-      `SELECT * FROM orders
-        WHERE business_id = $1 AND is_lost_order = $2
-        ORDER BY "createdAt" DESC`,
+      `SELECT o.*,
+              COALESCE(h.total_orders_count,     1) AS total_orders_count,
+              COALESCE(h.delivered_orders_count, 0) AS delivered_orders_count,
+              COALESCE(h.rejected_orders_count,  0) AS rejected_orders_count
+         FROM orders o
+         LEFT JOIN (
+           SELECT regexp_replace(COALESCE("Phone", ''), '\\D', '', 'g') AS phone_key,
+                  COUNT(*)::int                                                        AS total_orders_count,
+                  COUNT(*) FILTER (WHERE TRIM("Status") = 'تم التوصيل')::int            AS delivered_orders_count,
+                  COUNT(*) FILTER (WHERE TRIM("Status") IN ('تم الرفض', 'تم الإرجاع'))::int AS rejected_orders_count
+             FROM orders
+            WHERE business_id = $1
+            GROUP BY 1
+         ) h ON h.phone_key <> ''
+            AND h.phone_key = regexp_replace(COALESCE(o."Phone", ''), '\\D', '', 'g')
+        WHERE o.business_id = $1 AND o.is_lost_order = $2
+        ORDER BY o."createdAt" DESC`,
       [req.user.business_id, lostOnly]
     );
     res.json(result.rows);

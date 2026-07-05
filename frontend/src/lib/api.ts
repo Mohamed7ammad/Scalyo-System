@@ -36,6 +36,11 @@ export interface Order {
   unit_cost_price?: number;     // WAC locked at confirmation — used for accurate historical COGS
   no_answer_logs?: string[];    // ISO timestamps of logged call attempts (لا يرد)
   is_lost_order?: boolean;      // true = bulk-imported lost/historical order, isolated from the live queue
+  /* Customer frequency — per-phone history computed locally by GET /api/orders
+     (digits-only phone match, scoped to the tenant; zero Bosta calls). */
+  total_orders_count?: number;     // all orders ever placed by this phone
+  delivered_orders_count?: number; // of those, Status = 'تم التوصيل'
+  rejected_orders_count?: number;  // of those, Status = 'تم الرفض' or 'تم الإرجاع'
 }
 
 export interface ShippingResultRow {

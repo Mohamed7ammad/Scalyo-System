@@ -1156,6 +1156,44 @@ function OrdersTable({
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   CustomerFrequencyBadge — local-DB customer history under the customer name.
+   ═══════════════════════════════════════════════════════════════════════════
+   Counts come pre-aggregated from GET /api/orders (per-phone, tenant-scoped,
+   zero Bosta calls). First order → subtle "عميل جديد"; returning customer →
+   prominent breakdown so the confirmation team instantly sees loyalty vs.
+   past rejections. Numbers pass through Number() because node-pg can return
+   bigint aggregates as strings.                                              */
+function CustomerFrequencyBadge({ order }: { order: Order }) {
+  const total     = Number(order.total_orders_count ?? 1);
+  const delivered = Number(order.delivered_orders_count ?? 0);
+  const rejected  = Number(order.rejected_orders_count ?? 0);
+
+  if (total <= 1) {
+    return (
+      <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md
+        text-xs font-medium bg-emerald-50 border border-emerald-100 text-emerald-600
+        dark:bg-emerald-900/20 dark:border-emerald-800/40 dark:text-emerald-400">
+        🆕 عميل جديد
+      </span>
+    );
+  }
+
+  return (
+    <span
+      dir="rtl"
+      className="mt-1 inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 max-w-[220px]
+        px-2 py-0.5 rounded-md text-xs font-semibold
+        bg-violet-50 border border-violet-200 text-violet-700
+        dark:bg-violet-900/30 dark:border-violet-700/50 dark:text-violet-300"
+    >
+      <span className="whitespace-nowrap">🔁 عميل متكرر ({total} طلبات)</span>
+      <span className="whitespace-nowrap text-emerald-600 dark:text-emerald-400">✅ مستلم: {delivered}</span>
+      <span className="whitespace-nowrap text-red-600 dark:text-red-400">❌ مرفوض: {rejected}</span>
+    </span>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    OrderRow — one table row, strictly memoised.
    ═══════════════════════════════════════════════════════════════════════════
    The parent OrdersTable still re-renders & re-maps the array on a status edit,
@@ -1257,6 +1295,9 @@ const OrderRow = memo(function OrderRow({
         >
           {order.FullName}
         </p>
+
+        {/* Customer frequency — local delivery-history breakdown (see component) */}
+        <CustomerFrequencyBadge order={order} />
 
         {/* Product badge */}
         {order.ProductName && (
