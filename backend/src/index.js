@@ -121,11 +121,11 @@ app.listen(PORT, async () => {
     startStaffAlertsCron();
     startGhostPurgeCron();
     startSafqaReconcileCron();
-    /* TEMPORARILY DISABLED (2026-07-04): Bosta rate limits tightened and the
-       account got blocked again despite the polite backoff. Re-enable by
-       uncommenting once Bosta lifts the restriction. Logic untouched in
-       cron/deliveryRateBackfill.js. */
-    // startDeliveryRateBackfillCron();
+    /* RE-ENABLED (2026-07-05) with strict safety rails after the 2026-07-04
+       block: backlog cutoff (only orders created ≥ 2026-07-05 hit Bosta —
+       "forget the past"), ≥4s hard floor between calls (default 5s), batch 5,
+       sweep every 15 min → ≤20 calls/hour. See cron/deliveryRateBackfill.js. */
+    startDeliveryRateBackfillCron();
   } else {
     console.log(`⚠️ [CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" (not "production") → ALL cron jobs DISABLED (Sheets sync, Bosta enrich/reconcile, Meta, Taager, staff alerts). This is the safe local-dev default — set NODE_ENV=production ONLY on the server.`);
   }

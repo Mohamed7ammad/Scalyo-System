@@ -25,23 +25,39 @@
  *   The API calls only ever run when the cron fires, which index.js gates behind
  *   NODE_ENV=production. On-demand enrichment at order creation was removed.
  *
+ * RE-ENABLE SAFETY RAILS (2026-07-05, after the second Bosta block)
+ *   • BACKLOG CUTOFF: while the cron was paused a huge backlog of 'بدون' orders
+ *     piled up. Enriching it would blast Bosta with thousands of calls and get
+ *     the account blocked on the first sweep. pickBatch() therefore ONLY looks
+ *     at orders created ON/AFTER BACKLOG_CUTOFF — the backlog is never queued.
+ *     (applyCachedRates() intentionally ignores the cutoff: it is DB-only and
+ *     still labels old orders for free from already-cached phones.)
+ *   • HARD THROTTLE FLOOR: ≥4s between EVERY Bosta call (default 5s), tiny
+ *     batch (5 phones/run), sweep every 15 min → ≤20 calls/hour worst case.
+ *
  * Tunables (env-overridable):
- *   DELIVERY_RATE_CRON          schedule                       (default every 5 min)
- *   DELIVERY_RATE_BATCH         phones fetched per run          (default 25)
- *   DELIVERY_RATE_SLEEP_MS      gap between Bosta calls         (default 1500ms)
+ *   DELIVERY_RATE_CRON          schedule                       (default every 15 min)
+ *   DELIVERY_RATE_BATCH         phones fetched per run          (default 5)
+ *   DELIVERY_RATE_SLEEP_MS      gap between Bosta calls         (default 5000ms, hard floor 4000ms)
  *   DELIVERY_RATE_MAX_ATTEMPTS  soft-fails before 'failed'      (default 3)
  *   DELIVERY_RATE_MAX_AGE_DAYS  only enrich orders newer than   (default 14)
+ *   DELIVERY_RATE_CUTOFF        skip orders created before this (default 2026-07-05)
  */
 
 const cron = require('node-cron');
 const pool = require('../config/db');
 const { fetchDeliveryRate } = require('../services/bostaEnrich');
 
-const SCHEDULE     = process.env.DELIVERY_RATE_CRON              || '*/5 * * * *';
-const BATCH        = Number(process.env.DELIVERY_RATE_BATCH)        || 25;
-const SLEEP_MS     = Number(process.env.DELIVERY_RATE_SLEEP_MS)     || 1500;
+const SCHEDULE     = process.env.DELIVERY_RATE_CRON              || '*/15 * * * *';
+const BATCH        = Number(process.env.DELIVERY_RATE_BATCH)        || 5;
+/* Hard floor: even an env override can never push calls closer than 4s apart. */
+const SLEEP_MS     = Math.max(4000, Number(process.env.DELIVERY_RATE_SLEEP_MS) || 5000);
 const MAX_ATTEMPTS = Number(process.env.DELIVERY_RATE_MAX_ATTEMPTS) || 3;
 const MAX_AGE_DAYS = Number(process.env.DELIVERY_RATE_MAX_AGE_DAYS) || 14;
+/* "Forget the past": only orders created on/after this date ever reach Bosta.
+   NOT a rolling NOW() — a fixed re-enable date, so new orders are eligible the
+   moment they're created while the pre-pause backlog stays skipped forever.   */
+const BACKLOG_CUTOFF = process.env.DELIVERY_RATE_CUTOFF || '2026-07-05';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -115,9 +131,10 @@ async function pickBatch() {
     WHERE  o."DeliveryRate" = 'بدون'
       AND  o."Phone" IS NOT NULL AND o."Phone" <> ''
       AND  o."createdAt" > NOW() - ($1 || ' days')::interval
+      AND  o."createdAt" >= $4::timestamptz          -- backlog cutoff: pre-pause orders never hit Bosta
       AND  (c.id IS NULL OR (c.status = 'pending' AND c.attempts < $2))
     LIMIT  $3
-  `, [String(MAX_AGE_DAYS), MAX_ATTEMPTS, BATCH]);
+  `, [String(MAX_AGE_DAYS), MAX_ATTEMPTS, BATCH, BACKLOG_CUTOFF]);
   return rows;
 }
 
@@ -198,7 +215,7 @@ function startDeliveryRateBackfillCron() {
   cron.schedule(SCHEDULE, () => {
     runSweep().catch((e) => console.error('[deliveryRate] sweep error:', e.message));
   });
-  console.log(`✅  DeliveryRate enrichment cron scheduled (${SCHEDULE}, batch ${BATCH}, sleep ${SLEEP_MS}ms, max ${MAX_ATTEMPTS} attempts, <${MAX_AGE_DAYS}d).`);
+  console.log(`✅  DeliveryRate enrichment cron scheduled (${SCHEDULE}, batch ${BATCH}, sleep ${SLEEP_MS}ms, max ${MAX_ATTEMPTS} attempts, <${MAX_AGE_DAYS}d, orders ≥ ${BACKLOG_CUTOFF} only).`);
 }
 
 module.exports = { startDeliveryRateBackfillCron };
