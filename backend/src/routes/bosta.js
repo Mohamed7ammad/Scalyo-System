@@ -508,6 +508,15 @@ const RETURNING_STATE_CODES = [
    local heuristics / regex.                                                    */
 const ACTION_REQUIRED_STATE_CODES = ['125.5,103'];
 
+/* ── Delivered bucket — master state 45 = "Delivered" (forward success) ──────
+   Used by reconcileInTransitOrders to heal MISSED delivered webhooks: a parcel
+   Bosta says is delivered but that we still hold at 'تم الشحن'/'تم التأكيد'
+   would otherwise stay a "ghost in-transit" forever (deflating the agent's
+   Delivery Rate and withholding the delivered commission). The bucket is
+   sorted -updatedAt, so the hourly sweep always covers recent deliveries;
+   older backlogs are handled by scripts/repairGhostInTransit.js.              */
+const DELIVERED_STATE_CODES = ['45'];
+
 /* Extract the most DESCRIPTIVE Arabic status/reason from a delivery object.
    Bosta surfaces returns and exceptions under generic master states like
    "Processing", but the real reason (e.g. "إلغاء - العميل رفض استلام الشحنة")
@@ -1091,8 +1100,12 @@ async function reconcileInTransitOrders(businessId) {
 
   const returning = await fetchBucket(RETURNING_STATE_CODES);
   const actionReq = await fetchBucket(ACTION_REQUIRED_STATE_CODES);
+  const delivered = await fetchBucket(DELIVERED_STATE_CODES);
+  /* Paranoia guard: a parcel on the return leg can surface a "Delivered" state
+     that means delivered BACK to the merchant — never let it flip forward. */
+  for (const tn of returning.keys()) delivered.delete(tn);
 
-  let reclassified = 0, codUpdated = 0, flagged = 0, unflagged = 0;
+  let reclassified = 0, codUpdated = 0, flagged = 0, unflagged = 0, deliveredHealed = 0;
 
   /* 0 — clear the action-required flag on every forward order first, so a parcel
          that has SINCE moved out of "في انتظار متابعتك" (e.g. rescheduled and now
@@ -1119,6 +1132,29 @@ async function reconcileInTransitOrders(businessId) {
     reclassified = r.rowCount || 0;
   }
 
+  /* 1b — DELIVERED bucket: heal missed 'delivered' webhooks. Any forward-status
+         order whose parcel Bosta reports as delivered flips to 'تم التوصيل' with
+         Bosta's live COD and an idempotent delivered_at stamp — so the Delivery
+         Rate and delivered commissions stop under-counting. unnest() carries the
+         per-parcel COD so the whole heal is ONE statement.                     */
+  if (delivered.size) {
+    const tns  = [...delivered.keys()];
+    const cods = tns.map((tn) => delivered.get(tn));
+    const r = await pool.query(
+      `UPDATE orders AS o
+          SET "Status" = 'تم التوصيل',
+              expected_cod = v.cod,
+              bosta_action_required = FALSE,
+              delivered_at = COALESCE(o.delivered_at, NOW()),
+              "updatedAt" = NOW()
+         FROM (SELECT unnest($2::text[]) AS tn, unnest($3::numeric[]) AS cod) v
+        WHERE o.business_id = $1 AND o."Status" IN ('تم الشحن', 'تم التأكيد')
+          AND o."BostaTrackingCode" = v.tn`,
+      [businessId, tns, cods]
+    );
+    deliveredHealed = r.rowCount || 0;
+  }
+
   /* 2 — "في انتظار متابعتك" (action required): EXCLUDE from the forecast — these are
          NOT actively moving toward the customer. Flag them (so analytics drops them)
          AND sync Bosta's live COD for accuracy. They keep Status='تم الشحن' (an
@@ -1134,12 +1170,14 @@ async function reconcileInTransitOrders(businessId) {
 
   console.log(
     `[bosta/reconcile] tenant ${businessId}: ${reclassified} → 'جاري الإعادة', ` +
+    `${deliveredHealed} healed → 'تم التوصيل', ` +
     `${flagged} flagged action-required (excluded), ${unflagged} re-included, ` +
-    `${codUpdated} expected_cod synced (buckets: returning ${returning.size}, action ${actionReq.size})`
+    `${codUpdated} expected_cod synced (buckets: returning ${returning.size}, ` +
+    `delivered ${delivered.size}, action ${actionReq.size})`
   );
   return {
-    reclassified, codUpdated, flagged, unflagged,
-    returningBucket: returning.size, actionBucket: actionReq.size,
+    reclassified, deliveredHealed, codUpdated, flagged, unflagged,
+    returningBucket: returning.size, deliveredBucket: delivered.size, actionBucket: actionReq.size,
   };
 }
 

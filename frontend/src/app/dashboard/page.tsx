@@ -31,6 +31,13 @@ const PASSED_CONFIRMATION = ['تم التأكيد', 'تم الشحن', 'تم ا�
    range instead of draining to zero as parcels get delivered or returned. */
 const PASSED_SHIPPING = ['تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
 
+/* Returns-audit queue — deep-linked from staff analytics via
+   /dashboard?filter=returns_audit&agent=<email>. Combines BOTH courier return
+   states so the admin sees every failed delivery for one agent in a single
+   view (pull tracking numbers → audit the confirmation call recordings). */
+const RETURNS_AUDIT_FILTER = 'مرتجعات (تدقيق)';
+const RETURNS_AUDIT_STATUSES = ['جاري الإعادة', 'تم الإرجاع'];
+
 /* NOTE (reporting vs operations): the card NUMBERS stay cumulative/funnel, but
    card CLICKS are an operational gesture — they filter the table to the exact
    snapshot status (e.g. orders sitting in 'تم التأكيد' awaiting dispatch). The
@@ -221,6 +228,16 @@ export default function DashboardPage() {
 
   // Initial load — shows spinner once on mount
   useEffect(() => { fetchOrders(); }, [fetchOrders]);
+
+  /* Deep-link support — the staff-analytics returns drill-down lands here as
+     /dashboard?filter=returns_audit&agent=<email>. Read once on mount via
+     window.location (no useSearchParams → no Suspense boundary needed). */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('filter') === 'returns_audit') setActiveFilter(RETURNS_AUDIT_FILTER);
+    const agentParam = params.get('agent');
+    if (agentParam) setActiveAgent(agentParam);
+  }, []);
 
   // Background polling every 30 s — silent, no spinner, no scroll disruption
   useEffect(() => {
@@ -915,6 +932,10 @@ export default function DashboardPage() {
       return [...productFiltered.filter(needsReconfirmation)].sort(
         (a, b) => new Date(a.PostponedDate!).getTime() - new Date(b.PostponedDate!).getTime()
       );
+    }
+    if (activeFilter === RETURNS_AUDIT_FILTER) {
+      // Audit queue: both courier return states in one view.
+      return dateScoped.filter((o) => RETURNS_AUDIT_STATUSES.includes(normStatus(o.Status)));
     }
     // Build on the date-scoped set so the table matches the date-aware counts.
     return dateScoped.filter(
@@ -2689,6 +2710,25 @@ export default function DashboardPage() {
               {reconfirmCount}
             </span>
           </button>
+
+          {/* ── Returns-audit tab — appears only when the staff-analytics
+                drill-down (or a manual deep link) activated it ───────────── */}
+          {activeFilter === RETURNS_AUDIT_FILTER && (
+            <button
+              onClick={() => setActiveFilter('الكل')}
+              title="اضغط لإلغاء فلتر التدقيق"
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold
+                bg-red-600 text-white shadow-sm hover:bg-red-700 transition-all duration-150"
+            >
+              🔍 {RETURNS_AUDIT_FILTER}
+              <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-xs font-bold leading-none bg-white text-red-600">
+                {dateScoped.filter((o) => RETURNS_AUDIT_STATUSES.includes(normStatus(o.Status))).length}
+              </span>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          )}
         </div>
 
         {/* ── Search bar ───────────────────────────────────────────── */}

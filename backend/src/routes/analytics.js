@@ -291,6 +291,12 @@ function buildAgentSql(joinOnClause, whereClause) {
       COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع'))
                                                                         AS status_returned,
 
+      /* Ghost detector: forward-pipeline orders older than 10 days. A COD parcel
+         can't genuinely be in transit that long — these are stuck (missed webhook
+         or never dispatched) and need review, not counting as "قيد التوصيل". */
+      COUNT(o.id) FILTER (WHERE o."Status" IN ('تم الشحن', 'تم التأكيد')
+        AND o."createdAt" < NOW() - INTERVAL '10 days')                 AS stale_in_transit,
+
       /* NDR: returned / (delivered + returned) × 100 */
       ROUND(
         COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع'))::numeric
@@ -515,6 +521,8 @@ router.get('/agents', authenticate, requireAdmin, async (req, res) => {
         ))                                                                AS status_confirmed,
         COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')            AS status_delivered,
         COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع')) AS status_returned,
+        COUNT(o.id) FILTER (WHERE o."Status" IN ('تم الشحن', 'تم التأكيد')
+          AND o."createdAt" < NOW() - INTERVAL '10 days')                 AS stale_in_transit,
         ROUND(
           COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع'))::numeric
           / NULLIF(COUNT(o.id) FILTER (WHERE o."Status" IN (
@@ -550,6 +558,7 @@ router.get('/agents', authenticate, requireAdmin, async (req, res) => {
         status_confirmed:    ur.status_confirmed,
         status_delivered:    ur.status_delivered,
         status_returned:     ur.status_returned,
+        stale_in_transit:    ur.stale_in_transit,
         ndr_pct:             ur.ndr_pct,
         earned_commission:   0,
         lifetime_commission: 0,

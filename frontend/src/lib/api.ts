@@ -519,6 +519,11 @@ export interface AgentAnalytics {
   status_delivered: number;
   status_returned:  number;
 
+  /** Forward-pipeline orders (تم الشحن/تم التأكيد) older than 10 days — stuck
+   *  "ghosts" (missed webhook or never dispatched), not genuine in-transit.
+   *  pg COUNT → string; use toN(). */
+  stale_in_transit?: number | string;
+
   /** Non-Delivery Rate = returned / (delivered + returned) × 100.
    *  Null when the agent has no post-delivery data for the period.  */
   ndr_pct:          string | null;

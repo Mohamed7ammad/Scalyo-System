@@ -455,8 +455,36 @@ export default function StaffPage() {
     { assigned:0, confirmed:0, delivered:0, commission:0 }
   );
   const avgConfirmRate = pct(aTotals.confirmed, aTotals.assigned);
-  // "Under monitoring" = return rate (returned ÷ confirmed) over 40%.
-  const flagged        = ranked.filter(a => pct(toN(a.status_returned), toN(a.status_confirmed)) > 40).length;
+
+  /* ── DELIVERY RATE (DR) monitoring — the business lifeline ─────────────
+     DR = delivered ÷ confirmed (confirmed = every order sent to shipping).
+     Tiers (unrounded, so 49.9% still warns):
+       • warning  : 45% ≤ DR < 50%  → مراقبة
+       • critical : DR < 45%        → إيقاف تعامل
+     The synthetic "غير محدد" bucket and agents with nothing shipped yet are
+     never flagged. */
+  const drOf = (a: AgentAnalytics): number | null => {
+    if (a.agent_email === 'unassigned@system') return null;
+    const confirmed = toN(a.status_confirmed);
+    if (confirmed === 0) return null;
+    return (toN(a.status_delivered) / confirmed) * 100;
+  };
+  const drTier = (a: AgentAnalytics): 'critical' | 'warning' | null => {
+    const dr = drOf(a);
+    if (dr === null) return null;
+    if (dr < 45) return 'critical';
+    if (dr < 50) return 'warning';
+    return null;
+  };
+  const drCriticalCount = ranked.filter(a => drTier(a) === 'critical').length;
+  const drWarningCount  = ranked.filter(a => drTier(a) === 'warning').length;
+  const flagged         = drCriticalCount + drWarningCount;
+
+  /* Drill-down: open the orders table pre-filtered to this agent's return
+     parcels (تم الإرجاع + جاري الإعادة) so tracking numbers / call recordings
+     can be audited immediately. */
+  const auditReturns = (a: AgentAnalytics) =>
+    router.push(`/dashboard?filter=returns_audit&agent=${encodeURIComponent(a.agent_email)}`);
 
   /* ─────────────────────────────────────────────────────────────
      Render
@@ -755,7 +783,7 @@ export default function StaffPage() {
               icon={<svg className="w-5 h-5 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}/>
             <KpiCard label="إجمالي العمولات" value={fmtMoney(aTotals.commission)} sub={`${aTotals.delivered.toLocaleString()} توصيل مكتمل`} accent="amber"
               icon={<svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}/>
-            <KpiCard label="تحت المراقبة (المرتجعات > 40%)" value={flagged===0?'لا أحد ✓':`${flagged} موظف`} sub={flagged>0?'يستوجب المراجعة الفورية':'جميع المعدلات طبيعية'} accent={flagged>0?'red':'slate'}
+            <KpiCard label="تحت المراقبة (تسليم < 50%)" value={flagged===0?'لا أحد ✓':`${flagged} موظف`} sub={flagged>0?(drCriticalCount>0?`منهم ${drCriticalCount} حرج (< 45%) — إيقاف تعامل`:'راجع جودة التأكيد فوراً'):'جميع معدلات التسليم طبيعية'} accent={flagged>0?'red':'slate'}
               icon={<svg className={`w-5 h-5 ${flagged>0?'text-red-600 dark:text-red-400':'text-slate-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>}/>
           </div>
 
@@ -770,9 +798,18 @@ export default function StaffPage() {
           ) : (
             <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
               {flagged > 0 && (
-                <div className="flex items-center gap-2.5 px-5 py-3 bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-800/50 text-red-700 dark:text-red-400 text-xs font-medium">
+                <div className={`flex items-center gap-2.5 px-5 py-3 border-b text-xs font-medium
+                  ${drCriticalCount > 0
+                    ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800/50 text-red-700 dark:text-red-400'
+                    : 'bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-800/50 text-orange-700 dark:text-orange-400'}`}>
                   <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-                  تنبيه: {flagged} موظف يتخطى معدل المرتجعات نسبة 40% — مؤشر محتمل لتأكيد طلبات وهمية. راجع السجلات فوراً.
+                  <span>
+                    تنبيه: يوجد {flagged} موظف نسبة تسليمهم أقل من 50% — راجع جودة التأكيد فوراً.
+                    {drCriticalCount > 0 && (
+                      <strong className="font-bold"> منهم {drCriticalCount} أقل من 45% (إيقاف تعامل — راجع أوردراته فوراً).</strong>
+                    )}
+                    {' '}اضغط على رقم المرتجعات لفتح طلبات الموظف المرتجعة.
+                  </span>
                 </div>
               )}
               <div className="overflow-x-auto">
@@ -794,10 +831,12 @@ export default function StaffPage() {
                       const cancelled = toN(agent.status_cancelled);
                       const delivered = toN(agent.status_delivered), returned = toN(agent.status_returned);
                       const newOrd = toN(agent.status_new);
-                      const ndr = agent.ndr_pct !== null ? parseFloat(agent.ndr_pct as string) : null;
                       const commission = toN(agent.earned_commission);
-                      // Flag when the RETURN rate (returned ÷ confirmed) exceeds 40%.
-                      const ndrFlagged = pct(returned, confirmed) > 40;
+                      // Flag on the DELIVERY RATE (delivered ÷ shipped): the tier
+                      // drives the row highlight, the flag badge and the banner.
+                      const tier       = drTier(agent);
+                      const drCritical = tier === 'critical';
+                      const drFlagged  = tier !== null;
                       const cPct = pct(confirmed, total), nPct = pct(noAns + postponed, total), xPct = pct(cancelled, total);
                       // Deliveries/Returns % are measured against CONFIRMED orders
                       // (the only ones sent to shipping), NOT total assigned.
@@ -813,8 +852,14 @@ export default function StaffPage() {
                       const cr = toN(agent.comm_rejected),  cn = toN(agent.comm_no_answer);
                       const hasMatrix = cc > 0 || cd > 0 || cr > 0 || cn > 0;
                       const inTransit = Math.max(confirmed - delivered - returned, 0);
+                      /* Split "قيد التوصيل" into genuine transit vs stuck ghosts
+                         (forward status > 10 days old — a COD parcel can't really
+                         be in transit that long; needs review, not trust). */
+                      const staleTransit = Math.min(toN(agent.stale_in_transit), inTransit);
+                      const freshTransit = inTransit - staleTransit;
                       const segments = [
-                        { label:'مؤكد (قيد التوصيل)', count:inTransit, color:'bg-emerald-500',                  dot:'bg-emerald-500' },
+                        { label:'قيد التوصيل فعلياً', count:freshTransit, color:'bg-emerald-500',               dot:'bg-emerald-500' },
+                        { label:'عالقة تحتاج مراجعة (>10 أيام)', count:staleTransit, color:'bg-rose-400',       dot:'bg-rose-400' },
                         { label:'تم التوصيل',          count:delivered, color:'bg-teal-500',                    dot:'bg-teal-500' },
                         { label:'تم الرفض',            count:cancelled, color:'bg-red-500',                     dot:'bg-red-500' },
                         { label:'لا يرد',              count:noAns,     color:'bg-amber-500',                   dot:'bg-amber-500' },
@@ -826,7 +871,7 @@ export default function StaffPage() {
                       return (
                         <React.Fragment key={agent.agent_id}>
                         <tr
-                          className={`transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40 ${ndrFlagged?'bg-red-50/60 dark:bg-red-950/20':''} ${isExpanded?'border-b-0':''}`}>
+                          className={`transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40 ${drCritical?'bg-red-50/60 dark:bg-red-950/20':drFlagged?'bg-orange-50/60 dark:bg-orange-950/20':''} ${isExpanded?'border-b-0':''}`}>
                           <td className="px-4 py-2.5"><div className="flex justify-center">{isUnassigned ? <span className="text-slate-300 dark:text-slate-700 text-base leading-none">•</span> : <Rank n={i+1}/>}</div></td>
                           <td
                             className="px-4 py-2.5 cursor-pointer group/nameCell hover:bg-indigo-50/60 dark:hover:bg-indigo-950/20 transition-colors select-none"
@@ -881,40 +926,83 @@ export default function StaffPage() {
                             </div>
                             {total>0 && <Bar value={xPct} color={xPct>30?'red':'slate'}/>}
                           </td>
-                          {/* ── Deliveries (تم التوصيل) — count + % of cohort ── */}
-                          <td className="px-4 py-2.5 min-w-[120px]">
+                          {/* ── Deliveries (تم التوصيل) — DR is the lifeline metric:
+                                ≥50% سليم · 45–49.9% مراقبة 🟠 · <45% إيقاف تعامل 🔴 ── */}
+                          <td className="px-4 py-2.5 min-w-[130px]">
                             <div className="flex items-baseline justify-between gap-2">
-                              <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap">
+                              <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap flex items-center gap-1">
                                 {delivered.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
+                                {drFlagged && (
+                                  <span className={drCritical ? 'text-xs animate-pulse' : 'text-xs'}
+                                    title={drCritical ? `نسبة التسليم ${dPct}% — أقل من 45%` : `نسبة التسليم ${dPct}% — أقل من 50%`}>
+                                    {drCritical ? '🚩' : '⚠️'}
+                                  </span>
+                                )}
                               </span>
                               <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-md tabular-nums shrink-0
-                                ${delivered>0?'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400':'text-slate-300 dark:text-slate-700'}`}>
+                                ${drCritical?'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
+                                  :drFlagged?'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-400'
+                                  :delivered>0?'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                                  :'text-slate-300 dark:text-slate-700'}`}>
                                 {confirmed===0?'—':`${dPct}%`}
                               </span>
                             </div>
-                            {confirmed>0 && <Bar value={dPct} color="emerald"/>}
-                            {confirmed>0 && inTransit>0 && (
+                            {confirmed>0 && <Bar value={dPct} color={drCritical?'red':drFlagged?'amber':'emerald'}/>}
+                            {drCritical ? (
+                              <span className="block text-[9px] font-black text-red-600 dark:text-red-400 mt-1">
+                                إيقاف تعامل — راجع أوردراته فوراً
+                              </span>
+                            ) : drFlagged ? (
+                              <span className="block text-[9px] font-bold text-orange-600 dark:text-orange-400 mt-1">
+                                تحت المراقبة — تسليم أقل من 50%
+                              </span>
+                            ) : confirmed>0 && freshTransit>0 ? (
                               <span className="block text-[9px] text-slate-400 dark:text-slate-600 mt-1 tabular-nums">
-                                {inTransit} قيد التوصيل
+                                {freshTransit} قيد التوصيل
+                              </span>
+                            ) : null}
+                            {staleTransit>0 && (
+                              <span className="block text-[9px] font-bold text-rose-600 dark:text-rose-400 mt-0.5 tabular-nums"
+                                title="طلبات في حالة شحن/تأكيد أقدم من 10 أيام — لا يمكن أن تكون قيد التوصيل فعلاً. شغّل إصلاح الطلبات العالقة أو راجعها يدوياً.">
+                                ⏳ {staleTransit} عالقة (أقدم من 10 أيام)
                               </span>
                             )}
                           </td>
 
-                          {/* ── Returns (المرتجعات) — count + % of confirmed ── */}
-                          <td className="px-4 py-2.5 min-w-[120px]">
+                          {/* ── Returns (المرتجعات) — count + % of confirmed.
+                                Clicking the count opens the orders table filtered to
+                                this agent's return parcels (تم الإرجاع + جاري الإعادة)
+                                for tracking-number / call-recording audit ── */}
+                          <td className="px-4 py-2.5 min-w-[120px]" onClick={e => e.stopPropagation()}>
                             <div className="flex items-baseline justify-between gap-2">
-                              <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap flex items-center gap-1">
-                                {returned.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
-                                {ndrFlagged && <span className="text-xs animate-pulse" title={ndr!==null?`NDR ${ndr}% — مرتفع`:'NDR مرتفع'}>🚩</span>}
-                              </span>
+                              {isUnassigned || returned === 0 ? (
+                                <span className="text-sm font-bold text-slate-800 dark:text-slate-200 tabular-nums whitespace-nowrap">
+                                  {returned.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={() => auditReturns(agent)}
+                                  title="فتح طلبات هذا الموظف المرتجعة للتدقيق (تم الإرجاع + جاري الإعادة)"
+                                  className={`text-sm font-bold tabular-nums whitespace-nowrap flex items-center gap-1
+                                    underline decoration-dotted underline-offset-4 transition-colors
+                                    ${drFlagged
+                                      ? 'text-red-700 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300'
+                                      : 'text-slate-800 dark:text-slate-200 hover:text-indigo-600 dark:hover:text-indigo-400'}`}
+                                >
+                                  {returned.toLocaleString()}<span className="text-[10px] font-normal text-slate-400 mr-0.5">طلب</span>
+                                  <svg className="w-3 h-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                                  </svg>
+                                </button>
+                              )}
                               <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-md tabular-nums shrink-0
-                                ${ndrFlagged?'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
+                                ${drFlagged?'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
                                   :returned>0?'bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
                                   :'text-slate-300 dark:text-slate-700'}`}>
                                 {confirmed===0?'—':`${rPct}%`}
                               </span>
                             </div>
-                            {confirmed>0 && <Bar value={rPct} color={ndrFlagged?'red':'amber'}/>}
+                            {confirmed>0 && <Bar value={rPct} color={drFlagged?'red':'amber'}/>}
                           </td>
 
                           {/* ── Commission settings button (not for the synthetic row) ── */}
@@ -1124,14 +1212,14 @@ export default function StaffPage() {
                                 </div>
 
                                 {/* ── Card 3: مؤشرات الخطر ── */}
-                                <div className={`border rounded-xl p-4 space-y-3.5 ${ndrFlagged
+                                <div className={`border rounded-xl p-4 space-y-3.5 ${drFlagged
                                   ? 'bg-red-50/80 dark:bg-red-950/25 border-red-200/70 dark:border-red-800/40'
                                   : 'bg-orange-50/60 dark:bg-orange-950/20 border-orange-200/60 dark:border-orange-800/30'}`}>
-                                  <div className={`flex items-center gap-2 pb-2.5 border-b ${ndrFlagged ? 'border-red-200/60 dark:border-red-800/30' : 'border-orange-200/50 dark:border-orange-800/20'}`}>
-                                    <span className="text-sm">{ndrFlagged ? '🚩' : '⚠️'}</span>
+                                  <div className={`flex items-center gap-2 pb-2.5 border-b ${drFlagged ? 'border-red-200/60 dark:border-red-800/30' : 'border-orange-200/50 dark:border-orange-800/20'}`}>
+                                    <span className="text-sm">{drFlagged ? '🚩' : '⚠️'}</span>
                                     <div>
-                                      <p className={`text-xs font-bold ${ndrFlagged ? 'text-red-800 dark:text-red-300' : 'text-orange-800 dark:text-orange-300'}`}>مؤشرات الخطر</p>
-                                      <p className={`text-[10px] ${ndrFlagged ? 'text-red-600/80 dark:text-red-500/60' : 'text-orange-600/80 dark:text-orange-500/60'}`}>الرفض والمرتجعات</p>
+                                      <p className={`text-xs font-bold ${drFlagged ? 'text-red-800 dark:text-red-300' : 'text-orange-800 dark:text-orange-300'}`}>مؤشرات الخطر</p>
+                                      <p className={`text-[10px] ${drFlagged ? 'text-red-600/80 dark:text-red-500/60' : 'text-orange-600/80 dark:text-orange-500/60'}`}>نسبة التسليم والمرتجعات</p>
                                     </div>
                                   </div>
                                   {/* الرفض */}
@@ -1152,20 +1240,32 @@ export default function StaffPage() {
                                     <div className="flex items-center justify-between text-xs">
                                       <span className="text-slate-600 dark:text-slate-300 font-medium">المرتجعات</span>
                                       <div className="flex items-center gap-2">
-                                        <span className={`font-bold tabular-nums ${ndrFlagged ? 'text-red-600 dark:text-red-400' : 'text-orange-600 dark:text-orange-400'}`}>{returned}</span>
-                                        {ndr !== null && (
-                                          <span className={`text-[11px] font-black tabular-nums w-10 text-right ${ndrFlagged ? 'text-red-600 dark:text-red-400' : 'text-orange-600 dark:text-orange-400'}`}>{ndr.toFixed(1)}%</span>
+                                        <span className={`font-bold tabular-nums ${drFlagged ? 'text-red-600 dark:text-red-400' : 'text-orange-600 dark:text-orange-400'}`}>{returned}</span>
+                                        {confirmed > 0 && (
+                                          <span className={`text-[11px] font-black tabular-nums w-10 text-right ${drFlagged ? 'text-red-600 dark:text-red-400' : 'text-orange-600 dark:text-orange-400'}`}>{rPct}%</span>
                                         )}
                                       </div>
                                     </div>
                                     <div className="h-2 w-full bg-orange-100 dark:bg-orange-900/40 rounded-full overflow-hidden">
-                                      <div className={`h-full rounded-full transition-all duration-700 ${ndrFlagged ? 'bg-red-500' : 'bg-orange-400'}`}
-                                        style={{ width:`${Math.min(ndr ?? 0, 100)}%` }}/>
+                                      <div className={`h-full rounded-full transition-all duration-700 ${drFlagged ? 'bg-red-500' : 'bg-orange-400'}`}
+                                        style={{ width:`${Math.min(rPct, 100)}%` }}/>
                                     </div>
-                                    {ndrFlagged && (
+                                    {drFlagged && (
                                       <p className="text-[10px] text-red-600 dark:text-red-400 flex items-center gap-1 mt-0.5">
-                                        <span>⚡</span> معدل مرتجعات مرتفع — يستوجب المراجعة الفورية
+                                        <span>⚡</span>
+                                        {drCritical
+                                          ? `نسبة التسليم ${dPct}% — إيقاف تعامل، راجع أوردراته فوراً`
+                                          : `نسبة التسليم ${dPct}% — تحت المراقبة، راجع جودة التأكيد`}
                                       </p>
+                                    )}
+                                    {!isUnassigned && returned > 0 && (
+                                      <button
+                                        onClick={() => auditReturns(agent)}
+                                        className="mt-1 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold
+                                          bg-red-600 text-white hover:bg-red-700 transition-all shadow-sm"
+                                      >
+                                        🔍 تدقيق المرتجعات ({returned})
+                                      </button>
                                     )}
                                   </div>
                                 </div>
