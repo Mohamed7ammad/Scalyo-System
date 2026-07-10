@@ -1,19 +1,23 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import {
-  getOrders, updateOrder, deleteOrder, createOrder,
+  getOrders, getOrderStats, updateOrder, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
   getStaff, distributeOrders, autoDistributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
   bulkImportOrders, BulkImportResult,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
-  BostaFollowUps, BostaFollowUpOrder,
+  BostaFollowUps, BostaFollowUpOrder, OrderStats,
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
-import * as XLSX from 'xlsx';
+/* NOTE: `xlsx` (SheetJS) is intentionally NOT imported at module level — it is
+   a ~446 KB chunk that was shipping with the page's first load and stalling
+   low-end mobile devices on parse/compile. It is dynamically imported inside
+   handleCsvFile, so the cost is only paid when someone actually uploads a
+   bulk-import file. Do not "clean this up" into a static import.            */
 
 /* Status pills = OPERATIONAL QUEUES (exact current state, one per team action).
    'جاري الإعادة' (in transit back to us) and 'تم الإرجاع' (physically received /
@@ -43,6 +47,12 @@ const RETURNS_AUDIT_STATUSES = ['جاري الإعادة', 'تم الإرجاع'
    snapshot status (e.g. orders sitting in 'تم التأكيد' awaiting dispatch). The
    card ↔ table difference is reconciled by the snapshot sub-label on the card
    itself, not by widening the table filter. */
+
+/* Virtual status-tab value for "postponed orders due for re-confirmation within
+   3 days". Hoisted to module scope because both the server-query builder and
+   the filter chain need it. Maps to `reconfirm=true` on the API (not a real
+   "Status" value). */
+const RECONFIRM_FILTER = 'مؤجلات تستحق التأكيد';
 
 /* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
 const EGYPT_GOVERNORATES = [
@@ -108,6 +118,25 @@ export default function DashboardPage() {
   const [orders,        setOrders]        = useState<Order[]>([]);
   const [loading,       setLoading]       = useState(true);
   const [error,         setError]         = useState('');
+  /* ── Strict page-replacement pagination ─────────────────────────
+     Exactly ONE page of PAGE_SIZE rows lives in state (and therefore in the
+     DOM) at any moment — Next/Prev REPLACE the array, never append. This is a
+     hard memory ceiling: the previous IntersectionObserver infinite-scroll
+     chain-loaded the whole history when the user sat at the list bottom and
+     crashed iOS Safari (OOM). Keyset cursors are forward-only, so Prev works
+     off a cursor trail: pageCursorsRef[i] = the cursor that REQUESTS page i
+     (null for page 0), recorded as each page's response comes back. The trail
+     resets whenever the server filters change (a cursor is only valid for the
+     filter set that produced it). */
+  const PAGE_SIZE = 50;
+  const [page,        setPage]        = useState(0);       // 0-based current page
+  const [pageHasNext, setPageHasNext] = useState(false);
+  const [pageLoading, setPageLoading] = useState(false);   // Next/Prev in flight
+  const pageCursorsRef = useRef<(string | null)[]>([null]);
+  /* Fast stat-card numbers from GET /api/orders/stats — computed server-side
+     over the WHOLE tenant scope so the cards are correct and paint immediately,
+     without waiting for any order rows to arrive. */
+  const [serverStats, setServerStats] = useState<OrderStats | null>(null);
   const [activeAgent,   setActiveAgent]   = useState('كل الفريق');
   const [activeProduct, setActiveProduct] = useState('كل المنتجات');
   const [activeFilter,  setActiveFilter]  = useState('الكل');
@@ -185,36 +214,112 @@ export default function DashboardPage() {
     setUser(JSON.parse(userData));
   }, [router]);
 
-  /* ── Fetch orders (initial load + manual refresh button) ────── */
-  // Shows the loading spinner — intentional only for explicit user actions.
-  // Do NOT call this from the background polling interval; use silentRefresh.
-  const fetchOrders = useCallback(async () => {
+  /* ── Server-side filter query ────────────────────────────────── */
+  // Search is debounced so we don't hit the API on every keystroke; the RAW
+  // searchTerm still drives the client-side refinement below, so the table
+  // narrows instantly from loaded rows while the server round-trip fills in
+  // historical matches.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchTerm.trim()), 400);
+    return () => clearTimeout(t);
+  }, [searchTerm]);
+
+  /* Single source of truth for what the server should filter. Changing ANY of
+     these re-runs the page-1 fetch effect below → the loaded array is REPLACED
+     and the cursor reset (a keyset cursor is only valid for the filter set that
+     produced it). The UI's "all" sentinel values map to `undefined` = no param. */
+  const serverFilters = useMemo(() => ({
+    lost:      lostMode,
+    search:    debouncedSearch || undefined,
+    /* Virtual tabs → server params: the returns-audit queue spans BOTH courier
+       return statuses (comma list → btrim(Status) = ANY on the server); the
+       reconfirm tab maps to its own flag, not a Status value. */
+    status:    activeFilter === RETURNS_AUDIT_FILTER ? RETURNS_AUDIT_STATUSES.join(',')
+             : activeFilter !== 'الكل' && activeFilter !== RECONFIRM_FILTER ? activeFilter
+             : undefined,
+    reconfirm: activeFilter === RECONFIRM_FILTER ? true : undefined,
+    agent:     activeAgent !== 'كل الفريق' ? activeAgent : undefined,
+    product:   activeProduct !== 'كل المنتجات' ? activeProduct : undefined,
+    dateFrom:  startDate || undefined,
+    dateTo:    endDate || undefined,
+  }), [lostMode, debouncedSearch, activeFilter, activeAgent, activeProduct, startDate, endDate]);
+
+  /* Monotonic fetch sequence — any page-1 fetch invalidates every response
+     still in flight (an older filter's slow response must never clobber a
+     newer filter's rows, and a stale load-more must never append to them). */
+  const fetchSeq = useRef(0);
+
+  /* ── Fetch ONE page and REPLACE state with it ─────────────────── */
+  // The single fetch primitive: initial load, filter changes, Next/Prev, the
+  // refresh button, and post-action refreshes all go through here, so there is
+  // exactly one code path that can touch `orders`/`loading` — no divergent
+  // effect chains to loop.
+  //
+  // spinner=true → full-page spinner (initial mount + explicit refresh only).
+  // Everything else keeps the table mounted (the spinner unmounts the search
+  // bar and would steal keyboard focus mid-typing) and uses the lightweight
+  // `pageLoading` flag instead.
+  //
+  // LOOP/CLEANUP SAFETY (the two production crashes):
+  //  • `loading`/`pageLoading` are cleared by WHICHEVER fetch finishes as the
+  //    latest (seq === fetchSeq.current), regardless of which fetch set them.
+  //    The old code only let the spinner-owning fetch clear `loading`, so a
+  //    superseded initial fetch left the spinner up forever.
+  //  • This callback's identity depends ONLY on [router, serverFilters]; it
+  //    never reads state it also sets, so the filter-change effect below
+  //    cannot re-trigger itself.
+  const fetchPage = useCallback(async (targetPage: number, spinner = false) => {
+    const cursor = pageCursorsRef.current[targetPage] ?? null;
+    if (targetPage > 0 && cursor === null) return;   // unknown cursor — can't jump ahead
+    const seq = ++fetchSeq.current;
     try {
-      setLoading(true);
+      if (spinner) setLoading(true);
+      else setPageLoading(true);
       setError('');
-      const res = await getOrders(lostMode);
-      setOrders(res.data);
+      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE, cursor });
+      if (seq !== fetchSeq.current) return;   // superseded by a newer fetch
+      setOrders(res.data.orders);             // strict REPLACE — never append
+      pageCursorsRef.current[targetPage + 1] = res.data.nextCursor;
+      setPageHasNext(res.data.hasMore);
+      setPage(targetPage);
     } catch (err: unknown) {
+      if (seq !== fetchSeq.current) return;
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status === 401) {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         router.push('/');
-      } else {
+      } else if (spinner) {
         setError('فشل في تحميل الطلبات. تحقق من الاتصال بالخادم.');
       }
     } finally {
-      setLoading(false);
+      if (seq === fetchSeq.current) {
+        setLoading(false);
+        setPageLoading(false);
+      }
     }
-  }, [router, lostMode]);
+  }, [router, serverFilters]);
+
+  /* Refresh button + post-action handlers: refetch the CURRENT page in place.
+     Bound directly to onClick, so the first arg may be a MouseEvent — ignore it. */
+  const fetchOrders = useCallback(() => fetchPage(page, true), [fetchPage, page]);
 
   /* ── Silent background refresh (no spinner, no scroll reset) ── */
-  // Surgically patches order state in-place so OrdersTable stays mounted,
-  // scroll position is preserved, and no active filter/modal is disturbed.
+  // Refetches the current page in place every 30 s. Captures the seq WITHOUT
+  // incrementing — a poll must never supersede (or clear the flags of) a
+  // user-initiated fetch.
   const silentRefresh = useCallback(async () => {
+    const seq = fetchSeq.current;
     try {
-      const res = await getOrders(lostMode);
-      setOrders(res.data);             // functional-update not needed; full replace is fine
+      const res = await getOrders({
+        ...serverFilters, limit: PAGE_SIZE,
+        cursor: pageCursorsRef.current[page] ?? null,
+      });
+      if (seq !== fetchSeq.current) return;   // a newer fetch happened mid-flight → stale
+      setOrders(res.data.orders);
+      pageCursorsRef.current[page + 1] = res.data.nextCursor;
+      setPageHasNext(res.data.hasMore);
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status === 401) {
@@ -224,10 +329,51 @@ export default function DashboardPage() {
       }
       // All other errors are swallowed — never flash UI errors during a background poll
     }
-  }, [router, lostMode]);
+  }, [router, serverFilters, page]);
 
-  // Initial load — shows spinner once on mount
-  useEffect(() => { fetchOrders(); }, [fetchOrders]);
+  /* ── Next / Prev ─────────────────────────────────────────────── */
+  const goToPage = useCallback(async (targetPage: number) => {
+    if (pageLoading) return;
+    await fetchPage(targetPage);
+    // New page content → back to the top of the list so the user reads from row 1.
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [fetchPage, pageLoading]);
+
+  /* ── Stat cards: fetch server-side aggregate immediately, independent of
+     the (paginated) order rows. Scoped by agent/product/date (matching the old
+     client-side dateScoped semantics) but never by status/search.          */
+  const fetchStats = useCallback(async () => {
+    try {
+      const res = await getOrderStats({
+        lost:     lostMode,
+        agent:    serverFilters.agent,
+        product:  serverFilters.product,
+        dateFrom: serverFilters.dateFrom,
+        dateTo:   serverFilters.dateTo,
+      });
+      setServerStats(res.data);
+    } catch {
+      // Falls back to the client-computed `stats` below — no user-facing error needed.
+    }
+  }, [lostMode, serverFilters]);
+
+  useEffect(() => { fetchStats(); }, [fetchStats]);
+  useEffect(() => {
+    const id = setInterval(fetchStats, 30_000);
+    return () => clearInterval(id);
+  }, [fetchStats]);
+
+  // Initial load (spinner) + every filter/search change (silent). fetchPage's
+  // identity changes ONLY when serverFilters does, so this effect fires exactly
+  // once per filter change: reset the cursor trail (cursors are filter-specific)
+  // and load page 1, replacing whatever was shown. No state this effect writes
+  // feeds back into fetchPage's identity → it cannot loop.
+  const didInitialLoad = useRef(false);
+  useEffect(() => {
+    pageCursorsRef.current = [null];
+    fetchPage(0, !didInitialLoad.current);   // spinner on the very first run only
+    didInitialLoad.current = true;
+  }, [fetchPage]);
 
   /* Deep-link support — the staff-analytics returns drill-down lands here as
      /dashboard?filter=returns_audit&agent=<email>. Read once on mount via
@@ -721,8 +867,10 @@ export default function DashboardPage() {
   const handleCsvFile = (file: File) => {
     setCsvFileName(file.name);
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
+        // Deferred: the xlsx bundle loads on first upload, never on page load.
+        const XLSX = await import('xlsx');
         const data = new Uint8Array(e.target?.result as ArrayBuffer);
         const wb = XLSX.read(data, { type: 'array' });
         const firstSheet = wb.Sheets[wb.SheetNames[0]];
@@ -863,13 +1011,28 @@ export default function DashboardPage() {
       : orders;
 
   /* ── Derived lists ───────────────────────────────────────────── */
-  const uniqueAgents = Array.from(
+  // With SERVER-side filtering, `orders` only contains rows matching the active
+  // filters — deriving the pill lists from it would collapse them to the
+  // current selection (select agent A → every other agent's pill vanishes).
+  // Agents: the staff roster (already fetched for admins — the only role that
+  // sees the team pills) is the complete, stable source; order-derived is the
+  // fallback for the pre-fetch window / non-admins (their own orders only).
+  const orderDerivedAgents = Array.from(
     new Set(roleScoped.map((o) => o.AssignedTo).filter(Boolean))
   ) as string[];
+  const staffAgents = staff.filter((m) => m.role === 'agent').map((m) => m.email);
+  const uniqueAgents = staffAgents.length ? staffAgents : orderDerivedAgents;
 
-  const uniqueProducts = Array.from(
-    new Set(roleScoped.map((o) => getShortName(o.ProductName)).filter(Boolean))
-  ) as string[];
+  // Products: accumulate every short name seen this session (a Set ref survives
+  // filtered refetches), so selecting one product doesn't hide the others.
+  // Idempotent adds during render are safe; the ref resets on remount
+  // (navigating between live/lost pages).
+  const productsSeenRef = useRef<Set<string>>(new Set());
+  roleScoped.forEach((o) => {
+    const short = getShortName(o.ProductName);
+    if (short) productsSeenRef.current.add(short);
+  });
+  const uniqueProducts = Array.from(productsSeenRef.current);
 
   // First known price per short product name — used in product filter tab badges
   const productPriceMap: Record<string, string> = {};
@@ -920,12 +1083,12 @@ export default function DashboardPage() {
     return diffDays >= 0 && diffDays <= 3;
   };
 
-  // Badge count — scoped to current agent + product selection
-  const reconfirmCount = productFiltered.filter(needsReconfirmation).length;
+  // Badge count — scoped to current agent + product selection. Server value is
+  // exact over the whole history; loaded-rows count is the fallback until the
+  // first /stats response lands.
+  const reconfirmCount = serverStats?.reconfirm ?? productFiltered.filter(needsReconfirmation).length;
 
   // 3b. Status + date — final display set
-  const RECONFIRM_FILTER = 'مؤجلات تستحق التأكيد';
-
   const filtered = (() => {
     if (activeFilter === RECONFIRM_FILTER) {
       // Special path: ignore date range; sort closest postponed date first
@@ -943,19 +1106,23 @@ export default function DashboardPage() {
     );
   })();
 
-  // 4. Search — final layer; composable on top of every other filter
-  //    Matches FullName OR Phone, case-insensitive, trims whitespace.
+  // 4. Search — final layer; composable on top of every other filter.
+  //    MUST accept everything the server's ?search= matches (name, phone,
+  //    order id, Bosta tracking code) — the server now returns those rows and
+  //    a narrower client predicate would silently hide them from the table.
   const searchNeedle = searchTerm.trim().toLowerCase();
   const displayOrders: Order[] = searchNeedle
     ? filtered.filter(
         (o) =>
           o.FullName.toLowerCase().includes(searchNeedle) ||
-          o.Phone.toLowerCase().includes(searchNeedle)
+          o.Phone.toLowerCase().includes(searchNeedle) ||
+          String(o.id) === searchNeedle ||
+          (o.BostaTrackingCode ?? '').toLowerCase().includes(searchNeedle)
       )
     : filtered;
 
   /* ── Stats (product scope so tabs affect cards) ──────────────── */
-  const stats = {
+  const clientStats = {
     total:     dateScoped.length,
     new:       dateScoped.filter((o) => normStatus(o.Status) === 'جديد').length,
     rejected:  dateScoped.filter((o) => normStatus(o.Status) === 'تم الرفض').length,
@@ -972,6 +1139,11 @@ export default function DashboardPage() {
     confirmedCumulative: dateScoped.filter((o) => PASSED_CONFIRMATION.includes(normStatus(o.Status))).length,
     shippedCumulative:   dateScoped.filter((o) => PASSED_SHIPPING.includes(normStatus(o.Status))).length,
   };
+  /* The server aggregate now honors agent/product/date scoping itself, so it
+     is ALWAYS preferred once loaded — exact over the whole tenant history,
+     independent of which pages happen to be in memory. clientStats remains
+     only as the pre-first-response fallback. */
+  const stats = serverStats ?? clientStats;
   const pct = (n: number) =>
     stats.total ? Math.round((n / stats.total) * 100) : 0;
 
@@ -1064,9 +1236,9 @@ export default function DashboardPage() {
         .map((o) => o.id);
       const res = await forwardToShipping(allowOpenAll, idsToShip, payWithPoints);
       setShippingResult(res.data);
-      // Refresh orders silently so statuses update without scroll disruption
-      const fresh = await import('@/lib/api').then((m) => m.getOrders(lostMode));
-      setOrders(fresh.data);
+      // Refresh the current page silently so statuses update without scroll disruption
+      await fetchPage(page);
+      fetchStats();
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
@@ -1293,9 +1465,12 @@ export default function DashboardPage() {
                   {agent === 'كل الفريق' ? 'كل الفريق' : agent.split('@')[0]}
                   <span className={`mr-1.5 text-xs
                     ${activeAgent === agent ? 'text-indigo-200' : 'text-slate-400 dark:text-slate-500'}`}>
-                    ({agent === 'كل الفريق'
-                      ? roleScoped.length
-                      : roleScoped.filter((o) => o.AssignedTo === agent).length})
+                    ({/* Exact whole-queue counts from /stats (byAgent ignores the
+                        active pill, so siblings keep their numbers); loaded-rows
+                        fallback until the first stats response. */
+                      agent === 'كل الفريق'
+                      ? (serverStats?.agentTotal ?? roleScoped.length)
+                      : (serverStats?.byAgent?.[agent] ?? roleScoped.filter((o) => o.AssignedTo === agent).length)})
                   </span>
                 </button>
               ))}
@@ -2583,6 +2758,19 @@ export default function DashboardPage() {
         )}
 
         {/* ── Stats cards ───────────────────────────────────────────── */}
+        {/* Skeleton until the FIRST /stats response — the cards never block on
+            (or wait for) the table fetch; both load independently in the
+            background while the page shell paints immediately. */}
+        {serverStats === null && loading ? (
+          <div className="grid grid-cols-3 md:grid-cols-7 gap-3">
+            {Array.from({ length: 7 }).map((_, i) => (
+              <div key={i} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 shadow-sm animate-pulse">
+                <div className="h-3 w-14 rounded bg-slate-200 dark:bg-slate-700 mb-3" />
+                <div className="h-6 w-10 rounded bg-slate-200 dark:bg-slate-700" />
+              </div>
+            ))}
+          </div>
+        ) : (
         <div className="grid grid-cols-3 md:grid-cols-7 gap-3">
           <StatCard label="الإجمالي"   value={stats.total}
             valueColor="text-slate-800 dark:text-white"
@@ -2622,6 +2810,7 @@ export default function DashboardPage() {
             active={activeFilter === 'تم الشحن'}
             onClick={() => setActiveFilter('تم الشحن')} />
         </div>
+        )}
 
         {/* ── Date range filter ─────────────────────────────────────── */}
         <div className="flex flex-wrap items-center gap-3
@@ -2677,7 +2866,11 @@ export default function DashboardPage() {
               {f}
               {f !== 'الكل' && (
                 <span className={`mr-1.5 text-xs ${activeFilter === f ? 'text-indigo-200' : 'text-gray-400'}`}>
-                  ({dateScoped.filter((o) => normStatus(o.Status) === normStatus(f)).length})
+                  ({/* Exact per-status counts from /stats (agent/product/date-scoped,
+                      never status-scoped — so every tab keeps its number while one
+                      is selected); loaded-rows fallback pre-first-response. */
+                    serverStats?.byStatus?.[normStatus(f)]
+                      ?? dateScoped.filter((o) => normStatus(o.Status) === normStatus(f)).length})
                 </span>
               )}
             </button>
@@ -2975,12 +3168,28 @@ export default function DashboardPage() {
         )}
 
         {/* ── Table ────────────────────────────────────────────────── */}
+        {/* Skeleton rows (not a spinner): the layout paints at its final shape
+            immediately, rows fill in when the (independent) fetch resolves. */}
         {loading ? (
           <div className="bg-white dark:bg-slate-900 rounded-2xl
-            border border-slate-200 dark:border-slate-800 text-center py-24 shadow-sm">
-            <div className="inline-block w-8 h-8 border-4 border-indigo-200 border-t-indigo-600
-              rounded-full animate-spin mb-3" />
-            <p className="text-slate-400 dark:text-slate-500 text-sm">جارٍ تحميل الطلبات...</p>
+            border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+            <div className="px-4 py-3.5 bg-gray-50 dark:bg-slate-800/50 border-b border-gray-200 dark:border-slate-700 flex gap-6">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="h-3 w-20 rounded bg-slate-200 dark:bg-slate-700 animate-pulse" />
+              ))}
+            </div>
+            <div className="divide-y divide-gray-100 dark:divide-slate-800">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="px-4 py-4 flex items-center gap-6 animate-pulse">
+                  <div className="h-3 w-6  rounded bg-slate-200 dark:bg-slate-700" />
+                  <div className="h-3 w-28 rounded bg-slate-200 dark:bg-slate-700" />
+                  <div className="h-3 w-24 rounded bg-slate-200 dark:bg-slate-700" />
+                  <div className="h-6 w-20 rounded-lg bg-slate-200 dark:bg-slate-700" />
+                  <div className="h-3 w-32 rounded bg-slate-200 dark:bg-slate-700 hidden md:block" />
+                  <div className="h-6 w-24 rounded-lg bg-slate-200 dark:bg-slate-700 hidden md:block" />
+                </div>
+              ))}
+            </div>
           </div>
         ) : (
           <OrdersTable
@@ -3000,6 +3209,41 @@ export default function DashboardPage() {
                 : 'لا توجد طلبات لعرضها'
             }
           />
+        )}
+
+        {/* ── Pagination controls — strict page replacement, never append ── */}
+        {!loading && (page > 0 || pageHasNext) && (
+          <div dir="rtl" className="flex items-center justify-center gap-3 mt-4">
+            <button
+              onClick={() => goToPage(page - 1)}
+              disabled={page === 0 || pageLoading}
+              className="px-4 py-2 rounded-xl text-sm font-medium transition
+                bg-white text-slate-600 border border-slate-200 shadow-sm
+                hover:bg-slate-50 hover:text-indigo-600
+                disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white disabled:hover:text-slate-600
+                dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-800"
+            >
+              → السابق
+            </button>
+            <span className="text-sm text-slate-500 dark:text-slate-400 min-w-[80px] text-center">
+              {pageLoading ? (
+                <span className="inline-block w-4 h-4 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin align-middle" />
+              ) : (
+                <>صفحة <span className="font-semibold text-slate-700 dark:text-slate-200">{page + 1}</span></>
+              )}
+            </span>
+            <button
+              onClick={() => goToPage(page + 1)}
+              disabled={!pageHasNext || pageLoading}
+              className="px-4 py-2 rounded-xl text-sm font-medium transition
+                bg-white text-slate-600 border border-slate-200 shadow-sm
+                hover:bg-slate-50 hover:text-indigo-600
+                disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white disabled:hover:text-slate-600
+                dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-800"
+            >
+              التالي ←
+            </button>
+          </div>
         )}
       </div>
     </div>

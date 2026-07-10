@@ -445,6 +445,60 @@ async function phase4AgencySchema() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   Phase 5 — Order Confirmation page performance indexes.
+   The live GET /api/orders query filters on (business_id, is_lost_order) and
+   sorts by "createdAt" DESC for keyset pagination; the new stats/pill-count
+   aggregates group by "Status" and "AssignedTo" within that same tenant scope.
+   CONCURRENTLY avoids locking the orders table for writes while the index
+   builds on a live, growing table. Cannot run inside a transaction block —
+   each pool.query() call here is a standalone autocommit statement, so this
+   is safe to call as-is (not wrapped in BEGIN/COMMIT).
+   ══════════════════════════════════════════════════════════════════════════ */
+async function phase5PerfIndexes() {
+  /* SELF-HEAL: a CREATE INDEX CONCURRENTLY that dies mid-build (restart,
+     timeout, conflict) leaves an INVALID index behind — the planner ignores
+     it, yet IF NOT EXISTS sees it and never retries, silently leaving the
+     table unindexed forever. Drop any invalid phase-5 index first so the
+     CREATE below rebuilds it. */
+  try {
+    const { rows } = await pool.query(`
+      SELECT c.relname AS name
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_class t ON t.oid = i.indrelid
+       WHERE t.relname = 'orders' AND NOT i.indisvalid
+         AND c.relname IN ('orders_tenant_keyset_idx', 'orders_tenant_status_idx', 'orders_tenant_assigned_idx')`);
+    for (const { name } of rows) {
+      console.warn(`⚠️   Phase 5: dropping INVALID index ${name} (failed previous CONCURRENTLY build) — will rebuild`);
+      await pool.query(`DROP INDEX IF EXISTS ${name}`);
+    }
+  } catch (err) {
+    console.warn('⚠️   Phase 5: invalid-index check skipped:', err.message);
+  }
+
+  await pool.query(`
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS orders_tenant_keyset_idx
+      ON orders (business_id, is_lost_order, "createdAt" DESC, id DESC)
+  `).catch((err) =>
+    console.warn('⚠️   Phase 5: orders_tenant_keyset_idx skipped:', err.message)
+  );
+  await pool.query(`
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS orders_tenant_status_idx
+      ON orders (business_id, is_lost_order, "Status")
+  `).catch((err) =>
+    console.warn('⚠️   Phase 5: orders_tenant_status_idx skipped:', err.message)
+  );
+  await pool.query(`
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS orders_tenant_assigned_idx
+      ON orders (business_id, is_lost_order, "AssignedTo")
+  `).catch((err) =>
+    console.warn('⚠️   Phase 5: orders_tenant_assigned_idx skipped:', err.message)
+  );
+
+  console.log('✅  Phase 5: order-confirmation performance indexes ready (keyset, status, assigned)');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    Orchestrator — run the phases strictly in order.
    ══════════════════════════════════════════════════════════════════════════ */
 async function initTenancy() {
@@ -453,6 +507,7 @@ async function initTenancy() {
     await phase2DataFix();     // back-fill + orphan cleanup
     await phase3Enforce();     // FKs, composite PKs, unique + filter indexes
     await phase4AgencySchema();// team-management + incident schema fixes
+    await phase5PerfIndexes(); // order-confirmation pagination/stats indexes
     console.log('✅  Tenant isolation: migration complete — schema is clean');
   } catch (err) {
     console.error('⚠️   Tenant isolation migration failed:', err.message);

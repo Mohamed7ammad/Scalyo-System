@@ -103,11 +103,75 @@ export interface RegisterPayload {
 export const register = (payload: RegisterPayload) =>
   api.post<{ token: string; user: User }>('/api/auth/register', payload);
 
-/** Fetch the tenant's orders. `lost` omitted/false → LIVE confirmation queue
+/** Paginated response shape from GET /api/orders when `limit` is passed. */
+export interface PaginatedOrders {
+  orders:     Order[];
+  nextCursor: string | null;
+  hasMore:    boolean;
+}
+
+/** Server-side filters shared by getOrders and getOrderStats. Every field is
+ *  optional — omitted fields don't constrain the query. The cursor a page
+ *  returns is only valid for the exact filter set that produced it. */
+export interface OrderListQuery {
+  lost?:      boolean;
+  limit:      number;
+  cursor?:    string | null;
+  search?:    string;   // name / phone / order id / Bosta tracking code
+  status?:    string;   // exact status (btrim'd server-side)
+  agent?:     string;   // AssignedTo email — admins only (agents are fenced server-side)
+  product?:   string;   // short product name → ILIKE containment on ProductName
+  dateFrom?:  string;   // YYYY-MM-DD inclusive
+  dateTo?:    string;   // YYYY-MM-DD inclusive
+  reconfirm?: boolean;  // postponed orders due for re-confirmation within 3 days
+}
+
+/** Fetch a page of the tenant's orders (keyset pagination + server-side
+ *  filtering — see orders.js). `lost` omitted/false → LIVE confirmation queue
  *  (excludes bulk-imported lost orders); `lost: true` → ONLY the isolated lost
- *  batch (the dedicated "تأكيد الطلبات المفقودة" page). */
-export const getOrders = (lost?: boolean) =>
-  api.get<Order[]>('/api/orders', lost ? { params: { lost: true } } : undefined);
+ *  batch (the dedicated "تأكيد الطلبات المفقودة" page). `cursor` omitted →
+ *  first page. */
+export const getOrders = (q: OrderListQuery) =>
+  api.get<PaginatedOrders>('/api/orders', {
+    params: {
+      limit: q.limit,
+      ...(q.lost      ? { lost: true }           : {}),
+      ...(q.cursor    ? { cursor: q.cursor }     : {}),
+      ...(q.search    ? { search: q.search }     : {}),
+      ...(q.status    ? { status: q.status }     : {}),
+      ...(q.agent     ? { agent: q.agent }       : {}),
+      ...(q.product   ? { product: q.product }   : {}),
+      ...(q.dateFrom  ? { dateFrom: q.dateFrom } : {}),
+      ...(q.dateTo    ? { dateTo: q.dateTo }     : {}),
+      ...(q.reconfirm ? { reconfirm: true }      : {}),
+    },
+  });
+
+/** Lightweight aggregate counters for the stat cards + filter-pill badges —
+ *  computed server-side via GROUP BY over the WHOLE tenant history, so they
+ *  stay exact no matter how many order rows have been paged in.
+ *  - named counters + byStatus: scoped by agent/product/date (NOT status/search)
+ *  - byAgent/agentTotal: whole queue, ignoring all filters (team-pill counts)
+ *  - reconfirm: postponed orders due for re-confirmation within 3 days       */
+export interface OrderStats {
+  total: number; new: number; confirmed: number; rejected: number;
+  postponed: number; noAnswer: number; shipped: number; confirmedCumulative: number;
+  shippedCumulative: number;
+  reconfirm: number;
+  byStatus: Record<string, number>;
+  byAgent: Record<string, number>;
+  agentTotal: number;
+}
+export const getOrderStats = (q: Pick<OrderListQuery, 'lost' | 'agent' | 'product' | 'dateFrom' | 'dateTo'>) =>
+  api.get<OrderStats>('/api/orders/stats', {
+    params: {
+      ...(q.lost     ? { lost: true }           : {}),
+      ...(q.agent    ? { agent: q.agent }       : {}),
+      ...(q.product  ? { product: q.product }   : {}),
+      ...(q.dateFrom ? { dateFrom: q.dateFrom } : {}),
+      ...(q.dateTo   ? { dateTo: q.dateTo }     : {}),
+    },
+  });
 
 /* ── Manual order creation (WhatsApp / Facebook / phone) ────────────────────── */
 export interface CreateOrderPayload {

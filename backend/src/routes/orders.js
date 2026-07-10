@@ -108,14 +108,134 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "rejectionReason" VARCHA
   .then(() => console.log('✅  Orders: "rejectionReason" column ready'))
   .catch((err) => console.warn('⚠️   Orders rejectionReason column check:', err.message));
 
+/* ── Server-side filter builder for GET / and GET /stats ─────────────────────
+   Composes a WHERE clause + params array from the request's query-string
+   filters, so the DB does the filtering (over the FULL tenant history) instead
+   of the browser filtering only the pages it happened to load.
+
+   ROLE FENCE: non-admin callers are ALWAYS restricted to their own assigned
+   orders regardless of any ?agent= param — the server-side equivalent of the
+   frontend's `roleScoped` privacy fence (which stays as defense-in-depth).
+
+   `include` flags let /stats omit dimensions it aggregates OVER (status) or
+   that would hide siblings (the per-agent breakdown must ignore ?agent=,
+   otherwise every other agent's pill count would read 0 while one is selected).
+
+   Filters:
+     agent     — exact "AssignedTo" match (admins only)
+     status    — btrim'd "Status" equality (webhook/import rows can carry stray whitespace)
+     reconfirm — postponed orders whose follow-up date is within the next 3 days
+                 (mirrors the frontend's needsReconfirmation window)
+     product   — ILIKE containment on "ProductName": the UI passes the 3-word
+                 "short name" (see getShortName in page.tsx), which appears
+                 contiguously inside the raw name in practice
+     search    — FullName / Phone / BostaTrackingCode containment, plus exact
+                 id match when the term is a number that fits INTEGER
+     dates     — inclusive "createdAt" day range                              */
+function buildOrderScope(req, include = {}) {
+  const {
+    agent: incAgent = true, status: incStatus = true, search: incSearch = true,
+    product: incProduct = true, dates: incDates = true, reconfirm: incReconfirm = true,
+  } = include;
+
+  const lostOnly = String(req.query.lost).toLowerCase() === 'true';
+  const params = [req.user.business_id, lostOnly];
+  const where = ['business_id = $1', 'is_lost_order = $2'];
+  // Escape LIKE wildcards so a literal % or _ in a search term can't blow up
+  // the match scope (Postgres' default LIKE escape char is backslash).
+  const escLike = (s) => s.replace(/[\\%_]/g, '\\$&');
+
+  if (req.user.role !== 'admin') {
+    params.push(req.user.email);
+    where.push(`"AssignedTo" = $${params.length}`);
+  } else if (incAgent && typeof req.query.agent === 'string' && req.query.agent.trim()) {
+    params.push(req.query.agent.trim());
+    where.push(`"AssignedTo" = $${params.length}`);
+  }
+
+  if (incStatus && typeof req.query.status === 'string' && req.query.status.trim()) {
+    /* Comma-separated list → set membership. Lets a virtual queue tab span
+       several real statuses (e.g. returns-audit = 'جاري الإعادة' + 'تم الإرجاع')
+       in one server-filtered fetch. Single value stays a plain equality. */
+    const statuses = req.query.status.split(',').map((s) => s.trim()).filter(Boolean);
+    if (statuses.length === 1) {
+      params.push(statuses[0]);
+      where.push(`btrim("Status") = $${params.length}`);
+    } else if (statuses.length > 1) {
+      params.push(statuses);
+      where.push(`btrim("Status") = ANY($${params.length})`);
+    }
+  }
+
+  if (incReconfirm && String(req.query.reconfirm).toLowerCase() === 'true') {
+    where.push(`"Status" = 'مؤجل'`);
+    where.push(`"PostponedDate" >= CURRENT_DATE`);
+    where.push(`"PostponedDate" <= CURRENT_DATE + INTERVAL '3 days'`);
+  }
+
+  if (incProduct && typeof req.query.product === 'string' && req.query.product.trim()) {
+    params.push(`%${escLike(req.query.product.trim())}%`);
+    where.push(`"ProductName" ILIKE $${params.length}`);
+  }
+
+  if (incSearch && typeof req.query.search === 'string' && req.query.search.trim()) {
+    const needle = req.query.search.trim();
+    params.push(`%${escLike(needle)}%`);
+    const p = params.length;
+    const ors = [
+      `"FullName" ILIKE $${p}`,
+      `"Phone" ILIKE $${p}`,
+      `"BostaTrackingCode" ILIKE $${p}`,
+    ];
+    if (/^\d+$/.test(needle) && Number(needle) <= 2147483647) {
+      params.push(Number(needle));
+      ors.push(`id = $${params.length}`);
+    }
+    where.push(`(${ors.join(' OR ')})`);
+  }
+
+  if (incDates) {
+    if (typeof req.query.dateFrom === 'string' && req.query.dateFrom) {
+      params.push(req.query.dateFrom);
+      where.push(`"createdAt" >= $${params.length}::date`);
+    }
+    if (typeof req.query.dateTo === 'string' && req.query.dateTo) {
+      params.push(req.query.dateTo);
+      where.push(`"createdAt" < ($${params.length}::date + INTERVAL '1 day')`);
+    }
+  }
+
+  return { where: where.join(' AND '), params };
+}
+
 // GET /api/orders — all roles (strictly scoped to the caller's tenant)
+//
+// KEYSET PAGINATION: pass ?limit=<n> to page the result instead of getting the
+// whole tenant history in one shot (the page freezes/crashes on mobile once a
+// tenant accumulates thousands of rows). Uses (business_id, is_lost_order,
+// "createdAt", id) — see orders_tenant_keyset_idx (initTenancy.js phase 5) —
+// so each page is an index range scan, not a full-table sort.
+//
+// SERVER-SIDE FILTERS: search/status/agent/product/dateFrom/dateTo/reconfirm
+// (see buildOrderScope) are applied BEFORE pagination, so filtered views cover
+// the whole tenant history, not just the pages the browser already loaded.
+// The cursor is only valid for the exact filter set that produced it — the
+// frontend resets to page 1 whenever any filter changes.
+//
+// cursor = "<createdAt ISO>|<id>" of the LAST row from the previous page.
+// Row-value comparison `("createdAt", id) < ($cursorCreatedAt, $cursorId)`
+// keeps pagination stable even when many orders share the same timestamp
+// (e.g. a bulk import), which a plain OFFSET or a createdAt-only cursor would
+// skip/duplicate.
+//
+// No ?limit → legacy behavior (bare array, no filters), kept for any caller
+// that hasn't been migrated to the paginated contract yet.
 router.get('/', authenticate, async (req, res) => {
   try {
     /* LOST-ORDER ISOLATION: the live "تأكيد الطلبات" queue must NEVER show
        bulk-imported lost/historical orders. Default (no ?lost param) returns
        ONLY live orders (is_lost_order = false); the dedicated lost-orders page
        passes ?lost=true to fetch ONLY the isolated batch. */
-    const lostOnly = String(req.query.lost).toLowerCase() === 'true';
     /* CUSTOMER FREQUENCY (local-only — zero Bosta calls): per-phone history
        aggregated over ALL of the tenant's orders (live + lost/historical) so
        the confirmation team sees the customer's real track record. Phones are
@@ -126,14 +246,16 @@ router.get('/', authenticate, async (req, res) => {
        Cancellations vs returns are SEPARATE on purpose: 'تم الرفض' happens on
        the confirmation call and costs nothing, while 'تم الإرجاع'/'جاري الإعادة'
        means a parcel actually shipped and came back — real shipping fees lost,
-       the strongest red flag for the team.                                    */
-    const result = await pool.query(
-      `SELECT o.*,
+       the strongest red flag for the team.
+       Joined into BOTH the legacy and paginated paths — the row badges read
+       these fields regardless of which contract fetched the row. The subquery
+       references $1 = business_id, which buildOrderScope also binds as $1.   */
+    const FREQ_COLS = `
               COALESCE(h.total_orders_count,     1) AS total_orders_count,
               COALESCE(h.delivered_orders_count, 0) AS delivered_orders_count,
               COALESCE(h.canceled_orders_count,  0) AS canceled_orders_count,
-              COALESCE(h.returned_orders_count,  0) AS returned_orders_count
-         FROM orders o
+              COALESCE(h.returned_orders_count,  0) AS returned_orders_count`;
+    const FREQ_JOIN = `
          LEFT JOIN (
            SELECT regexp_replace(COALESCE("Phone", ''), '\\D', '', 'g') AS phone_key,
                   COUNT(*)::int                                                        AS total_orders_count,
@@ -144,12 +266,157 @@ router.get('/', authenticate, async (req, res) => {
             WHERE business_id = $1
             GROUP BY 1
          ) h ON h.phone_key <> ''
-            AND h.phone_key = regexp_replace(COALESCE(o."Phone", ''), '\\D', '', 'g')
-        WHERE o.business_id = $1 AND o.is_lost_order = $2
-        ORDER BY o."createdAt" DESC`,
-      [req.user.business_id, lostOnly]
+            AND h.phone_key = regexp_replace(COALESCE(o."Phone", ''), '\\D', '', 'g')`;
+
+    const rawLimit = parseInt(req.query.limit, 10);
+    if (!rawLimit) {
+      // Legacy path — full history, frequency-joined (pre-pagination contract).
+      const lostOnly = String(req.query.lost).toLowerCase() === 'true';
+      const result = await pool.query(
+        `SELECT o.*, ${FREQ_COLS}
+           FROM orders o
+           ${FREQ_JOIN}
+          WHERE o.business_id = $1 AND o.is_lost_order = $2
+          ORDER BY o."createdAt" DESC`,
+        [req.user.business_id, lostOnly]
+      );
+      return res.json(result.rows);
+    }
+
+    const limit = Math.min(Math.max(rawLimit, 1), 200);
+    const { where, params } = buildOrderScope(req);
+
+    /* Explicit column list — exactly the fields the frontend `Order` interface
+       consumes (table cells + quick-edit/full-edit modals + frequency badges).
+       Keeps internal / bookkeeping columns (inventory_deducted, order_source,
+       referral_code, updatedAt, business_id, …) out of every row of every
+       page. Add a column here ONLY when the frontend Order type gains the
+       field. (Unqualified names in the WHERE clause bind to `o` — the h
+       subquery exposes only phone_key + *_orders_count, no collisions.)     */
+    const LIST_COLUMNS = `
+      o.id, o."FullName", o."Phone", o."DeliveryRate", o."City", o."Address", o."Status",
+      o."Note", o."ShippingNotes", o."createdAt", o."ProductName", o."ProductPrice",
+      o."quantity", o."AssignedTo", o."PostponedDate", o."BostaTrackingCode",
+      o."rejectionReason", o."sku", o."hasDeposit", o."depositAmount",
+      o."unit_cost_price", o.no_answer_logs, o.is_lost_order`;
+
+    let cursorClause = '';
+    if (typeof req.query.cursor === 'string' && req.query.cursor.includes('|')) {
+      const [ts, id] = req.query.cursor.split('|');
+      if (ts && id && !Number.isNaN(Number(id))) {
+        params.push(ts, Number(id));
+        cursorClause = `AND (o."createdAt", o.id) < ($${params.length - 1}, $${params.length})`;
+      }
+    }
+    params.push(limit);
+
+    const result = await pool.query(
+      `SELECT ${LIST_COLUMNS}, ${FREQ_COLS}
+         FROM orders o
+         ${FREQ_JOIN}
+        WHERE ${where}
+        ${cursorClause}
+        ORDER BY o."createdAt" DESC, o.id DESC
+        LIMIT $${params.length}`,
+      params
     );
-    res.json(result.rows);
+
+    const rows = result.rows;
+    const last = rows[rows.length - 1];
+    const nextCursor = rows.length === limit && last
+      ? `${last.createdAt instanceof Date ? last.createdAt.toISOString() : last.createdAt}|${last.id}`
+      : null;
+
+    res.json({ orders: rows, nextCursor, hasMore: nextCursor !== null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── GET /api/orders/stats — lightweight aggregate counters ──────────────────
+   Powers the stat cards (Total/New/Confirmed/Rejected/...) on the Order
+   Confirmation page WITHOUT waiting for the (paginated, possibly huge) order
+   rows to load — a single GROUP BY query using orders_tenant_status_idx
+   instead of pulling every row to the client and counting in JS.
+   Mirrors the tenant/role/lost scoping of GET /api/orders; agents only ever
+   see counts for their own assigned orders, matching the row-level fence. */
+router.get('/stats', authenticate, async (req, res) => {
+  try {
+    /* Main scope: honors agent/product/date filters but NOT status/search/
+       reconfirm — the stat cards + status-pill counts break down BY status,
+       and (matching the old client behavior) search never affected the cards. */
+    const main = buildOrderScope(req, { status: false, search: false, reconfirm: false });
+
+    /* Agent-pill scope: whole tenant queue, ignoring every UI filter — the
+       team-filter pill for agent B must keep its real count while agent A is
+       selected (matching the old client counts over the full array). */
+    const agentScope = buildOrderScope(req, {
+      agent: false, status: false, search: false, product: false, dates: false, reconfirm: false,
+    });
+
+    const [counters, byStatusRows, byAgentRows] = await Promise.all([
+      pool.query(
+        `SELECT
+           COUNT(*)                                                                    AS total,
+           COUNT(*) FILTER (WHERE "Status" = 'جديد')                                   AS new,
+           COUNT(*) FILTER (WHERE "Status" = 'تم التأكيد')                             AS confirmed,
+           COUNT(*) FILTER (WHERE "Status" = 'تم الرفض')                               AS rejected,
+           COUNT(*) FILTER (WHERE "Status" = 'مؤجل')                                   AS postponed,
+           COUNT(*) FILTER (WHERE "Status" = 'لا يرد')                                 AS "noAnswer",
+           COUNT(*) FILTER (WHERE "Status" = 'تم الشحن')                               AS shipped,
+           COUNT(*) FILTER (
+             WHERE "Status" IN ('تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع')
+           )                                                                            AS "confirmedCumulative",
+           COUNT(*) FILTER (
+             WHERE "Status" IN ('تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع')
+           )                                                                            AS "shippedCumulative",
+           COUNT(*) FILTER (
+             WHERE "Status" = 'مؤجل'
+               AND "PostponedDate" >= CURRENT_DATE
+               AND "PostponedDate" <= CURRENT_DATE + INTERVAL '3 days'
+           )                                                                            AS reconfirm
+          FROM orders
+         WHERE ${main.where}`,
+        main.params
+      ),
+      pool.query(
+        `SELECT btrim("Status") AS s, COUNT(*)::int AS n
+           FROM orders WHERE ${main.where} GROUP BY 1`,
+        main.params
+      ),
+      pool.query(
+        `SELECT COALESCE("AssignedTo", '') AS a, COUNT(*)::int AS n
+           FROM orders WHERE ${agentScope.where} GROUP BY 1`,
+        agentScope.params
+      ),
+    ]);
+
+    const row = counters.rows[0];
+    const byStatus = {};
+    for (const r of byStatusRows.rows) byStatus[r.s] = r.n;
+    const byAgent = {};
+    let agentTotal = 0;
+    for (const r of byAgentRows.rows) {
+      if (r.a) byAgent[r.a] = r.n;
+      agentTotal += r.n;
+    }
+
+    res.json({
+      total:               Number(row.total),
+      new:                 Number(row.new),
+      confirmed:           Number(row.confirmed),
+      rejected:            Number(row.rejected),
+      postponed:           Number(row.postponed),
+      noAnswer:            Number(row.noAnswer),
+      shipped:             Number(row.shipped),
+      confirmedCumulative: Number(row.confirmedCumulative),
+      shippedCumulative:   Number(row.shippedCumulative),
+      reconfirm:           Number(row.reconfirm),
+      byStatus,
+      byAgent,
+      agentTotal,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'خطأ في الخادم' });

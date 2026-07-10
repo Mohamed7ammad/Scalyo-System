@@ -3,6 +3,14 @@
 import { useState, memo } from 'react';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
 
+/* NOTE — no windowing / virtualization / infinite scroll in here, on purpose.
+   The parent page uses strict page-replacement pagination (PAGE_SIZE rows per
+   page, Next/Prev REPLACE the array), so this component never receives more
+   than one page of rows and can simply render all of them. An earlier
+   IntersectionObserver-sentinel design chain-loaded the entire tenant history
+   when the user sat at the list bottom and OOM-crashed iOS Safari — do not
+   reintroduce unbounded row accumulation here.                               */
+
 const NO_ANSWER_REQUIRED = 5;
 
 /* Normalise a status string for comparison. Statuses set via the UI dropdown are
