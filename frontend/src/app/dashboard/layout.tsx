@@ -37,6 +37,9 @@ function isAffiliateOnlyRoute(path: string): boolean {
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const [collapsed,  setCollapsed]  = useState(false);
+  /* Mobile drawer state — the sidebar is off-canvas below md and slides in
+     over a backdrop; opened by the hamburger in the mobile top bar. */
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [brandName,  setBrandName]  = useState('Product Pulse');
   const pathname = usePathname();
   const router   = useRouter();
@@ -83,17 +86,42 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
      * on the RIGHT side of the screen — correct for an Arabic dashboard.
      * Child pages inherit RTL and don't need to redeclare it.
      */
-    <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950" dir="rtl">
+    /* h-dvh (not h-screen) so the layout tracks the REAL visible height on
+       mobile browsers whose URL bar collapses/expands while scrolling. */
+    <div className="flex h-dvh overflow-hidden bg-slate-50 dark:bg-slate-950" dir="rtl">
       <Sidebar
         collapsed={collapsed}
         onToggle={() => setCollapsed((c) => !c)}
         brandName={brandName}
+        mobileOpen={mobileOpen}
+        onMobileClose={() => setMobileOpen(false)}
       />
 
-      {/* Main scrollable content area */}
-      <main className="flex-1 overflow-y-auto min-w-0 bg-slate-50 dark:bg-slate-950">
-        {children}
-      </main>
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Mobile top bar — hamburger + brand; hidden from md up where the
+            sidebar rail is always in-flow. */}
+        <header className="md:hidden shrink-0 flex items-center gap-2 px-2 py-1.5
+          bg-white dark:bg-gray-900
+          border-b border-slate-200 dark:border-gray-700/60 shadow-sm">
+          <button
+            onClick={() => setMobileOpen(true)}
+            aria-label="فتح القائمة"
+            className="w-11 h-11 flex items-center justify-center rounded-xl
+              text-slate-600 dark:text-gray-300
+              hover:bg-slate-100 dark:hover:bg-gray-800 active:scale-95 transition"
+          >
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          <span className="font-bold text-sm text-slate-900 dark:text-white truncate">{brandName}</span>
+        </header>
+
+        {/* Main scrollable content area */}
+        <main className="flex-1 overflow-y-auto min-w-0 bg-slate-50 dark:bg-slate-950">
+          {children}
+        </main>
+      </div>
     </div>
   );
 }

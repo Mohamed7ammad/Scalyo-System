@@ -1741,10 +1741,16 @@ function Th({ children }: { children: React.ReactNode }) {
 function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
   return (
     <div
-      className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-lg p-6" dir="rtl">
+      {/* max-h + overflow keep long modal bodies (edit form, no-answer log)
+         scrollable INSIDE the dialog instead of overflowing the phone screen. */}
+      <div
+        className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-lg
+          max-h-[90dvh] overflow-y-auto overscroll-contain p-4 sm:p-6"
+        dir="rtl"
+      >
         {children}
       </div>
     </div>

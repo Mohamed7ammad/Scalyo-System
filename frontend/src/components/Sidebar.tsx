@@ -225,13 +225,27 @@ interface SidebarProps {
   collapsed:  boolean;
   onToggle:   () => void;
   brandName?: string;
+  /* Mobile drawer (below md): the sidebar is off-canvas by default and slides
+     in over a backdrop when the layout's hamburger opens it. `collapsed` is a
+     desktop-only concept — the drawer always renders expanded. */
+  mobileOpen?:     boolean;
+  onMobileClose?:  () => void;
 }
 
-export default function Sidebar({ collapsed, onToggle, brandName = 'Product Pulse' }: SidebarProps) {
+export default function Sidebar({
+  collapsed, onToggle, brandName = 'Product Pulse',
+  mobileOpen = false, onMobileClose,
+}: SidebarProps) {
   const pathname = usePathname();
   const router   = useRouter();
   const [user,   setUser]   = useState<{ email: string; role: string; permissions?: string[]; plan_type?: string } | null>(null);
   const [isDark, setIsDark] = useState(false);
+
+  /* Navigating (tapping a link) closes the mobile drawer automatically. */
+  useEffect(() => {
+    onMobileClose?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
 
   useEffect(() => {
     try {
@@ -274,21 +288,44 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
   const isActive = (href: string) =>
     href === '/dashboard' ? pathname === '/dashboard' : pathname.startsWith(href);
 
+  /* Icon-rail rendering is desktop-only: when the MOBILE drawer is open it
+     always renders fully expanded, regardless of the persisted desktop
+     collapse state (an icon-only drawer on a phone is useless). */
+  const rail = collapsed && !mobileOpen;
+
   return (
+    <>
+      {/* Mobile backdrop — tap to dismiss the drawer */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
+          onClick={onMobileClose}
+          aria-hidden
+        />
+      )}
+
+    {/* Below md: off-canvas drawer over the content (RTL → sidebar lives on
+        the RIGHT, so translate-x-full slides it out to the right; always
+        expanded). md+: the original in-flow rail with collapse-to-icons. */}
     <aside
       className={`
-        relative flex flex-col h-screen
+        flex flex-col
         bg-white dark:bg-gray-900
         border-l border-slate-200 dark:border-gray-700/60
         shadow-[-2px_0_12px_rgba(0,0,0,0.06)] dark:shadow-[-2px_0_16px_rgba(0,0,0,0.25)]
-        transition-all duration-300 ease-in-out shrink-0
-        ${collapsed ? 'w-[72px]' : 'w-64'}
+        shrink-0
+        fixed inset-y-0 right-0 z-50 h-dvh w-72 max-w-[85vw]
+        transition-transform duration-300 ease-in-out
+        ${mobileOpen ? 'translate-x-0' : 'translate-x-full'}
+        md:relative md:z-auto md:h-screen md:translate-x-0
+        md:transition-all
+        ${rail ? 'md:w-[72px]' : 'md:w-64'}
       `}
     >
       {/* ── Brand header ─────────────────────────────────────── */}
       <div className={`flex items-center gap-3 px-4 py-5
         border-b border-slate-200 dark:border-gray-700/60
-        ${collapsed ? 'justify-center' : ''}`}>
+        ${rail ? 'justify-center' : ''}`}>
         <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shrink-0
           shadow-md shadow-indigo-500/30 dark:shadow-indigo-900/50">
           <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -296,29 +333,42 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
               d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
         </div>
-        {!collapsed && (
-          <div className="min-w-0">
+        {!rail && (
+          <div className="min-w-0 flex-1">
             <p className="text-slate-900 dark:text-white font-bold text-sm truncate">{brandName}</p>
             <p className="text-slate-500 dark:text-gray-500 text-xs truncate">لوحة الإدارة</p>
           </div>
         )}
+        {/* Mobile drawer close (44px touch target) — hidden on desktop */}
+        <button
+          onClick={onMobileClose}
+          aria-label="إغلاق القائمة"
+          className="md:hidden shrink-0 w-11 h-11 -my-2 flex items-center justify-center rounded-xl
+            text-slate-500 dark:text-gray-400
+            hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-gray-800 dark:hover:text-gray-200
+            transition-colors"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
-      {/* ── Toggle button — sits on the LEFT edge (facing content) ── */}
+      {/* ── Toggle button — desktop-only rail collapse, on the LEFT edge ── */}
       <button
         onClick={onToggle}
         className="absolute -left-3.5 top-[68px] z-10 w-7 h-7
           bg-white dark:bg-gray-800
           border border-slate-300 dark:border-gray-600
-          rounded-full flex items-center justify-center
+          rounded-full hidden md:flex items-center justify-center
           text-slate-500 dark:text-gray-400
           hover:text-white hover:bg-indigo-600 hover:border-indigo-500 transition-all duration-150
           shadow-md shadow-black/10 dark:shadow-black/40"
-        title={collapsed ? 'توسيع القائمة' : 'طي القائمة'}
+        title={rail ? 'توسيع القائمة' : 'طي القائمة'}
       >
         {/* Arrow points RIGHT (›) when expanded = collapse inward;
-            points LEFT (‹) when collapsed = expand outward toward content. */}
-        <svg className={`w-3 h-3 transition-transform duration-300 ${collapsed ? '' : 'rotate-180'}`}
+            points LEFT (‹) when rail = expand outward toward content. */}
+        <svg className={`w-3 h-3 transition-transform duration-300 ${rail ? '' : 'rotate-180'}`}
           fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
         </svg>
@@ -336,12 +386,12 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
                   className={`
                     flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-not-allowed select-none
                     text-slate-400 dark:text-gray-600
-                    ${collapsed ? 'justify-center' : ''}
+                    ${rail ? 'justify-center' : ''}
                   `}
-                  title={collapsed ? item.label : undefined}
+                  title={rail ? item.label : undefined}
                 >
                   <span className="shrink-0 opacity-40">{item.icon}</span>
-                  {!collapsed && (
+                  {!rail && (
                     <div className="flex-1 min-w-0 flex items-center justify-between gap-2">
                       <span className="text-xs font-medium truncate leading-snug opacity-50">{item.label}</span>
                       <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-lg
@@ -358,10 +408,10 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
                 <>
                   <Link
                     href={item.href}
-                    title={collapsed ? item.label : undefined}
+                    title={rail ? item.label : undefined}
                     className={`
                       group/item flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-150
-                      ${collapsed ? 'justify-center' : ''}
+                      ${rail ? 'justify-center' : ''}
                       ${active
                         ? 'bg-indigo-50 text-indigo-700 font-medium shadow-sm ring-1 ring-inset ring-indigo-200/80 dark:bg-indigo-600 dark:text-white dark:shadow-indigo-950/60 dark:ring-white/10'
                         : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100'}
@@ -371,13 +421,13 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
                       ${active ? '' : 'group-hover/item:scale-110'}`}>
                       {item.icon}
                     </span>
-                    {!collapsed && (
+                    {!rail && (
                       <span className="text-xs truncate leading-snug">{item.label}</span>
                     )}
                   </Link>
 
                   {/* Sub-links — only visible when parent section is active and sidebar is expanded */}
-                  {!collapsed && active && item.children && item.children.length > 0 && (
+                  {!rail && active && item.children && item.children.length > 0 && (
                     <div className="mt-0.5 mr-4 border-r-2 border-indigo-200 dark:border-indigo-700/60 pr-2 space-y-0.5">
                       {item.children
                         .filter((child) => !child.adminOnly || user?.role === 'admin')
@@ -405,7 +455,7 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
               )}
 
               {/* Collapsed tooltip — appears to the LEFT (toward content area) */}
-              {collapsed && (
+              {rail && (
                 <div className="absolute right-full top-1/2 -translate-y-1/2 ml-3 px-3 py-2
                   bg-white border border-slate-200 text-slate-800 text-xs rounded-xl
                   dark:bg-gray-800 dark:border-gray-700/80 dark:text-white
@@ -427,8 +477,8 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
 
       {/* ── User footer ──────────────────────────────────────── */}
       <div className={`border-t border-slate-200 dark:border-gray-700/60 p-3
-        ${collapsed ? 'flex flex-col items-center gap-1' : ''}`}>
-        {!collapsed ? (
+        ${rail ? 'flex flex-col items-center gap-1' : ''}`}>
+        {!rail ? (
           <div className="flex items-center gap-2 px-1">
             {/* Avatar */}
             <div className="w-8 h-8 rounded-full
@@ -522,5 +572,6 @@ export default function Sidebar({ collapsed, onToggle, brandName = 'Product Puls
         )}
       </div>
     </aside>
+    </>
   );
 }

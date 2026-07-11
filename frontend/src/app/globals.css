@@ -12,6 +12,15 @@ body {
   direction: rtl;
 }
 
+html {
+  /* Remove the gray flash on tap (iOS/Android) — buttons have their own
+     active states. */
+  -webkit-tap-highlight-color: transparent;
+  /* Stop mobile browsers from arbitrarily inflating text in landscape. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   height: 6px;
@@ -23,4 +32,28 @@ body {
 ::-webkit-scrollbar-thumb {
   background: #cbd5e1;
   border-radius: 3px;
+}
+/* Dark-mode scrollbars — the light track reads as a glowing stripe on the
+   slate-950 background otherwise. */
+.dark ::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+
+/* iOS renders <input type="date"> with a tiny intrinsic width and zooms the
+   page when a focused input's font-size is under 16px. Keep form controls at
+   16px on coarse-pointer devices to kill the zoom-jump. */
+@media (pointer: coarse) {
+  input[type='date'],
+  input[type='text'],
+  input[type='number'],
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  input[type='date'] {
+    min-height: 44px;
+  }
 }

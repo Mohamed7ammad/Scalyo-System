@@ -1489,7 +1489,8 @@ export default function DashboardPage() {
             className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
             onClick={(e) => e.target === e.currentTarget && setShowCsvModal(false)}
           >
-            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md p-6" dir="rtl">
+            <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md
+              max-h-[90dvh] overflow-y-auto overscroll-contain p-4 sm:p-6" dir="rtl">
               <div className="flex items-center justify-between mb-5">
                 <h2 className="text-base font-bold text-slate-900 dark:text-white">رفع ملفات (Excel / CSV)</h2>
                 <button onClick={() => setShowCsvModal(false)}
@@ -1603,7 +1604,7 @@ export default function DashboardPage() {
             onClick={(e) => e.target === e.currentTarget && !addSaving && setShowAddModal(false)}
           >
             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
-              border border-slate-200 dark:border-slate-700/60 w-full max-w-md flex flex-col max-h-[90vh]" dir="rtl">
+              border border-slate-200 dark:border-slate-700/60 w-full max-w-md flex flex-col max-h-[90dvh]" dir="rtl">
 
               {/* Header */}
               <div className="flex items-center justify-between px-6 pt-6 pb-4 border-b border-slate-100 dark:border-slate-800">
@@ -1790,7 +1791,7 @@ export default function DashboardPage() {
             onClick={(e) => e.target === e.currentTarget && !distributing && setShowDistModal(false)}
           >
             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
-              border border-slate-200 dark:border-slate-700/60 w-full max-w-md flex flex-col max-h-[90vh]" dir="rtl">
+              border border-slate-200 dark:border-slate-700/60 w-full max-w-md flex flex-col max-h-[90dvh]" dir="rtl">
 
               {/* Header */}
               <div className="flex items-center justify-between px-6 pt-6 pb-4 border-b border-slate-100 dark:border-slate-800">
@@ -1957,7 +1958,7 @@ export default function DashboardPage() {
             <div
               className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
                 border border-slate-200 dark:border-slate-700/60
-                w-full max-w-md flex flex-col"
+                w-full max-w-md flex flex-col max-h-[90dvh]"
               dir="rtl"
             >
               {/* ── Modal header ───────────────────────────────────── */}
@@ -2001,8 +2002,8 @@ export default function DashboardPage() {
                 </button>
               </div>
 
-              {/* ── Agent list ─────────────────────────────────────── */}
-              <div className="px-6 py-4 flex-1">
+              {/* ── Agent list — scrolls inside the capped modal ────── */}
+              <div className="px-6 py-4 flex-1 overflow-y-auto overscroll-contain">
                 <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase
                   tracking-wide mb-3">
                   اختر الموظف المستهدف
@@ -2139,7 +2140,8 @@ export default function DashboardPage() {
             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
             onClick={(e) => e.target === e.currentTarget && setInvModal(false)}
           >
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6" dir="rtl">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg
+              max-h-[90dvh] overflow-y-auto overscroll-contain p-4 sm:p-6" dir="rtl">
               <div className="flex items-center justify-between mb-5">
                 <h2 className="text-lg font-bold text-gray-800">إدارة المخزون</h2>
                 <button onClick={() => setInvModal(false)}
@@ -2214,7 +2216,8 @@ export default function DashboardPage() {
             aria-labelledby="oos-title"
           >
             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl
-              w-full max-w-sm p-7 text-center border-2 border-red-500/60" dir="rtl">
+              w-full max-w-sm max-h-[90dvh] overflow-y-auto overscroll-contain
+              p-5 sm:p-7 text-center border-2 border-red-500/60" dir="rtl">
               {/* Red alert icon */}
               <div className="inline-flex items-center justify-center w-16 h-16
                 rounded-full bg-red-100 dark:bg-red-900/40 mb-4">
@@ -2252,7 +2255,8 @@ export default function DashboardPage() {
             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
             onClick={(e) => e.target === e.currentTarget && !shippingLoading && setShippingModal(false)}
           >
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6" dir="rtl">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg
+              max-h-[90dvh] overflow-y-auto overscroll-contain p-4 sm:p-6" dir="rtl">
 
               {/* ── Pre-send confirmation ── */}
               {!shippingResult && (
@@ -2457,7 +2461,7 @@ export default function DashboardPage() {
             onClick={(e) => e.target === e.currentTarget && setFollowUpsModal(false)}
           >
             <div
-              className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh]
+              className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85dvh]
                 flex flex-col border border-slate-200 dark:border-slate-700"
               dir="rtl"
             >
