@@ -386,15 +386,21 @@ function OrdersTable({
     <>
       {/* ── Main Table (virtualized) ───────────────────────────── */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 overflow-hidden shadow-sm">
-        {/* Scroll container — the virtualizer's viewport (vertical) and the
-           horizontal scroller for narrow screens. Fixed height on purpose:
-           the row window is computed against this scrollport. */}
+        {/* Scroll container — the virtualizer's viewport (vertical) AND the
+           horizontal scroller for narrow screens (overflow-auto covers both
+           axes). Fixed height on purpose: the row window is computed against
+           this scrollport. Horizontal scrolling is orthogonal to the
+           virtualizer — measureElement reads offsetHeight, which nowrap keeps
+           stable no matter how far the table is panned sideways. */}
         <div
           ref={scrollRef}
-          className="overflow-auto"
+          className="overflow-auto overscroll-x-contain"
           style={{ height: 'calc(100dvh - 270px)', minHeight: '420px' }}
         >
-          <table className="w-full text-sm">
+          {/* [&_th]/[&_td] nowrap: cells keep one line each — on mobile the
+             table extends sideways (pan to see more) instead of wrapping text
+             into towering unreadable rows. */}
+          <table className="w-full text-sm [&_th]:whitespace-nowrap [&_td]:whitespace-nowrap">
             <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400">
               <tr>
                 {/* Select-all checkbox — admin only */}

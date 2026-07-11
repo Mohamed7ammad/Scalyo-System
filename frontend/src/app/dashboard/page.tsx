@@ -1356,10 +1356,12 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <div className="max-w-screen-2xl mx-auto px-6 pt-8 pb-6 space-y-5">
+      {/* Mobile-first spacing: tight padding below sm so the table gets the
+          screen; desktop keeps the original airy layout. */}
+      <div className="max-w-screen-2xl mx-auto px-2 pt-4 pb-4 space-y-4 sm:px-4 md:px-6 md:pt-8 md:pb-6 md:space-y-5">
 
         {/* ── Page title row ─────────────────────────────────────────── */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold text-gray-900 dark:text-white leading-tight">
               {lostMode ? 'تأكيد الطلبات المفقودة' : 'سيستم تأكيد الطلبات'}
@@ -1372,7 +1374,7 @@ export default function DashboardPage() {
                   : `طلباتك — ${user?.email ?? ''}`}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={openAddModal}
               title="إضافة طلب يدوي"
@@ -2764,7 +2766,7 @@ export default function DashboardPage() {
             (or wait for) the table fetch; both load independently in the
             background while the page shell paints immediately. */}
         {serverStats === null ? (
-          <div className="grid grid-cols-3 md:grid-cols-7 gap-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4 lg:grid-cols-7">
             {Array.from({ length: 7 }).map((_, i) => (
               <div key={i} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 shadow-sm animate-pulse">
                 <div className="h-3 w-14 rounded bg-slate-200 dark:bg-slate-700 mb-3" />
@@ -2773,7 +2775,9 @@ export default function DashboardPage() {
             ))}
           </div>
         ) : (
-        <div className="grid grid-cols-3 md:grid-cols-7 gap-3">
+        /* 2-up on phones (cards stay readable), 3-up small tablets, 4-up
+           medium, full 7-across row only on large desktops. */
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4 lg:grid-cols-7">
           <StatCard label="الإجمالي"   value={stats.total}
             valueColor="text-slate-800 dark:text-white"
             active={activeFilter === 'الكل'}
@@ -2822,18 +2826,20 @@ export default function DashboardPage() {
             فلتر الأيام:
           </span>
           <div className="flex flex-wrap items-center gap-3 flex-1">
-            <label className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+            {/* Each date field spans the full row on phones (a squeezed
+                <input type=date> is untappable); inline from sm up. */}
+            <label className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 w-full sm:w-auto">
               <span>من</span>
               <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} dir="ltr"
-                className="border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2
+                className="flex-1 sm:flex-none border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2
                   text-sm outline-none bg-white dark:bg-slate-800
                   text-slate-700 dark:text-slate-300
                   focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition" />
             </label>
-            <label className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+            <label className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 w-full sm:w-auto">
               <span>إلى</span>
               <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} dir="ltr"
-                className="border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2
+                className="flex-1 sm:flex-none border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-2
                   text-sm outline-none bg-white dark:bg-slate-800
                   text-slate-700 dark:text-slate-300
                   focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition" />
