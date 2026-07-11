@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.5",
     "axios": "^1.6.7",
     "next": "^16.2.6",
     "react": "^18",

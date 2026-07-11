@@ -54,6 +54,15 @@ const RETURNS_AUDIT_STATUSES = ['جاري الإعادة', 'تم الإرجاع'
    "Status" value). */
 const RECONFIRM_FILTER = 'مؤجلات تستحق التأكيد';
 
+/* All-zero placeholder backing `stats` until the first /stats response lands
+   (the card grid shows skeletons instead of these zeros). Stat cards and pill
+   counts are STRICTLY server-hydrated — never derived from loaded rows.     */
+const EMPTY_STATS: OrderStats = {
+  total: 0, new: 0, confirmed: 0, rejected: 0, postponed: 0, noAnswer: 0,
+  shipped: 0, confirmedCumulative: 0, shippedCumulative: 0, reconfirm: 0,
+  byStatus: {}, byAgent: {}, agentTotal: 0,
+};
+
 /* The 27 Egyptian governorates — used by the manual-order governorate dropdown. */
 const EGYPT_GOVERNORATES = [
   'القاهرة', 'الجيزة', 'الإسكندرية', 'القليوبية', 'الشرقية', 'الدقهلية', 'البحيرة',
@@ -118,21 +127,22 @@ export default function DashboardPage() {
   const [orders,        setOrders]        = useState<Order[]>([]);
   const [loading,       setLoading]       = useState(true);
   const [error,         setError]         = useState('');
-  /* ── Strict page-replacement pagination ─────────────────────────
-     Exactly ONE page of PAGE_SIZE rows lives in state (and therefore in the
-     DOM) at any moment — Next/Prev REPLACE the array, never append. This is a
-     hard memory ceiling: the previous IntersectionObserver infinite-scroll
-     chain-loaded the whole history when the user sat at the list bottom and
-     crashed iOS Safari (OOM). Keyset cursors are forward-only, so Prev works
-     off a cursor trail: pageCursorsRef[i] = the cursor that REQUESTS page i
-     (null for page 0), recorded as each page's response comes back. The trail
-     resets whenever the server filters change (a cursor is only valid for the
-     filter set that produced it). */
-  const PAGE_SIZE = 50;
-  const [page,        setPage]        = useState(0);       // 0-based current page
-  const [pageHasNext, setPageHasNext] = useState(false);
-  const [pageLoading, setPageLoading] = useState(false);   // Next/Prev in flight
-  const pageCursorsRef = useRef<(string | null)[]>([null]);
+  /* ── Virtualized infinite scroll (keyset append + react-virtuoso) ──
+     Rows load PAGE_SIZE at a time and APPEND as the user nears the list
+     bottom. The state array may grow large (that's accepted), but the DOM
+     stays tiny: TableVirtuoso in OrdersTable mounts only the visible rows and
+     unmounts everything off-screen — that (not the array size) is what
+     prevented-the-iOS-OOM. Two guards keep the fetch chain sane:
+       • loadMoreOrders no-ops while a page is in flight AND dedupes by cursor,
+         so a burst of endReached events can't double-fetch a page;
+       • the fetchSeq ref discards any append/refresh that resolves after the
+         filters changed (a cursor is only valid for the filter set that
+         produced it — filter changes always replace and restart the chain). */
+  const PAGE_SIZE = 100;
+  const [nextCursor,  setNextCursor]  = useState<string | null>(null);
+  const [hasMore,     setHasMore]     = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const lastRequestedCursorRef = useRef<string | null>(null);
   /* Fast stat-card numbers from GET /api/orders/stats — computed server-side
      over the WHOLE tenant scope so the cards are correct and paint immediately,
      without waiting for any order rows to arrive. */
@@ -250,39 +260,28 @@ export default function DashboardPage() {
      newer filter's rows, and a stale load-more must never append to them). */
   const fetchSeq = useRef(0);
 
-  /* ── Fetch ONE page and REPLACE state with it ─────────────────── */
-  // The single fetch primitive: initial load, filter changes, Next/Prev, the
-  // refresh button, and post-action refreshes all go through here, so there is
-  // exactly one code path that can touch `orders`/`loading` — no divergent
-  // effect chains to loop.
+  /* ── Fetch page 1 and REPLACE state (initial / filter change / refresh) ── */
+  // spinner (silent !== true) → full-page skeleton (initial mount + explicit
+  // refresh button, which binds onClick={fetchOrders} so the first arg may be
+  // a MouseEvent — hence the strict `silent === true` check). Filter/search
+  // refetches pass silent=true: the skeleton unmounts the search bar and would
+  // steal keyboard focus mid-typing.
   //
-  // spinner=true → full-page spinner (initial mount + explicit refresh only).
-  // Everything else keeps the table mounted (the spinner unmounts the search
-  // bar and would steal keyboard focus mid-typing) and uses the lightweight
-  // `pageLoading` flag instead.
-  //
-  // LOOP/CLEANUP SAFETY (the two production crashes):
-  //  • `loading`/`pageLoading` are cleared by WHICHEVER fetch finishes as the
-  //    latest (seq === fetchSeq.current), regardless of which fetch set them.
-  //    The old code only let the spinner-owning fetch clear `loading`, so a
-  //    superseded initial fetch left the spinner up forever.
-  //  • This callback's identity depends ONLY on [router, serverFilters]; it
-  //    never reads state it also sets, so the filter-change effect below
-  //    cannot re-trigger itself.
-  const fetchPage = useCallback(async (targetPage: number, spinner = false) => {
-    const cursor = pageCursorsRef.current[targetPage] ?? null;
-    if (targetPage > 0 && cursor === null) return;   // unknown cursor — can't jump ahead
+  // CLEANUP SAFETY: `loading` is cleared by WHICHEVER fetch finishes as the
+  // latest (seq === fetchSeq.current), regardless of which fetch set it — a
+  // superseded initial fetch must never strand the skeleton on screen.
+  const fetchOrders = useCallback(async (silent?: unknown) => {
+    const isSilent = silent === true;
     const seq = ++fetchSeq.current;
+    lastRequestedCursorRef.current = null;   // new chain — allow the first append
     try {
-      if (spinner) setLoading(true);
-      else setPageLoading(true);
+      if (!isSilent) setLoading(true);
       setError('');
-      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE, cursor });
+      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE });
       if (seq !== fetchSeq.current) return;   // superseded by a newer fetch
-      setOrders(res.data.orders);             // strict REPLACE — never append
-      pageCursorsRef.current[targetPage + 1] = res.data.nextCursor;
-      setPageHasNext(res.data.hasMore);
-      setPage(targetPage);
+      setOrders(res.data.orders);             // REPLACE — restart the scroll chain
+      setNextCursor(res.data.nextCursor);
+      setHasMore(res.data.hasMore);
     } catch (err: unknown) {
       if (seq !== fetchSeq.current) return;
       const status = (err as { response?: { status?: number } })?.response?.status;
@@ -290,36 +289,35 @@ export default function DashboardPage() {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         router.push('/');
-      } else if (spinner) {
+      } else if (!isSilent) {
         setError('فشل في تحميل الطلبات. تحقق من الاتصال بالخادم.');
       }
     } finally {
-      if (seq === fetchSeq.current) {
-        setLoading(false);
-        setPageLoading(false);
-      }
+      if (seq === fetchSeq.current) setLoading(false);
     }
   }, [router, serverFilters]);
 
-  /* Refresh button + post-action handlers: refetch the CURRENT page in place.
-     Bound directly to onClick, so the first arg may be a MouseEvent — ignore it. */
-  const fetchOrders = useCallback(() => fetchPage(page, true), [fetchPage, page]);
+  /* Merge a freshly-fetched FIRST page into existing state without discarding
+     rows appended by loadMoreOrders(): rows the server just returned replace
+     their loaded counterparts (new + edited orders), everything older stays. */
+  const mergeFirstPage = (prev: Order[], fresh: Order[]): Order[] => {
+    const freshIds = new Set(fresh.map((o) => o.id));
+    return [...fresh, ...prev.filter((o) => !freshIds.has(o.id))];
+  };
 
-  /* ── Silent background refresh (no spinner, no scroll reset) ── */
-  // Refetches the current page in place every 30 s. Captures the seq WITHOUT
-  // incrementing — a poll must never supersede (or clear the flags of) a
-  // user-initiated fetch.
+  /* ── Silent background refresh (no skeleton, no scroll reset) ── */
+  // Re-fetches page 1 of the current filter set every 30 s and merges it in
+  // place, preserving scroll position and appended pages. Captures the seq
+  // WITHOUT incrementing — a poll must never supersede a user fetch.
   const silentRefresh = useCallback(async () => {
     const seq = fetchSeq.current;
     try {
-      const res = await getOrders({
-        ...serverFilters, limit: PAGE_SIZE,
-        cursor: pageCursorsRef.current[page] ?? null,
-      });
-      if (seq !== fetchSeq.current) return;   // a newer fetch happened mid-flight → stale
-      setOrders(res.data.orders);
-      pageCursorsRef.current[page + 1] = res.data.nextCursor;
-      setPageHasNext(res.data.hasMore);
+      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE });
+      if (seq !== fetchSeq.current) return;   // filters changed mid-flight → stale
+      setOrders((prev) => mergeFirstPage(prev, res.data.orders));
+      // Only adopt the fresh cursor when nothing beyond page 1 is loaded —
+      // otherwise this would rewind the append chain's progress.
+      setNextCursor((prev) => (prev === null ? res.data.nextCursor : prev));
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status === 401) {
@@ -329,15 +327,31 @@ export default function DashboardPage() {
       }
       // All other errors are swallowed — never flash UI errors during a background poll
     }
-  }, [router, serverFilters, page]);
+  }, [router, serverFilters]);
 
-  /* ── Next / Prev ─────────────────────────────────────────────── */
-  const goToPage = useCallback(async (targetPage: number) => {
-    if (pageLoading) return;
-    await fetchPage(targetPage);
-    // New page content → back to the top of the list so the user reads from row 1.
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [fetchPage, pageLoading]);
+  /* ── Append next page (virtuoso endReached) ──────────────────── */
+  // The DOM stays bounded no matter how much this appends — TableVirtuoso
+  // renders only the visible window. Cursor dedupe makes endReached bursts
+  // idempotent: the same page can never be requested twice.
+  const loadMoreOrders = useCallback(async () => {
+    if (!hasMore || loadingMore || !nextCursor) return;
+    if (lastRequestedCursorRef.current === nextCursor) return;   // burst dedupe
+    lastRequestedCursorRef.current = nextCursor;
+    const seq = fetchSeq.current;
+    setLoadingMore(true);
+    try {
+      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE, cursor: nextCursor });
+      if (seq !== fetchSeq.current) return;   // filters changed mid-flight → don't append
+      setOrders((prev) => [...prev, ...res.data.orders]);
+      setNextCursor(res.data.nextCursor);
+      setHasMore(res.data.hasMore);
+    } catch {
+      // Allow a retry on the next endReached — scrolling again re-requests.
+      lastRequestedCursorRef.current = null;
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [serverFilters, hasMore, loadingMore, nextCursor]);
 
   /* ── Stat cards: fetch server-side aggregate immediately, independent of
      the (paginated) order rows. Scoped by agent/product/date (matching the old
@@ -363,17 +377,15 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, [fetchStats]);
 
-  // Initial load (spinner) + every filter/search change (silent). fetchPage's
-  // identity changes ONLY when serverFilters does, so this effect fires exactly
-  // once per filter change: reset the cursor trail (cursors are filter-specific)
-  // and load page 1, replacing whatever was shown. No state this effect writes
-  // feeds back into fetchPage's identity → it cannot loop.
+  // Initial load (skeleton) + every filter/search change (silent replace).
+  // fetchOrders' identity changes ONLY when serverFilters does, so this effect
+  // fires exactly once per filter change. No state it writes feeds back into
+  // fetchOrders' identity → it cannot loop.
   const didInitialLoad = useRef(false);
   useEffect(() => {
-    pageCursorsRef.current = [null];
-    fetchPage(0, !didInitialLoad.current);   // spinner on the very first run only
+    fetchOrders(didInitialLoad.current);   // false → skeleton on the very first run only
     didInitialLoad.current = true;
-  }, [fetchPage]);
+  }, [fetchOrders]);
 
   /* Deep-link support — the staff-analytics returns drill-down lands here as
      /dashboard?filter=returns_audit&agent=<email>. Read once on mount via
@@ -1086,7 +1098,7 @@ export default function DashboardPage() {
   // Badge count — scoped to current agent + product selection. Server value is
   // exact over the whole history; loaded-rows count is the fallback until the
   // first /stats response lands.
-  const reconfirmCount = serverStats?.reconfirm ?? productFiltered.filter(needsReconfirmation).length;
+  const reconfirmCount = serverStats?.reconfirm ?? 0;   // strictly server-hydrated
 
   // 3b. Status + date — final display set
   const filtered = (() => {
@@ -1121,29 +1133,17 @@ export default function DashboardPage() {
       )
     : filtered;
 
-  /* ── Stats (product scope so tabs affect cards) ──────────────── */
-  const clientStats = {
-    total:     dateScoped.length,
-    new:       dateScoped.filter((o) => normStatus(o.Status) === 'جديد').length,
-    rejected:  dateScoped.filter((o) => normStatus(o.Status) === 'تم الرفض').length,
-    postponed: dateScoped.filter((o) => normStatus(o.Status) === 'مؤجل').length,
-    noAnswer:  dateScoped.filter((o) => normStatus(o.Status) === 'لا يرد').length,
-    /* Snapshot queue sizes — feed the cards' operational sub-labels
-       (بانتظار الشحن / قيد الشحن الآن) and match what a card click shows. */
-    confirmed: dateScoped.filter((o) => normStatus(o.Status) === 'تم التأكيد').length,
-    shipped:   dateScoped.filter((o) => normStatus(o.Status) === 'تم الشحن').length,
-    /* Funnel (cumulative) counts — both cards on the top row read as "how many
-       orders ever reached this stage in the date range", so neither drains as
-       orders progress downstream. Confirmed ⊇ shipped by construction; the gap
-       is exactly the orders confirmed but not yet dispatched. */
-    confirmedCumulative: dateScoped.filter((o) => PASSED_CONFIRMATION.includes(normStatus(o.Status))).length,
-    shippedCumulative:   dateScoped.filter((o) => PASSED_SHIPPING.includes(normStatus(o.Status))).length,
-  };
-  /* The server aggregate now honors agent/product/date scoping itself, so it
-     is ALWAYS preferred once loaded — exact over the whole tenant history,
-     independent of which pages happen to be in memory. clientStats remains
-     only as the pre-first-response fallback. */
-  const stats = serverStats ?? clientStats;
+  /* ── Stats — STRICTLY server-hydrated (GET /api/orders/stats) ─── */
+  // Never derived from the loaded rows: with paginated fetching the in-memory
+  // array is a window, not the dataset, and counting it produced the infamous
+  // "الإجمالي = 50" bug. Until the first /stats response the cards render as
+  // skeletons (see the grid below) — EMPTY_STATS only backs the few places
+  // (e.g. the distribution modal count) that read `stats` before then.
+  // Semantics preserved from the funnel rework: confirmed/shipped are snapshot
+  // queue sizes; confirmedCumulative/shippedCumulative are "ever reached this
+  // stage" — all computed in SQL over the whole tenant history, scoped by
+  // agent/product/date exactly like the old dateScoped chain.
+  const stats: OrderStats = serverStats ?? EMPTY_STATS;
   const pct = (n: number) =>
     stats.total ? Math.round((n / stats.total) * 100) : 0;
 
@@ -1237,7 +1237,7 @@ export default function DashboardPage() {
       const res = await forwardToShipping(allowOpenAll, idsToShip, payWithPoints);
       setShippingResult(res.data);
       // Refresh the current page silently so statuses update without scroll disruption
-      await fetchPage(page);
+      await silentRefresh();
       fetchStats();
     } catch (err: unknown) {
       const msg =
@@ -1465,12 +1465,14 @@ export default function DashboardPage() {
                   {agent === 'كل الفريق' ? 'كل الفريق' : agent.split('@')[0]}
                   <span className={`mr-1.5 text-xs
                     ${activeAgent === agent ? 'text-indigo-200' : 'text-slate-400 dark:text-slate-500'}`}>
-                    ({/* Exact whole-queue counts from /stats (byAgent ignores the
-                        active pill, so siblings keep their numbers); loaded-rows
-                        fallback until the first stats response. */
-                      agent === 'كل الفريق'
-                      ? (serverStats?.agentTotal ?? roleScoped.length)
-                      : (serverStats?.byAgent?.[agent] ?? roleScoped.filter((o) => o.AssignedTo === agent).length)})
+                    ({/* Exact whole-queue counts from /stats (byAgent ignores
+                        the active pill, so siblings keep their numbers).
+                        STRICTLY server-hydrated: '…' until the first response,
+                        never a count of the loaded rows. */
+                      serverStats === null ? '…'
+                        : agent === 'كل الفريق'
+                          ? serverStats.agentTotal
+                          : (serverStats.byAgent[agent] ?? 0)})
                   </span>
                 </button>
               ))}
@@ -2761,7 +2763,7 @@ export default function DashboardPage() {
         {/* Skeleton until the FIRST /stats response — the cards never block on
             (or wait for) the table fetch; both load independently in the
             background while the page shell paints immediately. */}
-        {serverStats === null && loading ? (
+        {serverStats === null ? (
           <div className="grid grid-cols-3 md:grid-cols-7 gap-3">
             {Array.from({ length: 7 }).map((_, i) => (
               <div key={i} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 shadow-sm animate-pulse">
@@ -2867,10 +2869,10 @@ export default function DashboardPage() {
               {f !== 'الكل' && (
                 <span className={`mr-1.5 text-xs ${activeFilter === f ? 'text-indigo-200' : 'text-gray-400'}`}>
                   ({/* Exact per-status counts from /stats (agent/product/date-scoped,
-                      never status-scoped — so every tab keeps its number while one
-                      is selected); loaded-rows fallback pre-first-response. */
-                    serverStats?.byStatus?.[normStatus(f)]
-                      ?? dateScoped.filter((o) => normStatus(o.Status) === normStatus(f)).length})
+                      never status-scoped — so every tab keeps its number while
+                      one is selected). STRICTLY server-hydrated: '…' until the
+                      first response, never a count of the loaded rows. */
+                    serverStats === null ? '…' : (serverStats.byStatus[normStatus(f)] ?? 0)})
                 </span>
               )}
             </button>
@@ -2915,7 +2917,9 @@ export default function DashboardPage() {
             >
               🔍 {RETURNS_AUDIT_FILTER}
               <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-xs font-bold leading-none bg-white text-red-600">
-                {dateScoped.filter((o) => RETURNS_AUDIT_STATUSES.includes(normStatus(o.Status))).length}
+                {/* Sum of both courier return statuses — server-hydrated. */}
+                {serverStats === null ? '…'
+                  : RETURNS_AUDIT_STATUSES.reduce((n, s) => n + (serverStats.byStatus[s] ?? 0), 0)}
               </span>
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12"/>
@@ -3203,47 +3207,15 @@ export default function DashboardPage() {
             agents={uniqueAgents}
             showProduct={activeProduct === 'كل المنتجات'}
             onToast={(m, t) => showToast(m, t ?? 'success')}
+            onEndReached={loadMoreOrders}
+            hasMore={hasMore}
+            loadingMore={loadingMore}
             emptyMessage={
               searchTerm.trim()
                 ? `لا توجد نتائج مطابقة لـ "${searchTerm.trim()}"`
                 : 'لا توجد طلبات لعرضها'
             }
           />
-        )}
-
-        {/* ── Pagination controls — strict page replacement, never append ── */}
-        {!loading && (page > 0 || pageHasNext) && (
-          <div dir="rtl" className="flex items-center justify-center gap-3 mt-4">
-            <button
-              onClick={() => goToPage(page - 1)}
-              disabled={page === 0 || pageLoading}
-              className="px-4 py-2 rounded-xl text-sm font-medium transition
-                bg-white text-slate-600 border border-slate-200 shadow-sm
-                hover:bg-slate-50 hover:text-indigo-600
-                disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white disabled:hover:text-slate-600
-                dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-800"
-            >
-              → السابق
-            </button>
-            <span className="text-sm text-slate-500 dark:text-slate-400 min-w-[80px] text-center">
-              {pageLoading ? (
-                <span className="inline-block w-4 h-4 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin align-middle" />
-              ) : (
-                <>صفحة <span className="font-semibold text-slate-700 dark:text-slate-200">{page + 1}</span></>
-              )}
-            </span>
-            <button
-              onClick={() => goToPage(page + 1)}
-              disabled={!pageHasNext || pageLoading}
-              className="px-4 py-2 rounded-xl text-sm font-medium transition
-                bg-white text-slate-600 border border-slate-200 shadow-sm
-                hover:bg-slate-50 hover:text-indigo-600
-                disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white disabled:hover:text-slate-600
-                dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-800"
-            >
-              التالي ←
-            </button>
-          </div>
         )}
       </div>
     </div>

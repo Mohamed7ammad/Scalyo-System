@@ -1,15 +1,27 @@
 'use client';
 
-import { useState, memo } from 'react';
+import { useState, useEffect, useRef, memo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
 
-/* NOTE — no windowing / virtualization / infinite scroll in here, on purpose.
-   The parent page uses strict page-replacement pagination (PAGE_SIZE rows per
-   page, Next/Prev REPLACE the array), so this component never receives more
-   than one page of rows and can simply render all of them. An earlier
-   IntersectionObserver-sentinel design chain-loaded the entire tenant history
-   when the user sat at the list bottom and OOM-crashed iOS Safari — do not
-   reintroduce unbounded row accumulation here.                               */
+/* ── Virtualization (@tanstack/react-virtual) ────────────────────────────────
+   The parent page appends keyset pages to `orders` as the user scrolls, so the
+   ARRAY may grow into the thousands — but useVirtualizer mounts only the rows
+   inside (and just around) the viewport and unmounts everything else. Bounded
+   DOM is what prevents the iOS Safari OOM crash; do NOT swap this for a plain
+   .map() render or a hand-rolled sentinel (a previous hand-rolled version grew
+   its DOM window without bound and crashed production).
+
+   Why tanstack and not react-virtuoso: virtuoso 4.18 mounts an empty item list
+   under this Next 16 runtime (verified against a live harness — zero rows even
+   in a minimal, uncustomized <TableVirtuoso/>). tanstack is hooks-only with no
+   internal store subscription to silently fail.
+
+   Table-specific technique: rows keep native <tr> layout (so columns stay
+   aligned with the header); virtualization offsets come from two spacer rows —
+   paddingTop above the window and paddingBottom below it — instead of absolute
+   positioning, which would break table column layout. Dynamic row heights are
+   handled by `measureElement` via each row's ref + data-index.              */
 
 const NO_ANSWER_REQUIRED = 5;
 
@@ -105,6 +117,11 @@ interface Props {
   showProduct?:     boolean;   // true when viewing "كل المنتجات" — renders product badge per row
   emptyMessage?:    string;    // override for the no-results state (e.g. when a search is active)
   onToast?:         (message: string, type?: 'success' | 'error') => void; // optional parent toast
+  /* Infinite scroll — virtuoso fires this as the user nears the loaded end;
+     the parent appends the next keyset page (guarded + cursor-deduped). */
+  onEndReached?:    () => void;
+  hasMore?:         boolean;
+  loadingMore?:     boolean;
 }
 
 function OrdersTable({
@@ -113,6 +130,7 @@ function OrdersTable({
   agents = [],
   emptyMessage = 'لا توجد طلبات لعرضها',
   onToast,
+  onEndReached, hasMore = false, loadingMore = false,
 }: Props) {
   const [savingId,        setSavingId]        = useState<number | null>(null);
   const [editModal,       setEditModal]       = useState<Order | null>(null);
@@ -296,6 +314,35 @@ function OrdersTable({
     setDeleteConfirm(null);
   };
 
+  /* ─── Virtualizer ──────────────────────────────────────────────
+     (Hooks — must sit above the empty-state early return.) The scroll
+     container is the div wrapping the table; row heights are measured live
+     (measureElement) so long addresses / wrapped cells stay accurate.      */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const virtualizer = useVirtualizer({
+    count: orders.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 68,
+    overscan: 10,
+    getItemKey: (i) => orders[i].id,
+  });
+  const vItems = virtualizer.getVirtualItems();
+  const padTop = vItems.length ? vItems[0].start : 0;
+  const padBottom = vItems.length
+    ? virtualizer.getTotalSize() - vItems[vItems.length - 1].end
+    : 0;
+
+  /* Infinite scroll: when the render window nears the end of the LOADED rows,
+     ask the parent for the next keyset page. The parent no-ops while a page is
+     in flight and dedupes by cursor, so this firing repeatedly is harmless. */
+  const lastVirtualIndex = vItems.length ? vItems[vItems.length - 1].index : -1;
+  useEffect(() => {
+    if (lastVirtualIndex < 0) return;
+    if (lastVirtualIndex >= orders.length - 15 && hasMore && !loadingMore) {
+      onEndReached?.();
+    }
+  }, [lastVirtualIndex, orders.length, hasMore, loadingMore, onEndReached]);
+
   /* Live, trimmed status of the order open in each modal — read from the current
      `orders` prop (not the stale snapshot) so the no-answer section always
      reflects the order's real status. */
@@ -337,11 +384,18 @@ function OrdersTable({
 
   return (
     <>
-      {/* ── Main Table ─────────────────────────────────────────── */}
+      {/* ── Main Table (virtualized) ───────────────────────────── */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
+        {/* Scroll container — the virtualizer's viewport (vertical) and the
+           horizontal scroller for narrow screens. Fixed height on purpose:
+           the row window is computed against this scrollport. */}
+        <div
+          ref={scrollRef}
+          className="overflow-auto"
+          style={{ height: 'calc(100dvh - 270px)', minHeight: '420px' }}
+        >
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-slate-800/50 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400">
+            <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400">
               <tr>
                 {/* Select-all checkbox — admin only */}
                 {role === 'admin' && onToggleSelect && (
@@ -376,37 +430,55 @@ function OrdersTable({
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
-              {orders.map((order, i) => (
-                <OrderRow
-                  key={order.id}
-                  order={order}
-                  index={i}
-                  role={role}
-                  selected={selectedIds.includes(order.id)}
-                  saving={savingId === order.id}
-                  agents={agents}
-                  attemptLogs={attemptOverrides[order.id]}
-                  inlineLogging={inlineLoggingId === order.id}
-                  onToggleSelect={onToggleSelect}
-                  onStatusChange={handleStatusChange}
-                  onDeliveryRateChange={handleDeliveryRateChange}
-                  onAssignedToChange={handleAssignedToChange}
-                  onNoteBlur={handleNoteBlur}
-                  onAddressBlur={handleAddressBlur}
-                  onShippingNotesBlur={handleShippingNotesBlur}
-                  onInlineAttempt={handleInlineAttempt}
-                  onQuickEdit={openQuickEdit}
-                  onEditModal={openEditModal}
-                  onDelete={setDeleteConfirm}
-                />
-              ))}
+              {/* Spacer rows stand in for everything scrolled out of the
+                 window — native table layout stays intact (no absolute
+                 positioning, columns keep aligning with the header). */}
+              {padTop > 0 && <tr aria-hidden style={{ height: padTop }} />}
+              {vItems.map((vi) => {
+                const order = orders[vi.index];
+                return (
+                  <OrderRow
+                    key={order.id}
+                    order={order}
+                    index={vi.index}
+                    rowRef={virtualizer.measureElement}
+                    role={role}
+                    selected={selectedIds.includes(order.id)}
+                    saving={savingId === order.id}
+                    agents={agents}
+                    attemptLogs={attemptOverrides[order.id]}
+                    inlineLogging={inlineLoggingId === order.id}
+                    onToggleSelect={onToggleSelect}
+                    onStatusChange={handleStatusChange}
+                    onDeliveryRateChange={handleDeliveryRateChange}
+                    onAssignedToChange={handleAssignedToChange}
+                    onNoteBlur={handleNoteBlur}
+                    onAddressBlur={handleAddressBlur}
+                    onShippingNotesBlur={handleShippingNotesBlur}
+                    onInlineAttempt={handleInlineAttempt}
+                    onQuickEdit={openQuickEdit}
+                    onEditModal={openEditModal}
+                    onDelete={setDeleteConfirm}
+                  />
+                );
+              })}
+              {padBottom > 0 && <tr aria-hidden style={{ height: padBottom }} />}
             </tbody>
           </table>
         </div>
 
         {/* Row count footer */}
         <div className="px-4 py-3 bg-gray-50 dark:bg-slate-800/50 border-t border-gray-100 dark:border-slate-800 text-xs text-gray-400 dark:text-slate-500">
-          إجمالي الطلبات المعروضة: <span className="font-semibold text-gray-600 dark:text-slate-300">{orders.length}</span>
+          الطلبات المحمَّلة: <span className="font-semibold text-gray-600 dark:text-slate-300">{orders.length}</span>
+          {loadingMore && (
+            <span className="mr-2 inline-flex items-center gap-1.5">
+              <span className="inline-block w-3 h-3 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+              جارٍ تحميل المزيد...
+            </span>
+          )}
+          {!hasMore && orders.length > 0 && (
+            <span className="mr-2 text-gray-300 dark:text-slate-600">· نهاية القائمة</span>
+          )}
         </div>
       </div>
 
@@ -1224,6 +1296,9 @@ function CustomerFrequencyBadge({ order }: { order: Order }) {
 interface OrderRowProps {
   order:                Order;
   index:                number;
+  /* Virtualizer measureElement — reads data-index off the <tr> to record its
+     real height (dynamic row heights). Stable function; comparator ignores it. */
+  rowRef:               (node: Element | null) => void;
   role:                 'admin' | 'agent';
   selected:             boolean;
   saving:               boolean;
@@ -1257,13 +1332,15 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
 }
 
 const OrderRow = memo(function OrderRow({
-  order, index, role, selected, saving, agents, attemptLogs, inlineLogging,
+  order, index, rowRef, role, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onShippingNotesBlur, onInlineAttempt,
   onQuickEdit, onEditModal, onDelete,
 }: OrderRowProps) {
   return (
     <tr
+      ref={rowRef}
+      data-index={index}
       className={`hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${saving ? 'opacity-60 pointer-events-none' : ''}`}
     >
       {/* Row checkbox — admin only */}
@@ -1633,6 +1710,11 @@ function arePropsEqual(prev: Props, next: Props) {
     prev.role === next.role &&
     prev.showProduct === next.showProduct &&
     prev.emptyMessage === next.emptyMessage &&
+    /* Pagination state MUST be compared: a hasMore/loadingMore flip re-renders
+       the footer AND hands virtuoso the freshest onEndReached closure (whose
+       captured cursor changes with every appended page). */
+    prev.hasMore === next.hasMore &&
+    prev.loadingMore === next.loadingMore &&
     sameRefArray(prev.selectedIds, next.selectedIds) &&
     sameRefArray(prev.agents, next.agents)
   );
