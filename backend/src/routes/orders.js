@@ -132,6 +132,25 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "rejectionReason" VARCHA
      search    — FullName / Phone / BostaTrackingCode containment, plus exact
                  id match when the term is a number that fits INTEGER
      dates     — inclusive "createdAt" day range                              */
+/* Reconfirm window: postponed orders whose follow-up date falls within the
+   next 3 days (inclusive). "PostponedDate" is a VARCHAR column on the live
+   schema (NOT a date) — comparing it directly against CURRENT_DATE throws
+   `operator does not exist: character varying >= date` (42883). The CASE
+   guard is load-bearing twice over:
+     • CASE (unlike an AND chain, whose operand order Postgres does NOT
+       guarantee) always evaluates the regex check before the cast, so junk
+       or empty strings can never hit ::date and crash the query;
+     • ::text first makes the predicate work unchanged if the column is ever
+       migrated to a real DATE (dates render as 'YYYY-MM-DD…' text).
+   left(…,10) accepts both plain 'YYYY-MM-DD' and full ISO timestamps.      */
+const RECONFIRM_PREDICATE = `
+  "Status" = 'مؤجل'
+  AND CASE WHEN "PostponedDate"::text ~ '^\\d{4}-\\d{2}-\\d{2}'
+           THEN left("PostponedDate"::text, 10)::date
+                BETWEEN CURRENT_DATE AND CURRENT_DATE + 3
+           ELSE false
+      END`;
+
 function buildOrderScope(req, include = {}) {
   const {
     agent: incAgent = true, status: incStatus = true, search: incSearch = true,
@@ -168,9 +187,7 @@ function buildOrderScope(req, include = {}) {
   }
 
   if (incReconfirm && String(req.query.reconfirm).toLowerCase() === 'true') {
-    where.push(`"Status" = 'مؤجل'`);
-    where.push(`"PostponedDate" >= CURRENT_DATE`);
-    where.push(`"PostponedDate" <= CURRENT_DATE + INTERVAL '3 days'`);
+    where.push(`(${RECONFIRM_PREDICATE})`);
   }
 
   if (incProduct && typeof req.query.product === 'string' && req.query.product.trim()) {
@@ -371,11 +388,7 @@ router.get('/stats', authenticate, async (req, res) => {
            COUNT(*) FILTER (
              WHERE "Status" IN ('تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع')
            )                                                                            AS "shippedCumulative",
-           COUNT(*) FILTER (
-             WHERE "Status" = 'مؤجل'
-               AND "PostponedDate" >= CURRENT_DATE
-               AND "PostponedDate" <= CURRENT_DATE + INTERVAL '3 days'
-           )                                                                            AS reconfirm
+           COUNT(*) FILTER (WHERE ${RECONFIRM_PREDICATE})                               AS reconfirm
           FROM orders
          WHERE ${main.where}`,
         main.params
