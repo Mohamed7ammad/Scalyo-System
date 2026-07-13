@@ -130,9 +130,15 @@ export interface OrderListQuery {
  *  filtering — see orders.js). `lost` omitted/false → LIVE confirmation queue
  *  (excludes bulk-imported lost orders); `lost: true` → ONLY the isolated lost
  *  batch (the dedicated "تأكيد الطلبات المفقودة" page). `cursor` omitted →
- *  first page. */
+ *  first page.
+ *
+ *  DEPLOY-SKEW GUARD: a backend process that predates the pagination contract
+ *  ignores `limit` and answers with the legacy bare array — every consumer
+ *  reads `res.data.orders`, so that shape would break the whole dashboard
+ *  until the backend is restarted. Normalise it into a single unpaginated
+ *  "page" so the UI degrades gracefully instead of failing to load. */
 export const getOrders = (q: OrderListQuery) =>
-  api.get<PaginatedOrders>('/api/orders', {
+  api.get<PaginatedOrders | Order[]>('/api/orders', {
     params: {
       limit: q.limit,
       ...(q.lost      ? { lost: true }           : {}),
@@ -145,6 +151,11 @@ export const getOrders = (q: OrderListQuery) =>
       ...(q.dateTo    ? { dateTo: q.dateTo }     : {}),
       ...(q.reconfirm ? { reconfirm: true }      : {}),
     },
+  }).then((res) => {
+    if (Array.isArray(res.data)) {
+      res.data = { orders: res.data, nextCursor: null, hasMore: false };
+    }
+    return res as typeof res & { data: PaginatedOrders };
   });
 
 /** Lightweight aggregate counters for the stat cards + filter-pill badges —
