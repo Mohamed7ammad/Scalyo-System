@@ -62,6 +62,7 @@ const safqaRoutes           = require('./routes/safqa');
 const easyorderRoutes       = require('./routes/easyorder');
 const returnCollectionsRoutes = require('./routes/returnCollections');
 const afterSalesRoutes        = require('./routes/afterSales');
+const exchangeReturnsRoutes   = require('./routes/exchangeReturns');
 
 const app = express();
 
@@ -97,6 +98,7 @@ app.use('/api/safqa',           safqaRoutes); // Safqa CSV self-serve import (af
 app.use('/api/integrations/easyorder', easyorderRoutes); // EasyOrder per-tenant settings
 app.use('/api/return-collections', returnCollectionsRoutes); // returned-parcel fee collection + agent commission settlement
 app.use('/api/after-sales',      afterSalesRoutes); // post-delivery customer issue tracking (خدمة ما بعد البيع)
+app.use('/api/exchange-returns', exchangeReturnsRoutes); // exchange/return requests with video evidence (الاستبدال والاسترجاع)
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 

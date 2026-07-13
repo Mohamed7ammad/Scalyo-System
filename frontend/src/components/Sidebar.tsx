@@ -139,6 +139,16 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: '/dashboard/exchange-returns', label: 'الاستبدال والاسترجاع',
+    subLabel: 'Exchange & Returns',   // no role/permission flags — visible to every employee
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/staff', label: 'إدارة الموظفين',
     subLabel: 'Team', adminOnly: true,
     icon: (

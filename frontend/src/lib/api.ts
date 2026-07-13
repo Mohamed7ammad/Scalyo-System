@@ -1587,4 +1587,61 @@ export const updateAfterSalesIssue = (id: number, data: UpdateAfterSalesPayload)
 export const deleteAfterSalesIssue = (id: number) =>
   api.delete<{ message: string; id: number }>(`/api/after-sales/${id}`);
 
+/* ── Exchange & Returns (الاستبدال والاسترجاع) ───────────────────── */
+/** The fixed request types — must mirror ALLOWED_TYPES in routes/exchangeReturns.js. */
+export const EXCHANGE_RETURN_TYPES = ['استبدال', 'استرجاع'] as const;
+export type ExchangeReturnType = (typeof EXCHANGE_RETURN_TYPES)[number];
+
+/** The fixed status set — must mirror ALLOWED_STATUSES in routes/exchangeReturns.js. */
+export const EXCHANGE_RETURN_STATUSES = [
+  'قيد المراجعة',
+  'تمت الموافقة',
+  'مرفوض',
+  'مكتمل',
+] as const;
+export type ExchangeReturnStatus = (typeof EXCHANGE_RETURN_STATUSES)[number];
+
+export interface ExchangeReturnRequest {
+  id:                number;
+  customer_name:     string;
+  customer_phone:    string;
+  request_type:      ExchangeReturnType;
+  reason:            string | null;
+  video_link:        string | null;   // evidence video URL supplied by the customer
+  status:            ExchangeReturnStatus;
+  created_by:        string | null;
+  created_by_name?:  string | null;   // resolved display name (GET join)
+  created_by_email?: string | null;
+  created_at:        string;
+  updated_at:        string;
+}
+
+export interface CreateExchangeReturnPayload {
+  customer_name:  string;
+  customer_phone: string;
+  request_type:   ExchangeReturnType;
+  reason:         string;
+  video_link?:    string | null;
+}
+
+export type UpdateExchangeReturnPayload = Partial<
+  Pick<ExchangeReturnRequest,
+    'status' | 'request_type' | 'reason' | 'video_link' |
+    'customer_name' | 'customer_phone'>
+>;
+
+/** List the tenant's requests, optionally narrowed to one type and/or status. */
+export const getExchangeReturnRequests = (filters?: { request_type?: ExchangeReturnType; status?: ExchangeReturnStatus }) =>
+  api.get<ExchangeReturnRequest[]>('/api/exchange-returns', filters ? { params: filters } : undefined);
+
+export const createExchangeReturnRequest = (data: CreateExchangeReturnPayload) =>
+  api.post<ExchangeReturnRequest>('/api/exchange-returns', data);
+
+export const updateExchangeReturnRequest = (id: number, data: UpdateExchangeReturnPayload) =>
+  api.patch<ExchangeReturnRequest>(`/api/exchange-returns/${id}`, data);
+
+/** Admin only — agents close requests via status instead of deleting. */
+export const deleteExchangeReturnRequest = (id: number) =>
+  api.delete<{ message: string; id: number }>(`/api/exchange-returns/${id}`);
+
 export default api;
