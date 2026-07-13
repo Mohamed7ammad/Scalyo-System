@@ -17,8 +17,9 @@ import { useRouter } from 'next/navigation';
 import {
   getExchangeReturnRequests, createExchangeReturnRequest,
   updateExchangeReturnRequest, deleteExchangeReturnRequest,
+  getProducts,
   ExchangeReturnRequest, ExchangeReturnType, ExchangeReturnStatus,
-  EXCHANGE_RETURN_TYPES, EXCHANGE_RETURN_STATUSES,
+  EXCHANGE_RETURN_TYPES, EXCHANGE_RETURN_STATUSES, Product,
 } from '@/lib/api';
 
 /* ── Status / type presentation ──────────────────────────────────────────── */
@@ -68,6 +69,7 @@ export default function ExchangeReturnsPage() {
   const [allowed,  setAllowed]  = useState(false);
   const [isAdmin,  setIsAdmin]  = useState(false);
   const [requests, setRequests] = useState<ExchangeReturnRequest[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [toast,    setToast]    = useState<Toast | null>(null);
 
@@ -81,6 +83,7 @@ export default function ExchangeReturnsPage() {
   const [newName,      setNewName]      = useState('');
   const [newPhone,     setNewPhone]     = useState('');
   const [newType,      setNewType]      = useState<ExchangeReturnType>('استبدال');
+  const [newProduct,   setNewProduct]   = useState('');   // product id ('' = not chosen)
   const [newReason,    setNewReason]    = useState('');
   const [newVideo,     setNewVideo]     = useState('');
   const [createSaving, setCreateSaving] = useState(false);
@@ -113,8 +116,9 @@ export default function ExchangeReturnsPage() {
   const fetchAll = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await getExchangeReturnRequests();
-      setRequests(res.data);
+      const [requestsRes, productsRes] = await Promise.all([getExchangeReturnRequests(), getProducts()]);
+      setRequests(requestsRes.data);
+      setProducts(productsRes.data);
     } catch {
       showToast('تعذّر تحميل طلبات الاستبدال والاسترجاع', 'error');
     } finally {
@@ -134,6 +138,7 @@ export default function ExchangeReturnsPage() {
       rows = rows.filter((r) =>
         r.customer_name.toLowerCase().includes(q) ||
         r.customer_phone.toLowerCase().includes(q) ||
+        (r.product_name ?? '').toLowerCase().includes(q) ||
         (r.reason ?? '').toLowerCase().includes(q));
     }
     return rows;
@@ -153,13 +158,15 @@ export default function ExchangeReturnsPage() {
 
   /* ── Actions ─────────────────────────────────────────────────────────────── */
   const openCreate = () => {
-    setNewName(''); setNewPhone(''); setNewType('استبدال'); setNewReason(''); setNewVideo('');
+    setNewName(''); setNewPhone(''); setNewType('استبدال');
+    setNewProduct(''); setNewReason(''); setNewVideo('');
     setShowCreate(true);
   };
 
   const handleCreate = async () => {
     if (!newName.trim())   { showToast('اسم العميل مطلوب', 'error'); return; }
     if (!newPhone.trim())  { showToast('رقم التليفون مطلوب', 'error'); return; }
+    if (!newProduct)       { showToast('المنتج مطلوب', 'error'); return; }
     if (!newReason.trim()) { showToast('سبب الطلب مطلوب', 'error'); return; }
     setCreateSaving(true);
     try {
@@ -167,6 +174,7 @@ export default function ExchangeReturnsPage() {
         customer_name:  newName.trim(),
         customer_phone: newPhone.trim(),
         request_type:   newType,
+        product_id:     newProduct,
         reason:         newReason.trim(),
         video_link:     newVideo.trim() || null,
       });
@@ -322,6 +330,7 @@ export default function ExchangeReturnsPage() {
                   <tr>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العميل</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">نوع الطلب</th>
+                    <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المنتج</th>
                     <th className="text-right font-semibold px-4 py-3">السبب</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">فيديو توضيحي</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الحالة</th>
@@ -346,6 +355,9 @@ export default function ExchangeReturnsPage() {
                           <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${TYPE_BADGE[r.request_type]}`}>
                             {r.request_type}
                           </span>
+                        </td>
+                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[12rem]">
+                          <span className="line-clamp-2" title={r.product_name ?? ''}>{r.product_name || '—'}</span>
                         </td>
                         <td className="px-4 py-3 text-slate-600 dark:text-slate-300 max-w-[20rem]">
                           <span className="line-clamp-3 whitespace-pre-wrap" title={r.reason ?? ''}>{r.reason || '—'}</span>
@@ -426,6 +438,14 @@ export default function ExchangeReturnsPage() {
             ))}
           </select>
 
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 mt-3">المنتج</label>
+          <select value={newProduct} onChange={(e) => setNewProduct(e.target.value)} className={inputCls}>
+            <option value="">— اختر المنتج —</option>
+            {products.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 mt-3">السبب</label>
           <textarea rows={4} value={newReason} onChange={(e) => setNewReason(e.target.value)}
             placeholder="اكتب سبب طلب الاستبدال أو الاسترجاع…" className={`${inputCls} resize-y`} />
@@ -454,6 +474,7 @@ export default function ExchangeReturnsPage() {
           <p className="text-xs text-slate-400 dark:text-slate-500 mb-1">
             {editTarget.customer_name} (<span dir="ltr">{editTarget.customer_phone}</span>)
             {' · '}{editTarget.request_type}
+            {editTarget.product_name ? ` · ${editTarget.product_name}` : ''}
           </p>
           {editTarget.reason && (
             <p className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700

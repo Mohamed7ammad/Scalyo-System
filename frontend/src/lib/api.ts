@@ -1617,6 +1617,8 @@ export interface ExchangeReturnRequest {
   customer_name:     string;
   customer_phone:    string;
   request_type:      ExchangeReturnType;
+  product_id:        string | null;   // UUID soft link to products
+  product_name:      string | null;   // snapshot — survives product rename/delete
   reason:            string | null;
   video_link:        string | null;   // evidence video URL supplied by the customer
   status:            ExchangeReturnStatus;
@@ -1631,6 +1633,8 @@ export interface CreateExchangeReturnPayload {
   customer_name:  string;
   customer_phone: string;
   request_type:   ExchangeReturnType;
+  product_id?:    string | null;   // required server-side: product_id OR product_name
+  product_name?:  string | null;
   reason:         string;
   video_link?:    string | null;
 }
@@ -1638,7 +1642,7 @@ export interface CreateExchangeReturnPayload {
 export type UpdateExchangeReturnPayload = Partial<
   Pick<ExchangeReturnRequest,
     'status' | 'request_type' | 'reason' | 'video_link' |
-    'customer_name' | 'customer_phone'>
+    'customer_name' | 'customer_phone' | 'product_id' | 'product_name'>
 >;
 
 /** List the tenant's requests, optionally narrowed to one type and/or status. */

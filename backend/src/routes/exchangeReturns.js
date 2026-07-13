@@ -36,7 +36,12 @@ const ALLOWED_STATUSES = [
 const DEFAULT_STATUS = 'قيد المراجعة';
 
 /* ── Idempotent schema bootstrap (runs once at module load) ─────────────────
-   Same pattern as afterSales.js / returnCollections.js — IF NOT EXISTS only. */
+   Same pattern as afterSales.js / returnCollections.js — IF NOT EXISTS only.
+   product_id is a soft link to products(id) (UUID, no FK so deleting a product
+   never breaks history); product_name is a snapshot for display/filter even if
+   the product is later renamed or removed. The ALTER steps upgrade tables
+   created by the pre-product version of this bootstrap already live on the
+   server. */
 pool.query(`
   CREATE TABLE IF NOT EXISTS after_sales_requests (
     id             SERIAL       PRIMARY KEY,
@@ -44,6 +49,8 @@ pool.query(`
     customer_name  TEXT         NOT NULL,
     customer_phone VARCHAR(50)  NOT NULL,
     request_type   VARCHAR(50)  NOT NULL,
+    product_id     UUID,
+    product_name   TEXT,
     reason         TEXT,
     video_link     TEXT,
     status         VARCHAR(50)  NOT NULL DEFAULT '${DEFAULT_STATUS}',
@@ -52,6 +59,8 @@ pool.query(`
     updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
   )
 `)
+  .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS product_id UUID`))
+  .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS product_name TEXT`))
   .then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS after_sales_requests_status_idx
       ON after_sales_requests (business_id, status)
@@ -61,6 +70,18 @@ pool.query(`
 
 /* Display name for the creator — same convention as afterSales.js. */
 const CREATOR_NAME_SQL = `COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '@', 1))`;
+
+/* Resolve the snapshot product_name for a given product_id within the tenant.
+   Returns null when the id is missing/unknown (caller falls back to the raw
+   product_name string from the request body). */
+async function resolveProductName(productId, businessId) {
+  if (!productId) return null;
+  const { rows } = await pool.query(
+    `SELECT name FROM products WHERE id = $1 AND business_id = $2`,
+    [productId, businessId]
+  );
+  return rows.length ? rows[0].name : null;
+}
 
 /* ════════════════════════════════════════════════════════════════════════════
    GET /api/exchange-returns?request_type=<استبدال|استرجاع>&status=<arabic>
@@ -101,15 +122,19 @@ router.get('/', authenticate, async (req, res) => {
 
 /* ════════════════════════════════════════════════════════════════════════════
    POST /api/exchange-returns
-   { customer_name, customer_phone, request_type, reason, video_link? }
+   { customer_name, customer_phone, request_type, product_id (or product_name),
+     reason, video_link? }
    Opens a new request in the default 'قيد المراجعة' state, stamped with the
-   creating employee.
+   creating employee. The product is REQUIRED — a return/exchange cannot be
+   processed without knowing which product it concerns.
    ════════════════════════════════════════════════════════════════════════════ */
 router.post('/', authenticate, async (req, res) => {
   const businessId = req.user.business_id;
   const customerName  = String(req.body.customer_name ?? '').trim();
   const customerPhone = String(req.body.customer_phone ?? '').trim();
   const requestType   = String(req.body.request_type ?? '').trim();
+  const productId     = req.body.product_id ? String(req.body.product_id) : null;
+  const rawProductName = req.body.product_name ? String(req.body.product_name).trim() : null;
   const reason        = String(req.body.reason ?? '').trim();
   const videoLink     = req.body.video_link ? String(req.body.video_link).trim() : null;
 
@@ -118,17 +143,26 @@ router.post('/', authenticate, async (req, res) => {
   if (!ALLOWED_TYPES.includes(requestType)) {
     return res.status(400).json({ error: 'نوع الطلب يجب أن يكون استبدال أو استرجاع' });
   }
+  if (!productId && !rawProductName) {
+    return res.status(400).json({ error: 'المنتج مطلوب' });
+  }
   if (!reason) return res.status(400).json({ error: 'سبب الطلب مطلوب' });
 
   try {
+    /* Prefer the canonical product name from the products table; fall back to
+       whatever free-text name the client sent (unlinked / legacy product). */
+    const resolvedName = await resolveProductName(productId, businessId);
+    const productName  = resolvedName ?? rawProductName;
+    if (!productName) return res.status(400).json({ error: 'المنتج غير موجود' });
+
     const { rows } = await pool.query(
       `INSERT INTO after_sales_requests
-         (business_id, customer_name, customer_phone, request_type, reason,
-          video_link, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (business_id, customer_name, customer_phone, request_type, product_id,
+          product_name, reason, video_link, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [businessId, customerName, customerPhone, requestType, reason,
-       videoLink, DEFAULT_STATUS, req.user.id]
+      [businessId, customerName, customerPhone, requestType, productId,
+       productName, reason, videoLink, DEFAULT_STATUS, req.user.id]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -140,7 +174,8 @@ router.post('/', authenticate, async (req, res) => {
 /* ════════════════════════════════════════════════════════════════════════════
    PATCH /api/exchange-returns/:id
    Allowlisted partial update: status (validated), request_type (validated),
-   reason, video_link, customer_name, customer_phone.
+   reason, video_link, customer_name, customer_phone, product_id (re-resolves
+   the snapshot name).
    ════════════════════════════════════════════════════════════════════════════ */
 router.patch('/:id', authenticate, async (req, res) => {
   const businessId = req.user.business_id;
@@ -164,6 +199,13 @@ router.patch('/:id', authenticate, async (req, res) => {
   if (has('video_link'))     push('video_link',     req.body.video_link ? String(req.body.video_link).trim() : null);
   if (has('customer_name'))  push('customer_name',  String(req.body.customer_name ?? '').trim());
   if (has('customer_phone')) push('customer_phone', String(req.body.customer_phone ?? '').trim());
+  if (has('product_id')) {
+    const productId = req.body.product_id ? String(req.body.product_id) : null;
+    push('product_id', productId);
+    const resolvedName = await resolveProductName(productId, businessId).catch(() => null);
+    push('product_name', resolvedName
+      ?? (req.body.product_name ? String(req.body.product_name).trim() : null));
+  }
 
   if (!sets.length) return res.status(400).json({ error: 'لا توجد حقول للتحديث' });
   sets.push('updated_at = NOW()');
