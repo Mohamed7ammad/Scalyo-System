@@ -1167,6 +1167,17 @@ export default function DashboardPage() {
       : pendingShipCount;
   })();
 
+  // "Ship the Ones I Checked" — explicit checkbox selection takes priority.
+  // When the user has ticked specific rows we resolve those ids to their order
+  // objects (from the full in-memory set, not just the visible page) and keep
+  // ONLY the ones still in the confirmed 'تم التأكيد' state — the only status
+  // Bosta can accept. A non-empty result flips the ship modal into "selection
+  // mode": it confirms + dispatches exactly these rows, ignoring the count quota.
+  const selectedConfirmedOrders = orders.filter(
+    (o) => selectedIds.includes(o.id) && normStatus(o.Status) === 'تم التأكيد'
+  );
+  const hasShipSelection = selectedConfirmedOrders.length > 0;
+
   /* ── Copy phones (all currently displayed/filtered orders) ──── */
   const handleCopyPhones = async () => {
     const phones = displayOrders
@@ -1229,13 +1240,21 @@ export default function DashboardPage() {
       //   UPDATE business_wallet SET balance += SUM(depositAmount)
       //   for all orders in this batch where hasDeposit = true.
       //   This records already-collected cash into the wallet ledger before shipment.
-      // Slice the first N confirmed orders from the CURRENT filtered view and
-      // ship exactly those ids ("Send What You See"). N is the clamped quota.
-      const idsToShip = confirmedDisplayOrders
-        .slice(0, effectiveShipCount)
-        .map((o) => o.id);
+      // Two dispatch modes, checkbox selection wins:
+      //  • selection mode — ship EXACTLY the rows the user checked (confirmed only).
+      //  • quota mode     — slice the first N confirmed orders from the CURRENT
+      //                     filtered view ("Send What You See"); N is the clamped quota.
+      const shippingSelection = hasShipSelection;
+      const idsToShip = shippingSelection
+        ? selectedConfirmedOrders.map((o) => o.id)
+        : confirmedDisplayOrders.slice(0, effectiveShipCount).map((o) => o.id);
       const res = await forwardToShipping(allowOpenAll, idsToShip, payWithPoints);
       setShippingResult(res.data);
+      // In selection mode, clear the checkbox selection once anything shipped so
+      // the dispatched rows deselect and vanish from the 'تم التأكيد' view.
+      if (shippingSelection && (res.data?.success?.length ?? 0) > 0) {
+        setSelectedIds([]);
+      }
       // Refresh the current page silently so statuses update without scroll disruption
       await silentRefresh();
       fetchStats();
@@ -2270,11 +2289,25 @@ export default function DashboardPage() {
                     </div>
                     <div>
                       <h2 className="text-lg font-bold text-gray-800">إرسال الطلبات للشحن</h2>
-                      <p className="text-xs text-gray-400">عبر شركة بوسطة (Bosta)</p>
+                      <p className="text-xs text-gray-400">
+                        {hasShipSelection ? 'الطلبات المحددة · عبر بوسطة (Bosta)' : 'عبر شركة بوسطة (Bosta)'}
+                      </p>
                     </div>
                   </div>
 
-                  {pendingShipCount === 0 ? (
+                  {hasShipSelection ? (
+                    /* ── Selection mode — ship exactly the checked rows ── */
+                    <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-4 mb-5">
+                      <p className="text-sm text-teal-800">
+                        سيتم إرسال{' '}
+                        <span className="font-bold text-teal-900 text-base">{selectedConfirmedOrders.length}</span>
+                        {' '}طلب محدد لشركة الشحن.
+                      </p>
+                      <p className="text-xs text-teal-600 mt-1">
+                        تم اختيار هذه الطلبات يدوياً — سيتم إرسال الطلبات المحددة فقط، وسيتم إلغاء التحديد بعد الإرسال.
+                      </p>
+                    </div>
+                  ) : pendingShipCount === 0 ? (
                     <div className="bg-gray-50 rounded-xl px-4 py-6 text-center text-gray-500 text-sm mb-5">
                       لا توجد طلبات مؤكدة جديدة بانتظار الشحن
                     </div>
@@ -2288,6 +2321,9 @@ export default function DashboardPage() {
                         </p>
                         <p className="text-xs text-teal-600 mt-1">
                           الطلبات التي تم إرسالها مسبقاً لن تُكرَّر. ستُرسَل الطلبات الأقدم أولاً.
+                        </p>
+                        <p className="text-xs text-teal-600 mt-1">
+                          💡 لإرسال طلبات محددة فقط، حدّد مربعات الاختيار بجانب الطلبات ثم اضغط «إرسال للشحن».
                         </p>
                       </div>
 
@@ -2345,7 +2381,7 @@ export default function DashboardPage() {
                   <div className="flex gap-3">
                     <button
                       onClick={handleForwardShipping}
-                      disabled={shippingLoading || pendingShipCount === 0}
+                      disabled={shippingLoading || (hasShipSelection ? false : pendingShipCount === 0)}
                       className="flex-1 flex items-center justify-center gap-2
                         bg-teal-600 hover:bg-teal-700 text-white py-2.5 rounded-xl
                         text-sm font-semibold transition disabled:opacity-50"
@@ -2356,6 +2392,8 @@ export default function DashboardPage() {
                             rounded-full animate-spin" />
                           جارٍ الإرسال...
                         </>
+                      ) : hasShipSelection ? (
+                        `إرسال ${selectedConfirmedOrders.length} طلب محدد للشحن`
                       ) : (
                         `إرسال ${effectiveShipCount} طلب للشحن`
                       )}
