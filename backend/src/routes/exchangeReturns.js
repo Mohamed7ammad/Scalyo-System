@@ -53,6 +53,7 @@ pool.query(`
     product_name   TEXT,
     reason         TEXT,
     video_link     TEXT,
+    notes          TEXT,
     status         VARCHAR(50)  NOT NULL DEFAULT '${DEFAULT_STATUS}',
     created_by     VARCHAR(255),
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -61,6 +62,7 @@ pool.query(`
 `)
   .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS product_id UUID`))
   .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS product_name TEXT`))
+  .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS notes TEXT`))
   .then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS after_sales_requests_status_idx
       ON after_sales_requests (business_id, status)
@@ -174,8 +176,8 @@ router.post('/', authenticate, async (req, res) => {
 /* ════════════════════════════════════════════════════════════════════════════
    PATCH /api/exchange-returns/:id
    Allowlisted partial update: status (validated), request_type (validated),
-   reason, video_link, customer_name, customer_phone, product_id (re-resolves
-   the snapshot name).
+   reason, video_link, notes, customer_name, customer_phone, product_id
+   (re-resolves the snapshot name).
    ════════════════════════════════════════════════════════════════════════════ */
 router.patch('/:id', authenticate, async (req, res) => {
   const businessId = req.user.business_id;
@@ -196,6 +198,7 @@ router.patch('/:id', authenticate, async (req, res) => {
   if (has('status'))         push('status',         String(req.body.status));
   if (has('request_type'))   push('request_type',   String(req.body.request_type));
   if (has('reason'))         push('reason',         req.body.reason == null ? '' : String(req.body.reason));
+  if (has('notes'))          push('notes',          req.body.notes == null ? null : String(req.body.notes));
   if (has('video_link'))     push('video_link',     req.body.video_link ? String(req.body.video_link).trim() : null);
   if (has('customer_name'))  push('customer_name',  String(req.body.customer_name ?? '').trim());
   if (has('customer_phone')) push('customer_phone', String(req.body.customer_phone ?? '').trim());

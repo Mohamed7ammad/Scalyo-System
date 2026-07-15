@@ -1621,6 +1621,7 @@ export interface ExchangeReturnRequest {
   product_name:      string | null;   // snapshot — survives product rename/delete
   reason:            string | null;
   video_link:        string | null;   // evidence video URL supplied by the customer
+  notes:             string | null;   // team follow-up log (actions taken, unresponsive customer…)
   status:            ExchangeReturnStatus;
   created_by:        string | null;
   created_by_name?:  string | null;   // resolved display name (GET join)
@@ -1641,7 +1642,7 @@ export interface CreateExchangeReturnPayload {
 
 export type UpdateExchangeReturnPayload = Partial<
   Pick<ExchangeReturnRequest,
-    'status' | 'request_type' | 'reason' | 'video_link' |
+    'status' | 'request_type' | 'reason' | 'video_link' | 'notes' |
     'customer_name' | 'customer_phone' | 'product_id' | 'product_name'>
 >;
 

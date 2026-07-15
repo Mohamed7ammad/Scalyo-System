@@ -91,6 +91,7 @@ export default function ExchangeReturnsPage() {
   /* Edit / review modal */
   const [editTarget, setEditTarget] = useState<ExchangeReturnRequest | null>(null);
   const [editStatus, setEditStatus] = useState<ExchangeReturnStatus>('قيد المراجعة');
+  const [editNotes,  setEditNotes]  = useState('');
   const [editSaving, setEditSaving] = useState(false);
 
   const [busyRow, setBusyRow] = useState<number | null>(null);
@@ -192,13 +193,17 @@ export default function ExchangeReturnsPage() {
   const openEdit = (row: ExchangeReturnRequest) => {
     setEditTarget(row);
     setEditStatus(row.status);
+    setEditNotes(row.notes ?? '');
   };
 
   const handleEdit = async () => {
     if (!editTarget) return;
     setEditSaving(true);
     try {
-      const res = await updateExchangeReturnRequest(editTarget.id, { status: editStatus });
+      const res = await updateExchangeReturnRequest(editTarget.id, {
+        status: editStatus,
+        notes:  editNotes.trim() || null,
+      });
       setRequests((prev) => prev.map((r) => (r.id === editTarget.id ? { ...r, ...res.data } : r)));
       setEditTarget(null);
       showToast('تم تحديث الطلب ✓', 'success');
@@ -365,6 +370,7 @@ export default function ExchangeReturnsPage() {
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">نوع الطلب</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المنتج</th>
                     <th className="text-right font-semibold px-4 py-3">السبب</th>
+                    <th className="text-right font-semibold px-4 py-3">الملاحظات</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">فيديو توضيحي</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الحالة</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">أضيف بواسطة</th>
@@ -394,6 +400,13 @@ export default function ExchangeReturnsPage() {
                         </td>
                         <td className="px-4 py-3 text-slate-600 dark:text-slate-300 max-w-[20rem]">
                           <span className="line-clamp-3 whitespace-pre-wrap" title={r.reason ?? ''}>{r.reason || '—'}</span>
+                        </td>
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-300 max-w-[18rem]">
+                          {r.notes ? (
+                            <span className="line-clamp-3 whitespace-pre-wrap" title={r.notes}>{r.notes}</span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
                           {r.video_link ? (
@@ -522,6 +535,11 @@ export default function ExchangeReturnsPage() {
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
+
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 mt-3">الملاحظات</label>
+          <textarea rows={4} value={editNotes} onChange={(e) => setEditNotes(e.target.value)}
+            placeholder="سجّل الإجراءات المتخذة أو المتابعات (مثال: تم الاتصال بالعميل ولم يرد)…"
+            className={`${inputCls} resize-y`} />
 
           <div className="flex gap-3 mt-6">
             <button onClick={handleEdit} disabled={editSaving}
