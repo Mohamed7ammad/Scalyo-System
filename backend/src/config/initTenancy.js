@@ -376,15 +376,16 @@ async function phase3Enforce() {
    guarded so one failure never blocks the rest.
    ══════════════════════════════════════════════════════════════════════════ */
 async function phase4AgencySchema() {
-  /* ── 4a. users.role CHECK — allow 'media_buyer' ──────────────────────────
-     The live constraint only permitted ('agent','admin'), so creating a media
-     buyer threw `violates check constraint "users_role_check"` (HTTP 500). Drop
-     then re-add aligned to staff.js VALID_ROLES. Extend the IN(...) list here if
-     a new role is ever added to VALID_ROLES. */
+  /* ── 4a. users.role CHECK — keep in lock-step with staff.js VALID_ROLES ───
+     The live constraint originally permitted only ('agent','admin'), so creating
+     a media buyer — and later a 'supervisor' (تيم ليدر) — threw
+     `violates check constraint "users_role_check"` (HTTP 500) on INSERT/UPDATE.
+     Drop then re-add aligned to staff.js VALID_ROLES.
+     ⚠️ Extend the IN(...) list here WHENEVER a new role is added to VALID_ROLES. */
   await pool.query(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`).catch(() => {});
   await pool.query(`
     ALTER TABLE users ADD CONSTRAINT users_role_check
-      CHECK (role IN ('agent', 'admin', 'media_buyer'))
+      CHECK (role IN ('agent', 'admin', 'media_buyer', 'supervisor'))
   `).catch((err) =>
     console.warn('⚠️   Phase 4: users_role_check update skipped:', err.message)
   );
