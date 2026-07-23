@@ -107,9 +107,18 @@ function fmtNum(n: number): string {
 interface Props {
   orders:           Order[];
   role:             'admin' | 'agent';
+  /* ── Capability flags (decoupled from `role`) ──────────────────────────────
+     Default to the admin role so existing admin call-sites are unchanged, but a
+     team-leader (supervisor) can be granted reassignment WITHOUT the destructive
+     admin surface:
+       • canReassign → row checkboxes, select-all, and the inline "الموظف المسؤول"
+                       reassignment dropdown.
+       • canDelete   → the full edit modal + hard-delete row action (admin only). */
+  canReassign?:     boolean;
+  canDelete?:       boolean;
   onUpdate:         (id: number, data: Partial<Order>) => Promise<void>;
   onDelete:         (id: number) => Promise<void>;
-  /* Bulk-selection props — admin only ───────────────────────────── */
+  /* Bulk-selection props — enabled for reassign-capable users ───────── */
   selectedIds?:     number[];                     // controlled from parent
   onToggleSelect?:  (id: number) => void;         // toggle one row
   onSelectAll?:     (visibleIds: number[]) => void; // toggle all visible rows
@@ -125,7 +134,10 @@ interface Props {
 }
 
 function OrdersTable({
-  orders, role, onUpdate, onDelete,
+  orders, role,
+  canReassign = role === 'admin',
+  canDelete   = role === 'admin',
+  onUpdate, onDelete,
   selectedIds = [], onToggleSelect, onSelectAll,
   agents = [],
   emptyMessage = 'لا توجد طلبات لعرضها',
@@ -403,8 +415,8 @@ function OrdersTable({
           <table className="w-full text-sm [&_th]:whitespace-nowrap [&_td]:whitespace-nowrap">
             <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400">
               <tr>
-                {/* Select-all checkbox — admin only */}
-                {role === 'admin' && onToggleSelect && (
+                {/* Select-all checkbox — reassign-capable users (admin + team-leaders) */}
+                {canReassign && onToggleSelect && (
                   <th className="px-4 py-3 w-10 text-right">
                     <input
                       type="checkbox"
@@ -422,7 +434,7 @@ function OrdersTable({
                   </th>
                 )}
                 <Th>#</Th>
-                {role === 'admin' && <Th>الموظف المسؤول</Th>}
+                {canReassign && <Th>الموظف المسؤول</Th>}
                 <Th>الاسم الكامل</Th>
                 <Th>الهاتف</Th>
                 <Th>حالة الاستلام</Th>
@@ -449,6 +461,8 @@ function OrdersTable({
                     index={vi.index}
                     rowRef={virtualizer.measureElement}
                     role={role}
+                    canReassign={canReassign}
+                    canDelete={canDelete}
                     selected={selectedIds.includes(order.id)}
                     saving={savingId === order.id}
                     agents={agents}
@@ -1306,6 +1320,8 @@ interface OrderRowProps {
      real height (dynamic row heights). Stable function; comparator ignores it. */
   rowRef:               (node: Element | null) => void;
   role:                 'admin' | 'agent';
+  canReassign:          boolean;   // row checkbox + inline reassignment dropdown
+  canDelete:            boolean;   // full edit modal + hard-delete action (admin)
   selected:             boolean;
   saving:               boolean;
   agents:               string[];
@@ -1329,6 +1345,8 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
     prev.order === next.order &&          // immutable update → new ref only for the edited row
     prev.index === next.index &&
     prev.role === next.role &&
+    prev.canReassign === next.canReassign &&
+    prev.canDelete === next.canDelete &&
     prev.selected === next.selected &&
     prev.saving === next.saving &&
     prev.inlineLogging === next.inlineLogging &&
@@ -1338,7 +1356,7 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
 }
 
 const OrderRow = memo(function OrderRow({
-  order, index, rowRef, role, selected, saving, agents, attemptLogs, inlineLogging,
+  order, index, rowRef, role, canReassign, canDelete, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onShippingNotesBlur, onInlineAttempt,
   onQuickEdit, onEditModal, onDelete,
@@ -1349,8 +1367,8 @@ const OrderRow = memo(function OrderRow({
       data-index={index}
       className={`hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${saving ? 'opacity-60 pointer-events-none' : ''}`}
     >
-      {/* Row checkbox — admin only */}
-      {role === 'admin' && onToggleSelect && (
+      {/* Row checkbox — reassign-capable users (admin + team-leaders) */}
+      {canReassign && onToggleSelect && (
         <td className="px-4 py-3 w-10" onClick={(e) => e.stopPropagation()}>
           <input
             type="checkbox"
@@ -1363,7 +1381,7 @@ const OrderRow = memo(function OrderRow({
       )}
       <td className="px-4 py-3 text-gray-400 dark:text-slate-600 text-xs">{index + 1}</td>
 
-      {role === 'admin' && (
+      {canReassign && (
         <td className="px-4 py-3">
           {agents.length > 0 ? (
             <select
@@ -1647,10 +1665,11 @@ const OrderRow = memo(function OrderRow({
         />
       </td>
 
-      {/* Actions — all roles */}
+      {/* Actions — full edit + hard-delete are ADMIN-only (canDelete); everyone
+          else (agents AND reassigning team-leaders) gets the safe quick-edit. */}
       <td className="px-4 py-3">
         <div className="flex flex-wrap gap-1.5">
-          {role === 'admin' ? (
+          {canDelete ? (
             <>
               <button
                 onClick={() => onEditModal(order)}

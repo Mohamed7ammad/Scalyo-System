@@ -60,10 +60,19 @@ function requireAdminOrAnyPermission(...permissions) {
 /* Restrict order-field edits for EVERY non-admin role (agent AND supervisor).
    A supervisor is a team-leader, not a super-admin: when they inline-edit an
    order they get exactly the same safe field set as an agent — never price or
-   other sensitive columns. Admins remain unrestricted. */
+   other sensitive columns. Admins remain unrestricted.
+
+   ONE exception: a team-leader carrying 'reassign_orders' may also patch
+   "AssignedTo" — that IS their job (the inline reassignment dropdown), and it's
+   the same power the dedicated /transfer + /distribute endpoints already grant
+   them. Plain agents never get it. */
 function filterAgentFields(req, res, next) {
   if (req.user.role !== 'admin') {
-    const forbidden = Object.keys(req.body).filter(f => !AGENT_ALLOWED_FIELDS.has(f));
+    const allowed = new Set(AGENT_ALLOWED_FIELDS);
+    if (Array.isArray(req.user.permissions) && req.user.permissions.includes('reassign_orders')) {
+      allowed.add('AssignedTo');
+    }
+    const forbidden = Object.keys(req.body).filter(f => !allowed.has(f));
     if (forbidden.length > 0) {
       return res.status(403).json({
         error: `غير مسموح للموظف بتعديل: ${forbidden.join(', ')}`,

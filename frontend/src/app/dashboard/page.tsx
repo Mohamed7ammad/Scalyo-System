@@ -3177,10 +3177,10 @@ export default function DashboardPage() {
               </button>
             )}
 
-            {/* ── Transfer selected button — admin only (per-row selection lives
-                 in the admin table UI; team-leaders reassign via the Distribute
-                 modal, which redistributes the whole new-order pool). ── */}
-            {isAdmin && selectedIds.length > 0 && (
+            {/* ── Transfer selected button — admin OR reassigning team-leader.
+                 Per-row selection is now capability-gated (canReassign) in the
+                 table, so supervisors can hand-pick orders and move them A→B. ── */}
+            {canReassign && selectedIds.length > 0 && (
               <button
                 onClick={() => { setXferTargetId(''); setShowXferModal(true); }}
                 className="inline-flex items-center gap-2 px-4 py-2
@@ -3256,11 +3256,13 @@ export default function DashboardPage() {
           <OrdersTable
             orders={displayOrders}
             role={user?.role === 'admin' ? 'admin' : 'agent'}
+            canReassign={canReassign}
+            canDelete={isAdmin}
             onUpdate={handleUpdate}
             onDelete={handleDelete}
             selectedIds={selectedIds}
-            onToggleSelect={isAdmin ? toggleSelection : undefined}
-            onSelectAll={isAdmin ? toggleSelectAll : undefined}
+            onToggleSelect={canReassign ? toggleSelection : undefined}
+            onSelectAll={canReassign ? toggleSelectAll : undefined}
             agents={uniqueAgents}
             showProduct={activeProduct === 'كل المنتجات'}
             onToast={(m, t) => showToast(m, t ?? 'success')}
