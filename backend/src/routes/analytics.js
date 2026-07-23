@@ -1,7 +1,7 @@
 const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
-const { requireAdmin } = require('../middleware/roleGuard');
+const { requireAdmin, requireAdminOrPermission } = require('../middleware/roleGuard');
 const { getExternalAffiliateStats, aggregateSafqaBreakdowns } = require('../services/externalAffiliate');
 const { EARNED_COMMISSION_SQL } = require('../utils/commission');
 
@@ -365,7 +365,7 @@ pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS meta_purchases INT    
 pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "rejectionReason" VARCHAR(255)`)
   .catch(() => {});
 
-router.get('/overview', authenticate, requireAdmin, async (req, res) => {
+router.get('/overview', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
   const { startDate, endDate } = req.query;
 
   try {
@@ -425,7 +425,7 @@ router.get('/overview', authenticate, requireAdmin, async (req, res) => {
 });
 
 /* ── GET /api/analytics/agents — Admin only ──────────────────────── */
-router.get('/agents', authenticate, requireAdmin, async (req, res) => {
+router.get('/agents', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
   const { startDate, endDate } = req.query;
   const params = [req.user.business_id];        // $1 = tenant
   const bizIdx = params.length;

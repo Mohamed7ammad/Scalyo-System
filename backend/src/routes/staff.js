@@ -2,15 +2,48 @@ const express      = require('express');
 const bcrypt       = require('bcryptjs');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
-const { requireAdmin } = require('../middleware/roleGuard');
+const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { checkAndSendStaffAlerts } = require('../services/alerts');
 const { EARNED_COMMISSION_SQL } = require('../utils/commission');
 
 const router = express.Router();
 
 /* Roles the system recognises. 'media_buyer' (ميديا باير) owns Meta ad accounts
-   and sees a data-scoped analytics dashboard. */
-const VALID_ROLES = ['agent', 'admin', 'media_buyer'];
+   and sees a data-scoped analytics dashboard. 'supervisor' (تيم ليدر / team-leader)
+   is a middle tier: manages front-line agents + reassigns orders + views
+   analytics, but is NOT a super-admin (see the guard rails below). */
+const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor'];
+
+/* ── Team-leader (supervisor) guard rails — deny-by-default ──────────────────
+   A supervisor is authorised via the 'manage_staff' permission but must never
+   be able to escalate. These constants bound EXACTLY what a non-admin caller
+   may do through the staff routes; admins are never restricted by them.        */
+const SUPERVISOR_MANAGED_ROLE    = 'agent';   // may only create/edit/suspend agents
+/* The only permission keys a supervisor may grant an agent — nothing that would
+   confer elevated power (no manage_staff / reassign_orders / analytics / inventory). */
+const SUPERVISOR_GRANTABLE_PERMS = ['orders', 'shipping_followups'];
+/* Body fields a supervisor may set. 'role' is allowed but ONLY as 'agent'
+   (enforced separately); commission / agency / financial fields are absent by design. */
+const SUPERVISOR_CREATE_FIELDS = new Set(['name', 'email', 'password', 'role', 'permissions']);
+const SUPERVISOR_EDIT_FIELDS   = new Set(['name', 'role', 'is_active', 'permissions', 'password']);
+
+/* Returns an Arabic error string if a NON-admin (supervisor) caller's payload
+   exceeds the guard rails, or null when the action is permitted. `targetRole`
+   and `isSelf` are only supplied on edits (there is no target on create).      */
+function supervisorViolation({ role, permissions, bodyKeys, allowedFields, targetRole, isSelf }) {
+  if (isSelf) return 'لا يمكنك تعديل حسابك الخاص من هنا';
+  if (targetRole !== undefined && targetRole !== SUPERVISOR_MANAGED_ROLE)
+    return 'لا تملك صلاحية إدارة هذا المستخدم';
+  if (role !== undefined && role !== SUPERVISOR_MANAGED_ROLE)
+    return 'لا يمكنك تعيين هذا الدور';
+  const badFields = bodyKeys.filter((k) => !allowedFields.has(k));
+  if (badFields.length) return `غير مسموح لك بتعديل: ${badFields.join(', ')}`;
+  if (Array.isArray(permissions)) {
+    const badPerms = permissions.filter((p) => !SUPERVISOR_GRANTABLE_PERMS.includes(p));
+    if (badPerms.length) return `صلاحيات غير مسموح بمنحها: ${badPerms.join(', ')}`;
+  }
+  return null;
+}
 
 /* ── Idempotent column migrations ───────────────────────────────────────────
    Each ALTER is fire-and-forget; a failure just logs a warning.              */
@@ -116,7 +149,7 @@ function cleanReferral(v) {
 }
 
 /* ── GET /api/staff ────────────────────────────────────────────────────── */
-router.get('/', authenticate, requireAdmin, async (req, res) => {
+router.get('/', authenticate, requireAdminOrAnyPermission('manage_staff', 'reassign_orders'), async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT
@@ -147,7 +180,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
 });
 
 /* ── POST /api/staff ──────────────────────────────────────────────────── */
-router.post('/', authenticate, requireAdmin, async (req, res) => {
+router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (req, res) => {
   const {
     name             = '',
     email,
@@ -169,6 +202,18 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'الدور يجب أن يكون agent أو admin أو media_buyer' });
   if (password.length < 6)
     return res.status(400).json({ error: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' });
+
+  /* ── Anti-escalation: a non-admin (supervisor) may create ONLY plain agents,
+     with no privileged permissions and no financial/agency fields. ────────── */
+  if (req.user.role !== 'admin') {
+    const violation = supervisorViolation({
+      role:         req.body.role,        // undefined when omitted (defaults to agent)
+      permissions,
+      bodyKeys:     Object.keys(req.body),
+      allowedFields: SUPERVISOR_CREATE_FIELDS,
+    });
+    if (violation) return res.status(403).json({ error: violation });
+  }
 
   const perms = Array.isArray(permissions) && permissions.length > 0
     ? permissions : ['orders'];
@@ -224,7 +269,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 });
 
 /* ── PATCH /api/staff/:id ─────────────────────────────────────────────── */
-router.patch('/:id', authenticate, requireAdmin, async (req, res) => {
+router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), async (req, res) => {
   const { id } = req.params;
   const {
     name, email, password, role, is_active,
@@ -232,6 +277,26 @@ router.patch('/:id', authenticate, requireAdmin, async (req, res) => {
     comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
     referral_code, ad_account_ids,
   } = req.body;
+
+  /* ── Anti-escalation: a non-admin (supervisor) may edit ONLY plain agents,
+     never themselves, never a higher-level user, and only within the safe field
+     + permission allowlists. We resolve the target's CURRENT role first so a
+     supervisor can't touch an admin/supervisor/media_buyer or self-promote. ── */
+  if (req.user.role !== 'admin') {
+    const { rows: tgt } = await pool.query(
+      `SELECT id, role FROM users WHERE id = $1 AND business_id = $2`,
+      [id, req.user.business_id]
+    );
+    if (!tgt.length) return res.status(404).json({ error: 'الموظف غير موجود' });
+    const violation = supervisorViolation({
+      role, permissions,
+      bodyKeys:      Object.keys(req.body),
+      allowedFields: SUPERVISOR_EDIT_FIELDS,
+      targetRole:    tgt[0].role,
+      isSelf:        String(tgt[0].id) === String(req.user.id),
+    });
+    if (violation) return res.status(403).json({ error: violation });
+  }
 
   const sets = [];
   const vals = [];
@@ -393,7 +458,7 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
 });
 
 /* ── POST /api/staff/:id/toggle-attendance ──────────────────────────────── */
-router.post('/:id/toggle-attendance', authenticate, requireAdmin, async (req, res) => {
+router.post('/:id/toggle-attendance', authenticate, requireAdminOrPermission('manage_staff'), async (req, res) => {
   const agentId  = Number(req.params.id);
   const isAbsent = Boolean(req.body.isAbsent);
   const businessId = req.user.business_id;
@@ -494,7 +559,7 @@ router.post('/:id/toggle-attendance', authenticate, requireAdmin, async (req, re
      reset to 0 (excluded from auto-distribution) so the saved set is exactly
      what the admin configured.
    • Tenant-scoped: only the caller's own agents are updated. Admin only.        */
-router.post('/distribution', authenticate, requireAdmin, async (req, res) => {
+router.post('/distribution', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
   const businessId  = req.user.business_id;
   const allocations = Array.isArray(req.body.allocations) ? req.body.allocations : [];
 

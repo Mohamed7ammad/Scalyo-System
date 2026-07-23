@@ -459,18 +459,19 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, [fetchInventory]);
 
-  /* ── Staff list (admin only — powers the transfer modal) ──────── */
+  /* ── Staff list (admin + reassigning team-leaders — powers the transfer/
+     distribute modals and the team pills) ──────────────────────── */
   const fetchStaff = useCallback(async () => {
     try {
       const res = await getStaff();
       setStaff(res.data);
     } catch {
-      // Silently swallow — 403 for non-admins is expected
+      // Silently swallow — 403 for users without the roster permission is expected
     }
   }, []);
 
   useEffect(() => {
-    if (user?.role === 'admin') fetchStaff();
+    if (user?.role === 'admin' || user?.permissions?.includes('reassign_orders')) fetchStaff();
   }, [user, fetchStaff]);
 
   const handleSaveStock = async (shortName: string) => {
@@ -1014,11 +1015,14 @@ export default function DashboardPage() {
 
   /* ── Role-based privacy fence ────────────────────────────────── */
   // This is the ONLY place that enforces visibility.
-  // Agents see exclusively their own assigned orders; admins see everything.
-  // Every derived list and filter below must start from `roleScoped`,
-  // not from the raw `orders` array.
+  // Agents see exclusively their own assigned orders; admins AND team-leaders
+  // (supervisors with 'reassign_orders') see everything — mirrors the server's
+  // canSeeAllOrders fence. Every derived list/filter below must start from
+  // `roleScoped`, not from the raw `orders` array.
+  const canSeeAllOrders =
+    user?.role === 'admin' || !!user?.permissions?.includes('reassign_orders');
   const roleScoped: Order[] =
-    user?.role !== 'admin' && user?.email
+    !canSeeAllOrders && user?.email
       ? orders.filter((o) => o.AssignedTo === user.email)
       : orders;
 
@@ -1269,6 +1273,9 @@ export default function DashboardPage() {
   };
 
   const isAdmin = user?.role === 'admin';
+  // Team-leaders (supervisors) may reassign/distribute the whole order pool, but
+  // NOT the admin-only destructive/financial actions (bulk delete, shipping, AWB).
+  const canReassign = isAdmin || !!user?.permissions?.includes('reassign_orders');
 
   // Returns real stock_quantity from the /api/products table ONLY.
   // Returns null while products are loading so stale numbers from the
@@ -3148,8 +3155,8 @@ export default function DashboardPage() {
               </button>
             )}
 
-            {/* ── Distribute button — admin only (opens distribution modal) ── */}
-            {isAdmin && (
+            {/* ── Distribute button — admin OR reassigning team-leader ── */}
+            {canReassign && (
               <button
                 onClick={openDistModal}
                 disabled={distributing}
@@ -3170,7 +3177,9 @@ export default function DashboardPage() {
               </button>
             )}
 
-            {/* ── Transfer selected button — appears when rows are checked ── */}
+            {/* ── Transfer selected button — admin only (per-row selection lives
+                 in the admin table UI; team-leaders reassign via the Distribute
+                 modal, which redistributes the whole new-order pool). ── */}
             {isAdmin && selectedIds.length > 0 && (
               <button
                 onClick={() => { setXferTargetId(''); setShowXferModal(true); }}

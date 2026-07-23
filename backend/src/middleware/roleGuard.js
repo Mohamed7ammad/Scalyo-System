@@ -42,8 +42,27 @@ function requireAdminOrPermission(permission) {
   };
 }
 
+/**
+ * Like requireAdminOrPermission but passes when the caller's JWT holds ANY ONE
+ * of the given permission keys (admins always pass). Used where a route serves
+ * more than one privileged role — e.g. the staff roster, which both a
+ * team-leader (manage_staff) and a reassigning supervisor (reassign_orders) need.
+ */
+function requireAdminOrAnyPermission(...permissions) {
+  return function (req, res, next) {
+    if (req.user.role === 'admin') return next();
+    const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
+    if (permissions.some((p) => perms.includes(p))) return next();
+    return res.status(403).json({ error: 'مطلوب صلاحيات المدير' });
+  };
+}
+
+/* Restrict order-field edits for EVERY non-admin role (agent AND supervisor).
+   A supervisor is a team-leader, not a super-admin: when they inline-edit an
+   order they get exactly the same safe field set as an agent — never price or
+   other sensitive columns. Admins remain unrestricted. */
 function filterAgentFields(req, res, next) {
-  if (req.user.role === 'agent') {
+  if (req.user.role !== 'admin') {
     const forbidden = Object.keys(req.body).filter(f => !AGENT_ALLOWED_FIELDS.has(f));
     if (forbidden.length > 0) {
       return res.status(403).json({
@@ -54,4 +73,4 @@ function filterAgentFields(req, res, next) {
   next();
 }
 
-module.exports = { requireAdmin, filterAgentFields, requireAdminOrPermission };
+module.exports = { requireAdmin, filterAgentFields, requireAdminOrPermission, requireAdminOrAnyPermission };

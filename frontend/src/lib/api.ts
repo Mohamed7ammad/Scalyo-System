@@ -67,11 +67,15 @@ export interface ShippingResult {
 
 export type PlanType = 'affiliate' | 'ecommerce';
 
+/** Every role the system recognises. 'supervisor' (تيم ليدر) is the middle
+    tier between agent and admin — authorised entirely through `permissions`. */
+export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor';
+
 export interface User {
   id:          number;
   email:       string;
-  role:        'agent' | 'admin' | 'media_buyer';
-  permissions?: string[];   // e.g. ['orders', 'analytics', 'inventory']
+  role:        UserRole;
+  permissions?: string[];   // e.g. ['orders', 'analytics', 'reassign_orders', 'manage_staff']
   business_id?: number | null;
   plan_type?:  PlanType;
 }
@@ -473,7 +477,7 @@ export interface StaffMember {
   id:              number;
   name:            string;
   email:           string;
-  role:            'agent' | 'admin' | 'media_buyer';
+  role:            UserRole;
   is_active:       boolean;
   is_absent:       boolean;
   permissions:     string[];
@@ -492,7 +496,7 @@ export interface CreateStaffPayload {
   name?:            string;
   email:            string;
   password:         string;
-  role?:            'agent' | 'admin' | 'media_buyer';
+  role?:            UserRole;
   permissions?:     string[];
   commission_rate?: number;
   comm_confirmed?:  number;
@@ -508,7 +512,7 @@ export interface UpdateStaffPayload {
   name?:            string;
   email?:           string;
   password?:        string;
-  role?:            'agent' | 'admin' | 'media_buyer';
+  role?:            UserRole;
   is_active?:       boolean;
   permissions?:     string[];
   commission_rate?: number;

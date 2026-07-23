@@ -150,7 +150,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     href: '/dashboard/staff', label: 'إدارة الموظفين',
-    subLabel: 'Team', adminOnly: true,
+    subLabel: 'Team', requiredPermission: 'manage_staff',
     icon: (
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
@@ -505,7 +505,13 @@ export default function Sidebar({
                 {user?.email?.split('@')[0] ?? '—'}
               </p>
               <p className="text-slate-500 dark:text-gray-600 text-[10px] truncate mt-0.5 leading-tight">
-                {user?.role === 'admin' ? 'مدير النظام' : 'موظف تأكيد'}
+                {user?.role === 'admin'
+                  ? 'مدير النظام'
+                  : user?.role === 'supervisor'
+                    ? 'تيم ليدر'
+                    : user?.role === 'media_buyer'
+                      ? 'ميديا باير'
+                      : 'موظف تأكيد'}
               </p>
             </div>
             {/* Theme toggle */}

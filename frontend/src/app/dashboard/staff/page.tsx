@@ -57,7 +57,7 @@ interface FormState {
   name:            string;
   email:           string;
   password:        string;
-  role:            'agent'|'admin'|'media_buyer';
+  role:            'agent'|'admin'|'media_buyer'|'supervisor';
   is_active:       boolean;
   permissions:     string[];
   comm_confirmed:  number;
@@ -149,15 +149,32 @@ function isOnline(lastActiveAt?: string | null): boolean {
 export default function StaffPage() {
   const router = useRouter();
 
-  /* ── Auth guard ─────────────────────────────────────────────── */
-  const [currentUserId, setCurrentUserId] = useState<string | number | null>(null);
+  /* ── Auth guard ─────────────────────────────────────────────────────────────
+     Admins AND team-leaders (supervisors carrying 'manage_staff') may open this
+     page. A supervisor's view is deny-by-default: agents-only, no financials,
+     no privileged permission grants, no hard-delete (see guards below).        */
+  const [currentUserId,   setCurrentUserId]   = useState<string | number | null>(null);
+  const [currentUserRole, setCurrentUserRole] = useState<string>('');
   useEffect(() => {
     try {
       const u = JSON.parse(localStorage.getItem('user') || 'null');
-      if (!u || u.role !== 'admin') { router.replace('/dashboard'); return; }
+      const mayManage = u && (u.role === 'admin' || u.permissions?.includes('manage_staff'));
+      if (!mayManage) { router.replace('/dashboard'); return; }
       setCurrentUserId(u.id ?? null);
+      setCurrentUserRole(u.role ?? '');
     } catch { router.replace('/dashboard'); }
   }, [router]);
+
+  /* Full admin vs. team-leader (supervisor). The supervisor branch strips every
+     escalation surface from the UI — matching the server-side guard rails. */
+  const isAdminUser  = currentUserRole === 'admin';
+  const isSupervisor = !isAdminUser;
+  /* Permission bundle stamped on a freshly-created team-leader (admins only). */
+  const SUPERVISOR_PERMISSIONS = ['orders', 'analytics', 'reassign_orders', 'manage_staff'];
+  /* The only access permissions a supervisor may grant an agent. */
+  const SUPERVISOR_GRANTABLE   = ['orders', 'shipping_followups'];
+  /* A supervisor may act on plain agents only; admins act on everyone. */
+  const canManageRow = (m: StaffMember) => isAdminUser || m.role === 'agent';
 
   /* ── Tab ────────────────────────────────────────────────────── */
   const [activeTab, setActiveTab] = useState<Tab>('staff');
@@ -306,10 +323,14 @@ export default function StaffPage() {
          them for other roles, but we keep the payload clean by sending them only
          when relevant. */
       const isBuyer = form.role === 'media_buyer';
+      /* A team-leader (supervisor) gets a FIXED privileged bundle — the granular
+         permission checkboxes are only meaningful for agents. */
+      const resolvedPermissions =
+        form.role === 'supervisor' ? SUPERVISOR_PERMISSIONS : form.permissions;
       if (editTarget) {
         const payload: UpdateStaffPayload = {
           name: form.name, email: form.email, role: form.role,
-          is_active: form.is_active, permissions: form.permissions,
+          is_active: form.is_active, permissions: resolvedPermissions,
           comm_confirmed: form.comm_confirmed,
           comm_delivered: form.comm_delivered,
           comm_rejected:  form.comm_rejected,
@@ -327,7 +348,7 @@ export default function StaffPage() {
       } else {
         const payload: CreateStaffPayload = {
           name: form.name, email: form.email, password: form.password,
-          role: form.role, permissions: form.permissions,
+          role: form.role, permissions: resolvedPermissions,
           comm_confirmed: form.comm_confirmed,
           comm_delivered: form.comm_delivered,
           comm_rejected:  form.comm_rejected,
@@ -529,7 +550,10 @@ export default function StaffPage() {
         border border-slate-200 dark:border-slate-800 rounded-2xl p-1 w-fit shadow-sm">
         {([
           { key:'staff',     label:'قائمة الموظفين',  icon:'👥' },
-          { key:'analytics', label:'تحليلات الأداء',  icon:'📊' },
+          /* Performance tab embeds commission-settings + cash payout controls
+             (financial) — admins only. Supervisors use the dedicated Analytics
+             page for read-only performance. */
+          ...(isAdminUser ? [{ key:'analytics' as const, label:'تحليلات الأداء', icon:'📊' }] : []),
         ] as const).map(t => (
           <button key={t.key} onClick={() => setActiveTab(t.key)}
             className={`flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-medium transition-all duration-150
@@ -640,9 +664,10 @@ export default function StaffPage() {
                         <td className="px-5 py-4">
                           <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
                             ${m.role==='admin'?'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'
+                              :m.role==='supervisor'?'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300'
                               :m.role==='media_buyer'?'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
                               :'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
-                            {m.role==='admin'?'مدير':m.role==='media_buyer'?'ميديا باير':'وكيل'}
+                            {m.role==='admin'?'مدير':m.role==='supervisor'?'تيم ليدر':m.role==='media_buyer'?'ميديا باير':'وكيل'}
                           </span>
                         </td>
                         <td className="px-5 py-4">
@@ -695,15 +720,19 @@ export default function StaffPage() {
                                 {m.is_absent?'تسجيل حضور':'تسجيل غياب'}
                               </button>
                             )}
-                            <button onClick={() => openEdit(m)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-400 transition-all">
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                              </svg>
-                            </button>
+                            {/* Edit — supervisors may only edit plain agents */}
+                            {canManageRow(m) && (
+                              <button onClick={() => openEdit(m)}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-400 transition-all">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                                </svg>
+                              </button>
+                            )}
 
-                            {/* Delete — hidden for the current user and the founding admin (the system owner) */}
-                            {String(m.id) !== String(currentUserId) && String(m.id) !== String(ownerAdminId) && (
+                            {/* Delete — ADMIN ONLY (supervisors suspend via edit, never hard-delete);
+                                also hidden for the current user and the founding admin (system owner) */}
+                            {isAdminUser && String(m.id) !== String(currentUserId) && String(m.id) !== String(ownerAdminId) && (
                               <button
                                 onClick={() => handleDelete(m)}
                                 disabled={deletingId === m.id}
@@ -1622,12 +1651,20 @@ export default function StaffPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">الدور</label>
-                  <select value={form.role} onChange={e => setForm(f => ({...f,role:e.target.value as 'agent'|'admin'|'media_buyer'}))}
-                    className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition">
-                    <option value="agent">وكيل تأكيد</option>
-                    <option value="media_buyer">ميديا باير</option>
-                    <option value="admin">مدير النظام</option>
-                  </select>
+                  {isSupervisor ? (
+                    /* Team-leaders may only ever create/edit plain agents. */
+                    <div className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 cursor-not-allowed">
+                      وكيل تأكيد
+                    </div>
+                  ) : (
+                    <select value={form.role} onChange={e => setForm(f => ({...f,role:e.target.value as FormState['role']}))}
+                      className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition">
+                      <option value="agent">وكيل تأكيد</option>
+                      <option value="supervisor">تيم ليدر</option>
+                      <option value="media_buyer">ميديا باير</option>
+                      <option value="admin">مدير النظام</option>
+                    </select>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">الحالة</label>
@@ -1701,8 +1738,19 @@ export default function StaffPage() {
                 </div>
               )}
 
-              {/* Commission matrix — agents only */}
-              {form.role === 'agent' && (
+              {/* Team-leader (supervisor) role — fixed privileged bundle, no checkboxes */}
+              {form.role === 'supervisor' && (
+                <div className="rounded-xl border border-teal-200 dark:border-teal-900/40 bg-teal-50/60 dark:bg-teal-900/10 p-3.5">
+                  <p className="text-xs font-bold text-teal-700 dark:text-teal-400 mb-1">صلاحيات التيم ليدر</p>
+                  <p className="text-[11px] text-teal-700/80 dark:text-teal-300/70 leading-relaxed">
+                    يرى كل الطلبات ويعيد توزيعها بين الوكلاء، ويطّلع على التحليلات، ويضيف/يوقف الوكلاء —
+                    دون الوصول إلى الخزينة أو الإعدادات المالية والحساسة.
+                  </p>
+                </div>
+              )}
+
+              {/* Commission matrix — agents only, and NEVER editable by a supervisor (financial) */}
+              {form.role === 'agent' && !isSupervisor && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">
                     هيكل العمولات <span className="text-slate-400 font-normal">(0 = بدون عمولة)</span>
@@ -1740,7 +1788,8 @@ export default function StaffPage() {
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">صلاحيات الوصول</label>
                   <div className="rounded-xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
-                    {ALL_PERMISSIONS.map(perm => {
+                    {/* A supervisor may only grant a safe subset; admins grant anything. */}
+                    {ALL_PERMISSIONS.filter(perm => isAdminUser || SUPERVISOR_GRANTABLE.includes(perm.key)).map(perm => {
                       const checked = form.permissions.includes(perm.key);
                       return (
                         <label key={perm.key}

@@ -1,7 +1,15 @@
 const express       = require('express');
 const pool          = require('../config/db');
 const authenticate  = require('../middleware/auth');
-const { requireAdmin, filterAgentFields } = require('../middleware/roleGuard');
+const { requireAdmin, filterAgentFields, requireAdminOrPermission } = require('../middleware/roleGuard');
+
+/* Callers who may see + act on the WHOLE tenant order pool: full admins, and
+   team-leaders (supervisors) carrying the 'reassign_orders' permission. Anyone
+   else is fenced to their own assigned rows. */
+function canSeeAllOrders(user) {
+  return user.role === 'admin'
+    || (Array.isArray(user.permissions) && user.permissions.includes('reassign_orders'));
+}
 
 const router = express.Router();
 
@@ -164,7 +172,7 @@ function buildOrderScope(req, include = {}) {
   // the match scope (Postgres' default LIKE escape char is backslash).
   const escLike = (s) => s.replace(/[\\%_]/g, '\\$&');
 
-  if (req.user.role !== 'admin') {
+  if (!canSeeAllOrders(req.user)) {
     params.push(req.user.email);
     where.push(`"AssignedTo" = $${params.length}`);
   } else if (incAgent && typeof req.query.agent === 'string' && req.query.agent.trim()) {
@@ -779,7 +787,7 @@ router.post('/bulk', authenticate, async (req, res) => {
 
 // POST /api/orders/bulk-transfer — admin only
 // Transfers all 'جديد' orders from one agent to another.
-router.post('/bulk-transfer', authenticate, requireAdmin, async (req, res) => {
+router.post('/bulk-transfer', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
   const { fromAgent, toAgent } = req.body;
 
   if (!fromAgent || !toAgent) {
@@ -813,7 +821,7 @@ const getShortName = (name) => { return name ? name.trim().split(/\s+/).slice(0,
 /* ── POST /api/orders/auto-distribute — admin only ───────────────────────────
    Finds all "جديد" orders with no AssignedTo value and distributes them
    round-robin across every active + present agent, inside a transaction.      */
-router.post('/auto-distribute', authenticate, requireAdmin, async (req, res) => {
+router.post('/auto-distribute', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
   const businessId = req.user.business_id;
   /* LOST-ORDER ISOLATION: live distribution must NEVER pull lost orders, and the
      dedicated lost page's "توزيع الطلبات المفقودة" button must touch ONLY lost orders.
@@ -913,7 +921,7 @@ function apportion(total, weights) {
                                                         → exact %-based split
                                                           (percentages must sum to 100)
    The backend owns the math (atomic, no order IDs round-tripped to the client). */
-router.post('/distribute', authenticate, requireAdmin, async (req, res) => {
+router.post('/distribute', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
   const businessId = req.user.business_id;
   const mode = req.body?.mode === 'custom' ? 'custom' : 'equal';
 
@@ -1039,7 +1047,7 @@ router.post('/distribute', authenticate, requireAdmin, async (req, res) => {
 /* ── POST /api/orders/transfer — admin only ──────────────────────────────────
    Transfers a specific set of order IDs to a target agent (identified by DB
    user id).  Looks up the agent's email and updates AssignedTo for each row.  */
-router.post('/transfer', authenticate, requireAdmin, async (req, res) => {
+router.post('/transfer', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
   const { orderIds, targetAgentId } = req.body;
 
   if (!Array.isArray(orderIds) || orderIds.length === 0) {
