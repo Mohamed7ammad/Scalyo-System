@@ -169,8 +169,13 @@ export default function StaffPage() {
      escalation surface from the UI — matching the server-side guard rails. */
   const isAdminUser  = currentUserRole === 'admin';
   const isSupervisor = !isAdminUser;
-  /* Permission bundle stamped on a freshly-created team-leader (admins only). */
-  const SUPERVISOR_PERMISSIONS = ['orders', 'analytics', 'reassign_orders', 'manage_staff'];
+  /* Financial UI (commissions, payouts, balances) is admin-only. Supervisors see
+     the SAME performance analytics minus every money column/control. */
+  const showFinancials = isAdminUser;
+  /* Permission bundle stamped on a freshly-created team-leader (admins only).
+     Deliberately NO 'analytics' — team-leaders never see the financial dashboard;
+     their agent-performance view is authorised through 'manage_staff'. */
+  const SUPERVISOR_PERMISSIONS = ['orders', 'reassign_orders', 'manage_staff'];
   /* The only access permissions a supervisor may grant an agent. */
   const SUPERVISOR_GRANTABLE   = ['orders', 'shipping_followups'];
   /* A supervisor may act on plain agents only; admins act on everyone. */
@@ -550,10 +555,11 @@ export default function StaffPage() {
         border border-slate-200 dark:border-slate-800 rounded-2xl p-1 w-fit shadow-sm">
         {([
           { key:'staff',     label:'قائمة الموظفين',  icon:'👥' },
-          /* Performance tab embeds commission-settings + cash payout controls
-             (financial) — admins only. Supervisors use the dedicated Analytics
-             page for read-only performance. */
-          ...(isAdminUser ? [{ key:'analytics' as const, label:'تحليلات الأداء', icon:'📊' }] : []),
+          /* Performance tab — visible to admins AND team-leaders. The financial
+             controls inside it (commission settings, cash payouts, balances) are
+             gated separately by `showFinancials`, so supervisors see performance
+             (order counts, confirmation/delivery rates) only. */
+          { key:'analytics' as const, label:'تحليلات الأداء', icon:'📊' },
         ] as const).map(t => (
           <button key={t.key} onClick={() => setActiveTab(t.key)}
             className={`flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-medium transition-all duration-150
@@ -643,14 +649,15 @@ export default function StaffPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-200 dark:border-slate-700/60">
-                      {['#','الموظف','البريد الإلكتروني','الدور','الحالة','الحضور','العمولة','الإجراءات'].map(h => (
+                      {['#','الموظف','البريد الإلكتروني','الدور','الحالة','الحضور',
+                        ...(showFinancials ? ['العمولة'] : []), 'الإجراءات'].map(h => (
                         <th key={h} className="text-right text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide px-5 py-4 whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {filtered.length === 0 ? (
-                      <tr><td colSpan={8} className="text-center py-16 text-slate-400 text-sm">{search?'لا توجد نتائج مطابقة':'لا يوجد موظفون — أضف أول موظف'}</td></tr>
+                      <tr><td colSpan={showFinancials ? 8 : 7} className="text-center py-16 text-slate-400 text-sm">{search?'لا توجد نتائج مطابقة':'لا يوجد موظفون — أضف أول موظف'}</td></tr>
                     ) : filtered.map((m, idx) => (
                       <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                         <td className="px-5 py-4 text-slate-400 dark:text-slate-600 tabular-nums">{idx+1}</td>
@@ -698,16 +705,18 @@ export default function StaffPage() {
                             </span>
                           ) : <span className="text-xs text-slate-300 dark:text-slate-700">—</span>}
                         </td>
-                        <td className="px-5 py-4">
-                          {m.role === 'agent' && (toN(m.comm_confirmed) > 0 || toN(m.comm_delivered) > 0 || toN(m.comm_rejected) > 0 || toN(m.comm_no_answer) > 0) ? (
-                            <div className="flex flex-col gap-0.5">
-                              {toN(m.comm_confirmed)  > 0 && <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400">تأكيد: {toN(m.comm_confirmed)} ج.م</span>}
-                              {toN(m.comm_delivered)  > 0 && <span className="text-[10px] font-bold text-teal-700 dark:text-teal-400">توصيل: +{toN(m.comm_delivered)} ج.م</span>}
-                              {toN(m.comm_rejected)   > 0 && <span className="text-[10px] font-bold text-red-600 dark:text-red-400">رفض: {toN(m.comm_rejected)} ج.م</span>}
-                              {toN(m.comm_no_answer)  > 0 && <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400">لا يرد: {toN(m.comm_no_answer)} ج.م</span>}
-                            </div>
-                          ) : <span className="text-xs text-slate-300 dark:text-slate-700">—</span>}
-                        </td>
+                        {showFinancials && (
+                          <td className="px-5 py-4">
+                            {m.role === 'agent' && (toN(m.comm_confirmed) > 0 || toN(m.comm_delivered) > 0 || toN(m.comm_rejected) > 0 || toN(m.comm_no_answer) > 0) ? (
+                              <div className="flex flex-col gap-0.5">
+                                {toN(m.comm_confirmed)  > 0 && <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400">تأكيد: {toN(m.comm_confirmed)} ج.م</span>}
+                                {toN(m.comm_delivered)  > 0 && <span className="text-[10px] font-bold text-teal-700 dark:text-teal-400">توصيل: +{toN(m.comm_delivered)} ج.م</span>}
+                                {toN(m.comm_rejected)   > 0 && <span className="text-[10px] font-bold text-red-600 dark:text-red-400">رفض: {toN(m.comm_rejected)} ج.م</span>}
+                                {toN(m.comm_no_answer)  > 0 && <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400">لا يرد: {toN(m.comm_no_answer)} ج.م</span>}
+                              </div>
+                            ) : <span className="text-xs text-slate-300 dark:text-slate-700">—</span>}
+                          </td>
+                        )}
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-2">
                             {m.role==='agent' && (
@@ -810,8 +819,13 @@ export default function StaffPage() {
               icon={<svg className="w-5 h-5 text-indigo-600 dark:text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>}/>
             <KpiCard label="متوسط معدل التأكيد" value={`${avgConfirmRate}%`} sub={`${aTotals.confirmed.toLocaleString()} طلب مؤكد`} accent="emerald"
               icon={<svg className="w-5 h-5 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}/>
-            <KpiCard label="إجمالي العمولات" value={fmtMoney(aTotals.commission)} sub={`${aTotals.delivered.toLocaleString()} توصيل مكتمل`} accent="amber"
-              icon={<svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}/>
+            {showFinancials ? (
+              <KpiCard label="إجمالي العمولات" value={fmtMoney(aTotals.commission)} sub={`${aTotals.delivered.toLocaleString()} توصيل مكتمل`} accent="amber"
+                icon={<svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}/>
+            ) : (
+              <KpiCard label="إجمالي التوصيل" value={aTotals.delivered.toLocaleString()} sub="طلب تم توصيله" accent="emerald"
+                icon={<svg className="w-5 h-5 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>}/>
+            )}
             <KpiCard label="تحت المراقبة (تسليم < 50%)" value={flagged===0?'لا أحد ✓':`${flagged} موظف`} sub={flagged>0?(drCriticalCount>0?`منهم ${drCriticalCount} حرج (< 45%) — إيقاف تعامل`:'راجع جودة التأكيد فوراً'):'جميع معدلات التسليم طبيعية'} accent={flagged>0?'red':'slate'}
               icon={<svg className={`w-5 h-5 ${flagged>0?'text-red-600 dark:text-red-400':'text-slate-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>}/>
           </div>
@@ -845,14 +859,15 @@ export default function StaffPage() {
                 <table className="w-full text-sm">
                   <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
                     <tr>
-                      {['#','الموظف','إجمالي','معدل التأكيد','عدم الرد','الرفض','تم التوصيل','المرتجعات','قيمة العمولة','عمولة الفترة','الرصيد المتبقي الإجمالي'].map(h => (
+                      {['#','الموظف','إجمالي','معدل التأكيد','عدم الرد','الرفض','تم التوصيل','المرتجعات',
+                        ...(showFinancials ? ['قيمة العمولة','عمولة الفترة','الرصيد المتبقي الإجمالي'] : [])].map(h => (
                         <th key={h} className="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {ranked.length === 0 ? (
-                      <tr><td colSpan={11} className="text-center py-12 text-slate-400 text-sm">لا توجد بيانات للفترة المحددة</td></tr>
+                      <tr><td colSpan={showFinancials ? 11 : 8} className="text-center py-12 text-slate-400 text-sm">لا توجد بيانات للفترة المحددة</td></tr>
                     ) : ranked.map((agent, i) => {
                       const total = toN(agent.total_assigned), confirmed = toN(agent.status_confirmed);
                       const noAns     = toN(agent.status_no_answer);   // لا يرد only
@@ -1034,6 +1049,8 @@ export default function StaffPage() {
                             {confirmed>0 && <Bar value={rPct} color={drFlagged?'red':'amber'}/>}
                           </td>
 
+                          {/* ── Financial columns — ADMIN ONLY (hidden from team-leaders) ── */}
+                          {showFinancials && (<>
                           {/* ── Commission settings button (not for the synthetic row) ── */}
                           <td className="px-4 py-2.5" onClick={e => e.stopPropagation()}>
                             {isUnassigned ? (
@@ -1112,12 +1129,13 @@ export default function StaffPage() {
                               );
                             })()}
                           </td>
+                          </>)}
                         </tr>
 
                         {/* ── Accordion detail row ── */}
                         {isExpanded && (
                           <tr key={`${agent.agent_id}-detail`} className="bg-slate-50/60 dark:bg-slate-800/30 border-b border-slate-100 dark:border-slate-800/60">
-                            <td colSpan={11} className="px-6 py-5">
+                            <td colSpan={showFinancials ? 11 : 8} className="px-6 py-5">
 
                               {/* ── Stacked distribution bar (top) ── */}
                               {total > 0 ? (
@@ -1299,8 +1317,8 @@ export default function StaffPage() {
                                   </div>
                                 </div>
 
-                                {/* ── Card 4: الفاتورة ── */}
-                                {hasMatrix ? (
+                                {/* ── Card 4: الفاتورة — ADMIN ONLY (commission detail is financial) ── */}
+                                {showFinancials && (hasMatrix ? (
                                   <div className="bg-amber-50/80 dark:bg-amber-950/25 border border-amber-200/70 dark:border-amber-700/40 rounded-xl p-4 flex flex-col">
                                     <div className="flex items-center gap-2 pb-2.5 border-b border-amber-200/60 dark:border-amber-700/30 mb-3.5">
                                       <span className="text-sm">💰</span>
@@ -1360,7 +1378,7 @@ export default function StaffPage() {
                                     <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">لم يُحدَّد هيكل عمولات</p>
                                     <p className="text-[10px] text-slate-400 dark:text-slate-600">افتح «إعدادات العمولة» لتفعيل الفاتورة</p>
                                   </div>
-                                )}
+                                ))}
 
                               </div>
                             </td>
@@ -1377,7 +1395,7 @@ export default function StaffPage() {
                   <span className="font-bold text-slate-600 dark:text-slate-400">المجاميع:</span>
                   <span className="text-slate-700 dark:text-slate-300"><span className="font-bold text-slate-900 dark:text-white">{aTotals.assigned.toLocaleString()}</span> طلب</span>
                   <span className="text-emerald-700 dark:text-emerald-400"><span className="font-bold">{avgConfirmRate}%</span> متوسط التأكيد</span>
-                  <span className="text-amber-700 dark:text-amber-400 font-bold">{fmtMoney(aTotals.commission)} إجمالي العمولات</span>
+                  {showFinancials && <span className="text-amber-700 dark:text-amber-400 font-bold">{fmtMoney(aTotals.commission)} إجمالي العمولات</span>}
                   {flagged>0 && <span className="text-red-600 dark:text-red-400 font-bold flex items-center gap-1">🚩 {flagged} تحت المراقبة</span>}
                 </div>
               )}

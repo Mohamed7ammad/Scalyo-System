@@ -20,6 +20,7 @@ interface NavItem {
   adminOnly?:          boolean;   // true = admins only; no permission check
   agentOnly?:          boolean;   // true = agents only (hidden from admins)
   affiliateOnly?:      boolean;   // true = visible only to plan_type === 'affiliate'
+  hideForRoles?:       string[];  // roles explicitly denied this link, even if a permission would allow it
   requiredPermission?: string;    // if set, user must have this key (or be admin)
   icon:                React.ReactNode;
   children?:           NavChild[];   // optional sub-links shown when parent is active
@@ -39,6 +40,9 @@ const NAV_ITEMS: NavItem[] = [
   {
     href: '/dashboard/analytics', label: 'لوحة التحكم والتحليلات',
     subLabel: 'Analytics', requiredPermission: 'analytics',
+    /* Financial dashboard — never shown to team-leaders (they get the orders
+       system + the non-financial performance tab in Staff instead). */
+    hideForRoles: ['supervisor'],
     icon: (
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
@@ -270,6 +274,8 @@ export default function Sidebar({
   const canSee = (item: NavItem): boolean => {
     // Affiliate-plan tenants only ever see a restricted set of links.
     if (user?.plan_type === 'affiliate' && !AFFILIATE_ALLOWED.has(item.href)) return false;
+    // Role-level denylist wins over any permission that would otherwise allow it.
+    if (item.hideForRoles && user?.role && item.hideForRoles.includes(user.role)) return false;
     // Affiliate-exclusive links are hidden from every other plan.
     if (item.affiliateOnly)      return user?.plan_type === 'affiliate';
     if (item.adminOnly)          return user?.role === 'admin';

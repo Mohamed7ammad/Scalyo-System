@@ -528,6 +528,10 @@ export default function AnalyticsDashboard() {
       /* Admins get the "filter by Media Buyer" dropdown; media buyers see a locked,
          self-scoped view (no dropdown) — the backend enforces the scope either way. */
       setIsAdmin(u.role === 'admin');
+      /* Team-leaders (supervisors) are NEVER allowed on the financial analytics
+         dashboard — bounce them to the orders system regardless of any stale
+         'analytics' permission. */
+      if (u.role === 'supervisor') { router.replace('/dashboard'); return; }
       /* Admins and Media Buyers always have analytics access. Other roles need
          the explicit 'analytics' permission. */
       if (u.role !== 'admin' && u.role !== 'media_buyer') {

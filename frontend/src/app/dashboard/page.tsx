@@ -1472,8 +1472,8 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* ── Team filter — admin only ──────────────────────────────── */}
-        {isAdmin && uniqueAgents.length > 0 && (
+        {/* ── Team filter — admin OR reassigning team-leader ─────────── */}
+        {canReassign && uniqueAgents.length > 0 && (
           <div className="bg-white dark:bg-slate-900 rounded-2xl
             border border-slate-200 dark:border-slate-800 px-4 py-3.5 shadow-sm">
             <p className="text-xs font-semibold text-slate-400 dark:text-slate-500

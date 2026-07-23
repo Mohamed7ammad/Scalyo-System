@@ -1,7 +1,7 @@
 const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
-const { requireAdmin, requireAdminOrPermission } = require('../middleware/roleGuard');
+const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { getExternalAffiliateStats, aggregateSafqaBreakdowns } = require('../services/externalAffiliate');
 const { EARNED_COMMISSION_SQL } = require('../utils/commission');
 
@@ -425,7 +425,11 @@ router.get('/overview', authenticate, requireAdminOrPermission('analytics'), asy
 });
 
 /* ── GET /api/analytics/agents — Admin only ──────────────────────── */
-router.get('/agents', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
+/* Agent PERFORMANCE leaderboard. Reachable two ways with DIFFERENT visibility:
+     • financial access (admin OR 'analytics') → full rows incl. commissions.
+     • team-management access ('manage_staff', i.e. team-leaders) → PERFORMANCE
+       ONLY; every commission / payout / balance field is stripped below. */
+router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'manage_staff'), async (req, res) => {
   const { startDate, endDate } = req.query;
   const params = [req.user.business_id];        // $1 = tenant
   const bizIdx = params.length;
@@ -565,6 +569,28 @@ router.get('/agents', authenticate, requireAdminOrPermission('analytics'), async
         total_paid:          0,
         outstanding_balance: 0,
       });
+    }
+
+    /* ── Financial redaction — deny-by-default for team-leaders ────────────────
+       A supervisor reaches this endpoint via 'manage_staff' (team management),
+       NOT financial access. Strip every money field by ROLE (never trust a stale
+       'analytics' permission on a supervisor token) so agent commissions, payouts
+       and balances are fully isolated from them. Admins + real analytics users
+       keep the full payload. */
+    const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
+    const canSeeFinancials =
+      req.user.role !== 'supervisor' && (req.user.role === 'admin' || perms.includes('analytics'));
+    if (!canSeeFinancials) {
+      const FINANCIAL_KEYS = [
+        'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
+        'earned_commission', 'lifetime_commission', 'total_paid', 'outstanding_balance',
+      ];
+      const redacted = merged.map((row) => {
+        const clean = { ...row };
+        for (const k of FINANCIAL_KEYS) delete clean[k];
+        return clean;
+      });
+      return res.json(redacted);
     }
 
     res.json(merged);

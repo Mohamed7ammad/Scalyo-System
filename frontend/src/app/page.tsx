@@ -23,7 +23,9 @@ export default function LoginPage() {
     localStorage.setItem('token', token);
     localStorage.setItem('user',  JSON.stringify(user));
     const perms: string[] = user.permissions ?? ['orders'];
-    if (user.role === 'admin' || perms.includes('analytics')) {
+    /* Team-leaders (supervisors) land on the orders system — never the financial
+       analytics dashboard — even if a stale 'analytics' permission lingers. */
+    if (user.role !== 'supervisor' && (user.role === 'admin' || perms.includes('analytics'))) {
       router.push('/dashboard/analytics');
     } else {
       router.push('/dashboard');
