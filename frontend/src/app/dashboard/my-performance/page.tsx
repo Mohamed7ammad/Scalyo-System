@@ -143,7 +143,16 @@ export default function MyPerformancePage() {
   const cancelled = toN(data?.status_cancelled);
   const noAnswer  = toN(data?.status_no_answer);
   const postponed = toN(data?.status_postponed);
-  const earned    = toN(data?.earned_commission);
+  const earned    = toN(data?.earned_commission);   // THIS period only (date-filtered)
+
+  /* ── All-time Employee Ledger (NOT affected by the date filter) ──────────────
+     The three numbers an agent must see so a past payout is never "forgotten":
+       lifetimeEarned = every commission earned, ever
+       totalPaid      = everything the admin has already settled
+       outstanding    = what is still owed right now (earned − paid).            */
+  const lifetimeEarned = toN(data?.lifetime_commission);
+  const totalPaid      = toN(data?.total_paid);
+  const outstanding    = toN(data?.outstanding_balance);
 
   /* Commission rates (per-agent matrix). Default to the business standard
      (4 ج.م / confirmed, 1 ج.م / no-answer) when a rate isn't configured. */
@@ -214,14 +223,75 @@ export default function MyPerformancePage() {
 
         {!loading && !error && data && (
           <>
+            {/* ── Financial ledger — ALL-TIME, never affected by the date filter ──
+                Three unambiguous numbers so a paid-out agent never mistakes their
+                gross earnings for what they are still owed. */}
+            <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700/50 rounded-2xl p-5 sm:p-6 shadow-sm">
+              <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                <h2 className="text-base font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  <span>🏦</span> رصيدي المالي
+                </h2>
+                <span className="text-[11px] font-semibold text-gray-400 dark:text-slate-500 bg-gray-100 dark:bg-slate-700/50 px-2.5 py-1 rounded-full">
+                  إجمالي كل الفترات — لا يتأثر بفلتر التاريخ
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+
+                {/* Total Earned (gross, all-time) */}
+                <div className="rounded-xl border border-gray-100 dark:border-slate-700/50 bg-gray-50/60 dark:bg-slate-900/40 p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="w-7 h-7 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-sm">💰</span>
+                    <p className="text-xs font-medium text-gray-500 dark:text-slate-400">إجمالي العمولات</p>
+                  </div>
+                  <p className="text-2xl sm:text-3xl font-extrabold text-gray-900 dark:text-white tabular-nums leading-none">
+                    {lifetimeEarned.toFixed(0)}<span className="text-sm font-bold text-gray-400 dark:text-slate-500 mr-1">ج.م</span>
+                  </p>
+                  <p className="text-[11px] text-gray-400 dark:text-slate-500 mt-1.5">كل ما استحققته منذ البداية</p>
+                </div>
+
+                {/* Total Paid */}
+                <div className="rounded-xl border border-gray-100 dark:border-slate-700/50 bg-gray-50/60 dark:bg-slate-900/40 p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="w-7 h-7 rounded-full bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center text-sm">✅</span>
+                    <p className="text-xs font-medium text-gray-500 dark:text-slate-400">ما تم سداده</p>
+                  </div>
+                  <p className="text-2xl sm:text-3xl font-extrabold text-teal-600 dark:text-teal-400 tabular-nums leading-none">
+                    {totalPaid.toFixed(0)}<span className="text-sm font-bold text-teal-500/60 dark:text-teal-500/50 mr-1">ج.م</span>
+                  </p>
+                  <p className="text-[11px] text-gray-400 dark:text-slate-500 mt-1.5">تم صرفه لك بالفعل</p>
+                </div>
+
+                {/* Remaining Balance — the number that matters */}
+                <div className={`rounded-xl border-2 p-4 ${outstanding > 0.009
+                  ? 'border-indigo-300 dark:border-indigo-700/60 bg-indigo-50/70 dark:bg-indigo-900/20'
+                  : 'border-emerald-300 dark:border-emerald-700/60 bg-emerald-50/70 dark:bg-emerald-900/20'}`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`w-7 h-7 rounded-full flex items-center justify-center text-sm ${outstanding > 0.009
+                      ? 'bg-indigo-100 dark:bg-indigo-900/40' : 'bg-emerald-100 dark:bg-emerald-900/40'}`}>🏦</span>
+                    <p className={`text-xs font-bold ${outstanding > 0.009
+                      ? 'text-indigo-700 dark:text-indigo-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                      المستحق (المتبقي)
+                    </p>
+                  </div>
+                  <p className={`text-2xl sm:text-3xl font-black tabular-nums leading-none ${outstanding > 0.009
+                    ? 'text-indigo-700 dark:text-indigo-300' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                    {Math.max(0, outstanding).toFixed(0)}<span className="text-sm font-bold opacity-60 mr-1">ج.م</span>
+                  </p>
+                  <p className="text-[11px] text-gray-400 dark:text-slate-500 mt-1.5">
+                    {outstanding > 0.009 ? 'إجمالي العمولات − ما تم سداده' : 'تم سداد كامل مستحقاتك ✓'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
             {/* ── Stat cards (commission math integrated) ─────────── */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 
-              {/* Card 1 — Total commission */}
+              {/* Card 1 — THIS PERIOD's commission (date-filtered, NOT what's owed) */}
               <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700/50 rounded-2xl p-6 shadow-sm">
                 <div className="flex items-center justify-between mb-4">
-                  <p className="text-sm font-medium text-gray-500 dark:text-slate-400">إجمالي العمولات المستحقة</p>
-                  <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-lg">💰</div>
+                  <p className="text-sm font-medium text-gray-500 dark:text-slate-400">عمولة هذه الفترة</p>
+                  <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-lg">📅</div>
                 </div>
                 <p className="text-4xl font-extrabold text-gray-900 dark:text-white tabular-nums leading-none">
                   {earned.toFixed(0)}

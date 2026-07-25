@@ -615,12 +615,55 @@ router.get('/my-performance', authenticate, async (req, res) => {
 
   const sql = buildAgentSql(joinOn, `WHERE u.email = $1 AND u.business_id = $${bizIdx}::integer`);
 
+  /* ── All-time Employee-Ledger balance (date-INDEPENDENT) ────────────────────
+     `earned_commission` above is the SELECTED PERIOD's earnings. But a payout
+     settles the agent's LIFETIME balance, so an agent must see three distinct
+     numbers or they think a past payout never happened:
+       lifetime_commission = earned over ALL orders ever (same formula)
+       total_paid          = Σ logged payouts (all-time)
+       outstanding_balance = lifetime_commission − total_paid  (what is owed NOW)
+     Identical to GET /agents so the agent's own view matches the admin's. Uses
+     only $1 (email) + $2 (tenant) — never the date params.                     */
+  const lifetimeSql = `
+    SELECT
+      ${EARNED_COMMISSION_SQL}         AS lifetime_commission,
+      COALESCE(pay.total_paid, 0)      AS total_paid
+    FROM users u
+    LEFT JOIN orders o
+      ON LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email)) AND o.business_id = $2::integer
+    LEFT JOIN (
+      SELECT user_id, SUM(amount) AS total_paid
+      FROM employee_payouts
+      WHERE business_id = $2::integer
+      GROUP BY user_id
+    ) pay ON pay.user_id = u.id
+    WHERE u.email = $1 AND u.business_id = $2::integer
+    GROUP BY u.id, u.comm_confirmed, u.comm_delivered,
+             u.comm_rejected, u.comm_no_answer, pay.total_paid
+  `;
+
   try {
     const result = await pool.query(sql, params);
     if (!result.rows.length) {
       return res.status(404).json({ error: 'المستخدم غير موجود' });
     }
-    res.json(result.rows[0]);
+
+    /* Guarded so a missing employee_payouts table (pre-migration) degrades to
+       earned-only instead of a 500. */
+    const life = await pool.query(lifetimeSql, [req.user.email, req.user.business_id]).catch((e) => {
+      console.warn('[analytics/my-performance] lifetime balance unavailable:', e.message);
+      return { rows: [] };
+    });
+    const L        = life.rows[0];
+    const lifetime = L ? (parseFloat(L.lifetime_commission) || 0) : 0;
+    const paid     = L ? (parseFloat(L.total_paid)          || 0) : 0;
+
+    res.json({
+      ...result.rows[0],
+      lifetime_commission: parseFloat(lifetime.toFixed(2)),
+      total_paid:          parseFloat(paid.toFixed(2)),
+      outstanding_balance: parseFloat((lifetime - paid).toFixed(2)),
+    });
   } catch (err) {
     console.error('[analytics/my-performance] SQL error:', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
