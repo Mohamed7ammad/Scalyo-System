@@ -435,7 +435,11 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
   const bizIdx = params.length;
   const joinOn = buildJoinOn(params, startDate, endDate, bizIdx);
 
-  const sql = buildAgentSql(joinOn, `WHERE u.role = 'agent' AND u.business_id = $${bizIdx}::integer`) + `
+  /* Include 'supervisor' so a PROMOTED agent keeps their historical performance +
+     commission attributed to THEM. Their orders (orders."AssignedTo" = their email)
+     are never touched by a role change, so without this they'd silently fall into
+     the "غير محدد" bucket below and look "lost". Admins/media-buyers stay excluded. */
+  const sql = buildAgentSql(joinOn, `WHERE u.role IN ('agent', 'supervisor') AND u.business_id = $${bizIdx}::integer`) + `
     ORDER BY
       COUNT(o.id) FILTER (WHERE o."Status" IN (
         'تم التأكيد', 'تم الشحن', 'تم التوصيل',
@@ -466,7 +470,7 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
       WHERE business_id = $1::integer
       GROUP BY user_id
     ) pay ON pay.user_id = u.id
-    WHERE u.role = 'agent' AND u.business_id = $1::integer
+    WHERE u.role IN ('agent', 'supervisor') AND u.business_id = $1::integer
     GROUP BY u.id, u.comm_confirmed, u.comm_delivered,
              u.comm_rejected, u.comm_no_answer, pay.total_paid
   `;
@@ -495,9 +499,10 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
     });
 
     /* ── Synthetic "غير محدد" (unassigned) bucket ───────────────────────────────
-       Captures every order in the period that does NOT belong to any role='agent'
-       user — AssignedTo NULL / empty, or assigned to an admin / media_buyer /
-       deleted user. The per-agent rows only cover agent-owned orders, so without
+       Captures every order in the period that does NOT belong to any agent OR
+       supervisor user — AssignedTo NULL / empty, or assigned to an admin /
+       media_buyer / deleted user. The per-agent rows only cover agent-owned orders,
+       so without
        this bucket their sum is LESS than the dashboard (which counts ALL tenant
        orders). Same metric definitions as a real agent; commission/ledger fields
        are 0 (orphaned orders earn no agent commission). The NOT EXISTS check uses
@@ -536,7 +541,7 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
       WHERE o.business_id = $1::integer
         AND NOT EXISTS (
           SELECT 1 FROM users u
-           WHERE u.role = 'agent'
+           WHERE u.role IN ('agent', 'supervisor')
              AND u.business_id = $1::integer
              AND LOWER(TRIM(u.email)) = LOWER(TRIM(COALESCE(o."AssignedTo", '')))
         )
