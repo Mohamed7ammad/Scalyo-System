@@ -13,12 +13,76 @@ function canSeeAllOrders(user) {
 
 const router = express.Router();
 
+/* ── Orders whose assignment is LOCKED against reassignment ──────────────────
+   Once an agent has committed work on an order (confirmed it, or it has moved
+   downstream to shipping/delivery/return, or they rejected it) that order —
+   and its earned commission — belongs to that agent. A team-leader transfer or
+   an inline reassignment must NEVER sweep these up (the "orders disappear after
+   confirmation" production bug). Only OPEN states (جديد / لا يرد / مؤجل …) may be
+   reassigned to balance workload. Admins are never blocked (they own the data). */
+const PROTECTED_TRANSFER_STATUSES = [
+  'تم التأكيد',      // confirmed
+  'تم الشحن',        // shipped
+  'تم التوصيل',      // delivered
+  'جاري الإعادة',    // returning
+  'تم الإرجاع',      // returned
+  'تم الرفض',        // rejected
+];
+const isProtectedStatus = (s) => PROTECTED_TRANSFER_STATUSES.includes(String(s ?? '').trim());
+
 /* ── Idempotent migration: add "sku" column to orders if absent ─────────────
    Same pattern used by shipping.js for BostaTrackingCode.
    Safe to run on every restart.                                              */
 pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "sku" VARCHAR(100)`)
   .then(() => console.log('✅  Orders: "sku" column ready'))
   .catch((err) => console.warn('⚠️   Orders sku column check:', err.message));
+
+/* ── Assignment audit trail ─────────────────────────────────────────────────
+   Every AssignedTo change (team-leader transfer, inline dropdown, bulk transfer)
+   is logged here so an admin can see exactly WHO moved an order FROM whom TO whom,
+   WHEN, and by which action. Idempotent bootstrap; safe on every restart.      */
+pool.query(`
+  CREATE TABLE IF NOT EXISTS order_assignment_log (
+    id            SERIAL       PRIMARY KEY,
+    order_id      INTEGER      NOT NULL,
+    business_id   INTEGER,
+    from_agent    TEXT,
+    to_agent      TEXT,
+    changed_by    TEXT,          -- email of the actor (admin / team-leader)
+    changed_by_id VARCHAR,
+    source        VARCHAR(30),   -- 'transfer' | 'inline' | 'bulk-transfer' | 'distribute'
+    order_status  TEXT,          -- order status at the moment of the change
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  )
+`)
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS order_assignment_log_order_idx ON order_assignment_log (order_id, business_id)`))
+  .then(() => console.log('✅  Orders: order_assignment_log ready'))
+  .catch((err) => console.warn('⚠️   order_assignment_log check:', err.message));
+
+/* Fire-and-forget batch insert of assignment-change rows. A logging failure must
+   NEVER break the actual transfer, so every error is swallowed with a warning.
+   `rows` = [{ orderId, fromAgent, toAgent, status }]. */
+async function recordAssignmentLog(rows, { businessId, changedBy, changedById, source }) {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  const values = [];
+  const params = [];
+  let i = 1;
+  for (const r of rows) {
+    params.push(r.orderId, businessId, r.fromAgent ?? null, r.toAgent ?? null,
+                changedBy ?? null, changedById ?? null, source, r.status ?? null);
+    values.push(`($${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`);
+  }
+  try {
+    await pool.query(
+      `INSERT INTO order_assignment_log
+         (order_id, business_id, from_agent, to_agent, changed_by, changed_by_id, source, order_status)
+       VALUES ${values.join(',')}`,
+      params
+    );
+  } catch (e) {
+    console.warn('[assignment-log] insert skipped:', e.message);
+  }
+}
 
 /* Locks the product's WAC at confirmation time so historical profitability
    stays accurate even after cost_price is updated by a new supply batch.   */
@@ -795,6 +859,8 @@ router.post('/bulk-transfer', authenticate, requireAdminOrPermission('reassign_o
   }
 
   try {
+    /* Only 'جديد' orders move — committed work stays with its agent (matches
+       /transfer's guard; a bulk agent→agent move must never steal confirmed COD). */
     const result = await pool.query(
       `UPDATE orders
        SET    "AssignedTo" = $1,
@@ -804,6 +870,12 @@ router.post('/bulk-transfer', authenticate, requireAdminOrPermission('reassign_o
          AND  business_id  = $3
        RETURNING id`,
       [toAgent, fromAgent, req.user.business_id]
+    );
+
+    /* Audit trail — bulk agent→agent move (all rows are 'جديد'). */
+    await recordAssignmentLog(
+      result.rows.map((r) => ({ orderId: r.id, fromAgent, toAgent, status: 'جديد' })),
+      { businessId: req.user.business_id, changedBy: req.user.email, changedById: req.user.id, source: 'bulk-transfer' }
     );
 
     res.json({
@@ -1068,22 +1140,87 @@ router.post('/transfer', authenticate, requireAdminOrPermission('reassign_orders
     }
     const targetEmail = agentResult.rows[0].email;
 
-    const result = await pool.query(
-      `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW() WHERE id = ANY($2::int[]) AND business_id = $3 RETURNING id`,
-      [targetEmail, orderIds, req.user.business_id]
+    /* ── Snapshot the candidate orders FIRST (current owner + status) ──────────
+       so we can (a) skip committed/confirmed orders, and (b) log from→to. */
+    const { rows: candidates } = await pool.query(
+      `SELECT id, "AssignedTo" AS from_agent, "Status" AS status
+         FROM orders WHERE id = ANY($1::int[]) AND business_id = $2`,
+      [orderIds, req.user.business_id]
+    );
+
+    /* CRITICAL GUARD: never reassign an order an agent has already committed
+       (confirmed / shipped / delivered / returned / rejected). This is what was
+       silently stealing agents' confirmed orders when a team-leader transferred
+       a stale multi-selection. Skipped orders are reported back to the UI. */
+    const movable = candidates.filter((o) => !isProtectedStatus(o.status));
+    const skipped = candidates.filter((o) =>  isProtectedStatus(o.status));
+    const movableIds = movable.map((o) => o.id);
+
+    let transferredIds = [];
+    if (movableIds.length) {
+      /* The status guard is re-asserted in the WHERE so a confirmation landing
+         BETWEEN the snapshot and this write still can't be swept up (race-safe). */
+      const result = await pool.query(
+        `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+          WHERE id = ANY($2::int[]) AND business_id = $3
+            AND "Status" <> ALL($4::text[])
+          RETURNING id`,
+        [targetEmail, movableIds, req.user.business_id, PROTECTED_TRANSFER_STATUSES]
+      );
+      transferredIds = result.rows.map((r) => r.id);
+    }
+
+    /* Audit trail — one row per order actually moved. */
+    const movedSet = new Set(transferredIds);
+    await recordAssignmentLog(
+      movable.filter((o) => movedSet.has(o.id)).map((o) => ({
+        orderId: o.id, fromAgent: o.from_agent, toAgent: targetEmail, status: o.status,
+      })),
+      { businessId: req.user.business_id, changedBy: req.user.email, changedById: req.user.id, source: 'transfer' }
     );
 
     console.log(
-      `[Transfer] ✅ ${result.rows.length} orders → "${targetEmail}"`
+      `[Transfer] ✅ ${transferredIds.length} orders → "${targetEmail}" by ${req.user.email}` +
+      (skipped.length ? ` | ⛔ skipped ${skipped.length} committed order(s)` : '')
     );
 
+    const msg = skipped.length
+      ? `تم نقل ${transferredIds.length} طلب إلى ${targetEmail}. تم تجاهل ${skipped.length} طلب لأنها مؤكدة/قيد المعالجة بالفعل.`
+      : `تم نقل ${transferredIds.length} طلب إلى ${targetEmail}`;
+
     res.json({
-      message:     `تم نقل ${result.rows.length} طلب إلى ${targetEmail}`,
-      transferred: result.rows.length,
+      message:     msg,
+      transferred: transferredIds.length,
+      skipped:     skipped.length,
+      skippedIds:  skipped.map((o) => o.id),
       targetEmail,
     });
   } catch (err) {
     console.error('[transfer]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── GET /api/orders/:id/assignment-log ─────────────────────────────────────
+   Assignment audit trail for one order: who moved it FROM whom TO whom, when,
+   and by which action. Admins + reassigning team-leaders may read it. Newest
+   first. Tenant-scoped. */
+router.get('/:id/assignment-log', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
+  const orderId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(orderId)) {
+    return res.status(400).json({ error: 'معرّف الطلب غير صالح' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, order_id, from_agent, to_agent, changed_by, source, order_status, created_at
+         FROM order_assignment_log
+        WHERE order_id = $1 AND business_id = $2
+        ORDER BY created_at DESC, id DESC`,
+      [orderId, req.user.business_id]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[assignment-log GET]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
@@ -1226,10 +1363,11 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
   let currentProductPrice = '';
   let currentQty          = 1;
   let currentStockDeducted = false;
+  let currentAssignedTo   = null;   // for the inline-reassignment guard + audit log
 
   try {
     const row = await pool.query(
-      `SELECT "Status", "ProductName", "sku", "ProductPrice",
+      `SELECT "Status", "ProductName", "sku", "ProductPrice", "AssignedTo",
               COALESCE("quantity", 1) AS quantity,
               COALESCE("stock_deducted", false) AS stock_deducted
          FROM orders WHERE id = $1 AND business_id = $2`,
@@ -1245,9 +1383,23 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     currentProductPrice = row.rows[0].ProductPrice ?? '';
     currentQty          = Math.max(1, parseInt(row.rows[0].quantity, 10) || 1);
     currentStockDeducted = row.rows[0].stock_deducted === true;
+    currentAssignedTo   = row.rows[0].AssignedTo ?? null;
   } catch (err) {
     console.error('Step 1 – fetch order failed:', err.message);
     return res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+
+  /* ── Inline reassignment guard ──────────────────────────────────────────────
+     If this PATCH changes AssignedTo (the inline "الموظف المسؤول" dropdown), a
+     NON-admin (team-leader) may NOT move an order that is already committed —
+     same rule as the multi-select /transfer. Admins keep full control. This
+     closes the single-order path to stealing a confirmed order. */
+  if (Object.prototype.hasOwnProperty.call(updates, 'AssignedTo')
+      && req.user.role !== 'admin'
+      && isProtectedStatus(currentStatus)) {
+    return res.status(403).json({
+      error: 'لا يمكن إعادة تعيين طلب تم تأكيده أو معالجته بالفعل.',
+    });
   }
 
   /* ── Step 1b: Recalculate total price when quantity changes ─────────
@@ -1312,6 +1464,17 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
       return res.status(404).json({ error: 'الطلب غير موجود' });
     }
     updatedOrder = result.rows[0];
+
+    /* Audit trail — log an inline AssignedTo change once it has actually landed
+       and the owner really differs (a no-op re-select of the same agent isn't a
+       transfer). Fire-and-forget so it can never fail the update. */
+    if (Object.prototype.hasOwnProperty.call(updates, 'AssignedTo')
+        && String(updates.AssignedTo ?? '') !== String(currentAssignedTo ?? '')) {
+      recordAssignmentLog(
+        [{ orderId: Number(id), fromAgent: currentAssignedTo, toAgent: updatedOrder.AssignedTo, status: currentStatus }],
+        { businessId, changedBy: req.user.email, changedById: req.user.id, source: 'inline' }
+      );
+    }
   } catch (err) {
     console.error('PATCH Order Error (Step 2 – update failed):', err.message);
     console.error('  → SET clause fields:', fields);

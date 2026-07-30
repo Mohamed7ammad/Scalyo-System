@@ -783,19 +783,28 @@ export default function DashboardPage() {
     setXferSaving(true);
     try {
       const res = await transferOrders(selectedIds, xferTargetId as number);
-      const { transferred, targetEmail } = res.data;
+      const { transferred, skipped = 0, skippedIds = [], targetEmail } = res.data;
+      /* Only reflect the orders the backend ACTUALLY moved — never optimistically
+         reassign the committed/confirmed ones it refused to touch. */
+      const skippedSet = new Set(skippedIds);
       setOrders((prev) =>
         prev.map((o) =>
-          selectedIds.includes(o.id) ? { ...o, AssignedTo: targetEmail } : o
+          selectedIds.includes(o.id) && !skippedSet.has(o.id)
+            ? { ...o, AssignedTo: targetEmail }
+            : o
         )
       );
       showToast(
-        `تم نقل ${transferred} طلب بنجاح إلى ${targetEmail.split('@')[0]}`,
-        'success'
+        skipped > 0
+          ? `تم نقل ${transferred} طلب إلى ${targetEmail.split('@')[0]} — وتم تجاهل ${skipped} طلب مؤكد/قيد المعالجة`
+          : `تم نقل ${transferred} طلب بنجاح إلى ${targetEmail.split('@')[0]}`,
+        skipped > 0 ? 'error' : 'success'
       );
       setShowXferModal(false);
       setSelectedIds([]);
       setXferTargetId('');
+      // Pull fresh server state so any skipped rows show their true owner/status.
+      silentRefresh();
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||

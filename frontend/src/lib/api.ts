@@ -238,6 +238,8 @@ export interface AutoDistributeResult {
 export interface TransferResult {
   message:     string;
   transferred: number;
+  skipped?:    number;    // orders left untouched because they were already committed
+  skippedIds?: number[];  // their ids — so the UI never optimistically reassigns them
   targetEmail: string;
 }
 
