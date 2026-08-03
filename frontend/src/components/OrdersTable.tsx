@@ -37,6 +37,39 @@ const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
    a plain "2026-06-02" passes through unchanged. */
 const toDateInput = (v?: string | null) => (v ? String(v).slice(0, 10) : '');
 
+/* ── New-order cooldown ─────────────────────────────────────────────────────
+   The confirmation team must NOT call a customer in the first 15 minutes after
+   they place an order. A 'جديد' order younger than this is in cooldown: its
+   confirm control is locked and a waiting badge shown until the window passes. */
+const NEW_ORDER_COOLDOWN_MIN = 15;
+
+/* Western digits → Arabic-Indic (٠١٢…) so elapsed labels read natively. */
+const toArabicNum = (n: number) => Number(n).toLocaleString('ar-EG', { useGrouping: false });
+
+/* Whole minutes elapsed since an ISO timestamp, measured against `now` (ms).
+   Returns Infinity for an unparseable/missing date so it never traps a row in
+   cooldown. */
+const minutesSince = (iso: string | null | undefined, now: number): number => {
+  const t = iso ? new Date(iso).getTime() : NaN;
+  if (!Number.isFinite(t)) return Infinity;
+  return Math.floor((now - t) / 60000);
+};
+
+/* Arabic "time ago" with correct singular/dual/plural grammar and Arabic-Indic
+   numerals, e.g. الآن · منذ دقيقة · منذ ٥ دقائق · منذ ٢٠ دقيقة · منذ ساعتين · منذ ٣ أيام. */
+const timeAgoArabic = (iso: string | null | undefined, now: number): string => {
+  const min = minutesSince(iso, now);
+  if (!Number.isFinite(min) || min < 0) return '';
+  if (min < 1) return 'الآن';
+  const unit = (n: number, one: string, two: string, few: string, many: string) =>
+    n === 1 ? one : n === 2 ? two : n <= 10 ? few : many;
+  if (min < 60) return `منذ ${toArabicNum(min)} ${unit(min, 'دقيقة', 'دقيقتين', 'دقائق', 'دقيقة')}`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `منذ ${toArabicNum(hr)} ${unit(hr, 'ساعة', 'ساعتين', 'ساعات', 'ساعة')}`;
+  const day = Math.floor(hr / 24);
+  return `منذ ${toArabicNum(day)} ${unit(day, 'يوم', 'يومين', 'أيام', 'يوم')}`;
+};
+
 // All possible statuses — used in the admin full-edit modal only.
 // INVARIANT: this list must contain EVERY status the system can ever write
 // (including the webhook-set return states). A <select> whose value is missing
@@ -144,6 +177,16 @@ function OrdersTable({
   onToast,
   onEndReached, hasMore = false, loadingMore = false,
 }: Props) {
+  /* Ticking clock (30s) so the "منذ …" labels stay fresh and a new order's
+     15-minute cooldown flips to actionable automatically — no refetch needed, so
+     pagination/scroll are never disturbed. Only visible (virtualised) rows read
+     it, so the re-render cost is a handful of rows. */
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
   const [savingId,        setSavingId]        = useState<number | null>(null);
   const [editModal,       setEditModal]       = useState<Order | null>(null);
   const [editForm,        setEditForm]        = useState<Partial<Order>>({});
@@ -463,6 +506,7 @@ function OrdersTable({
                     role={role}
                     canReassign={canReassign}
                     canDelete={canDelete}
+                    now={now}
                     selected={selectedIds.includes(order.id)}
                     saving={savingId === order.id}
                     agents={agents}
@@ -1322,6 +1366,7 @@ interface OrderRowProps {
   role:                 'admin' | 'agent';
   canReassign:          boolean;   // row checkbox + inline reassignment dropdown
   canDelete:            boolean;   // full edit modal + hard-delete action (admin)
+  now:                  number;    // ticking clock (ms) for elapsed-time + cooldown
   selected:             boolean;
   saving:               boolean;
   agents:               string[];
@@ -1341,6 +1386,11 @@ interface OrderRowProps {
 }
 
 function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
+  /* The 30s clock only affects the DISPLAY of 'جديد' rows (elapsed label +
+     cooldown). Every other row ignores `now` and stays fully memoised, so the
+     tick re-renders only the handful of visible new orders. */
+  const clockMatters =
+    normStatus(prev.order.Status) === 'جديد' || normStatus(next.order.Status) === 'جديد';
   return (
     prev.order === next.order &&          // immutable update → new ref only for the edited row
     prev.index === next.index &&
@@ -1351,16 +1401,28 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
     prev.saving === next.saving &&
     prev.inlineLogging === next.inlineLogging &&
     prev.attemptLogs === next.attemptLogs &&
+    (!clockMatters || prev.now === next.now) &&
     sameRefArray(prev.agents, next.agents)   // string[] → value compare
   );
 }
 
 const OrderRow = memo(function OrderRow({
-  order, index, rowRef, role, canReassign, canDelete, selected, saving, agents, attemptLogs, inlineLogging,
+  order, index, rowRef, role, canReassign, canDelete, now, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onShippingNotesBlur, onInlineAttempt,
   onQuickEdit, onEditModal, onDelete,
 }: OrderRowProps) {
+  /* ── New-order 15-minute cooldown ──────────────────────────────────────────
+     A brand-new order ('جديد') placed less than 15 minutes ago is on hold: the
+     team must not call yet. `elapsedMin` drives both the elapsed label and the
+     lock; once it crosses 15 the 30s clock flips `inCooldown` to false and the
+     confirm control unlocks on its own. */
+  const isNewOrder   = normStatus(order.Status) === 'جديد';
+  const elapsedMin   = minutesSince(order.createdAt, now);
+  const inCooldown   = isNewOrder && elapsedMin < NEW_ORDER_COOLDOWN_MIN;
+  const remainingMin = Math.max(0, NEW_ORDER_COOLDOWN_MIN - elapsedMin);
+  const elapsedLabel = timeAgoArabic(order.createdAt, now);
+
   return (
     <tr
       ref={rowRef}
@@ -1514,22 +1576,46 @@ const OrderRow = memo(function OrderRow({
           returned orders look new and letting one click overwrite the real
           status in the DB. Admin overrides now live in the edit modal only. */}
       <td className="px-4 py-3">
-        {MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status)) ? (
-          <select
-            /* normalized so a stray space / RTL mark in the DB value can never
-               unmatch the options and fall back to displaying 'جديد' */
-            value={normStatus(order.Status)}
-            onChange={(e) => onStatusChange(order, e.target.value)}
-            className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer outline-none
-              focus:ring-2 focus:ring-indigo-400 border-0
-              [&>option]:bg-white [&>option]:text-slate-900
-              dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
-              ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
-          >
-            {MANUAL_STATUS_OPTIONS.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
+        {inCooldown ? (
+          /* ── 15-minute new-order cooldown — confirm control LOCKED ──────────
+             The <select> is intentionally not rendered so the team cannot call /
+             confirm yet. It reappears (enabled) the moment `elapsedMin` ≥ 15. */
+          <div className="flex flex-col items-start gap-1">
+            <span
+              title="لا يمكن التأكيد قبل مرور ربع ساعة على تسجيل الطلب"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+                bg-amber-100 text-amber-800 border border-amber-200
+                dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700/50 select-none cursor-not-allowed"
+            >
+              <span aria-hidden>⏳</span> انتظار ربع ساعة
+            </span>
+            <span className="text-[10px] text-amber-600 dark:text-amber-400/80 leading-tight">
+              {elapsedLabel} · متبقٍ {toArabicNum(remainingMin)} {remainingMin === 2 ? 'دقيقتان' : remainingMin >= 3 && remainingMin <= 10 ? 'دقائق' : 'دقيقة'}
+            </span>
+          </div>
+        ) : MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status)) ? (
+          <>
+            <select
+              /* normalized so a stray space / RTL mark in the DB value can never
+                 unmatch the options and fall back to displaying 'جديد' */
+              value={normStatus(order.Status)}
+              onChange={(e) => onStatusChange(order, e.target.value)}
+              className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer outline-none
+                focus:ring-2 focus:ring-indigo-400 border-0
+                [&>option]:bg-white [&>option]:text-slate-900
+                dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
+                ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
+            >
+              {MANUAL_STATUS_OPTIONS.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+            {/* Elapsed-since-creation, shown for new orders that have cleared the
+                cooldown so the team still sees how long the order has waited. */}
+            {isNewOrder && elapsedLabel && (
+              <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-1 leading-tight">{elapsedLabel}</div>
+            )}
+          </>
         ) : (
           <span
             title="هذه الحالة تُضبط تلقائياً عبر شركة الشحن"
