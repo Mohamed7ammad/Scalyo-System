@@ -647,6 +647,16 @@ router.post('/bosta', async (req, res) => {
         [newOrderStatus, order.id, businessId]
       );
       console.log(`✅  Order #${order.id} status → "${newOrderStatus}"`);
+      /* Stamp shipped_at once if this forward event is what moved the order to
+         'تم الشحن' (e.g. a parcel dispatched/created directly on Bosta's side).
+         Idempotent — first ship time wins, mirrors the delivered_at stamp below. */
+      if (newOrderStatus === 'تم الشحن') {
+        await pool.query(
+          `UPDATE orders SET shipped_at = COALESCE(shipped_at, NOW())
+           WHERE id = $1 AND business_id = $2 AND shipped_at IS NULL`,
+          [order.id, businessId]
+        );
+      }
     } else {
       console.log(`[Bosta Webhook] Status "${statusStr}" is unmapped — order row left unchanged`);
     }

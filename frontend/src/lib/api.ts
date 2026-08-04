@@ -29,6 +29,7 @@ export interface Order {
   AssignedTo?: string;
   PostponedDate?: string;
   BostaTrackingCode?: string;   // set after successful Bosta shipment
+  shipped_at?: string | null;   // exact ISO timestamp the order first reached 'تم الشحن'
   rejectionReason?: string;     // set when Status is 'تم الرفض'
   sku?: string;                 // SKU Shield: links order to inventory product for precise deduction
   hasDeposit?: boolean;         // true when a deposit / down-payment was collected

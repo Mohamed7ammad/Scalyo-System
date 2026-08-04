@@ -55,6 +55,22 @@ const minutesSince = (iso: string | null | undefined, now: number): number => {
   return Math.floor((now - t) / 60000);
 };
 
+/* Format an ISO timestamp as `DD/MM/YYYY - hh:mm AM/PM` in Egypt local time
+   (Africa/Cairo), independent of the viewer's browser timezone. Used for the
+   exact "shipped at" stamp. e.g. 04/08/2026 - 02:30 PM. */
+const formatShippedAt = (iso: string | null | undefined): string => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Africa/Cairo',
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  }).formatToParts(d);
+  const p = (t: string) => parts.find((x) => x.type === t)?.value ?? '';
+  return `${p('day')}/${p('month')}/${p('year')} - ${p('hour')}:${p('minute')} ${p('dayPeriod')}`;
+};
+
 /* Arabic "time ago" with correct singular/dual/plural grammar and Arabic-Indic
    numerals, e.g. الآن · منذ دقيقة · منذ ٥ دقائق · منذ ٢٠ دقيقة · منذ ساعتين · منذ ٣ أيام. */
 const timeAgoArabic = (iso: string | null | undefined, now: number): string => {
@@ -1628,6 +1644,24 @@ const OrderRow = memo(function OrderRow({
             </svg>
             {order.Status}
           </span>
+        )}
+
+        {/* Exact shipping timestamp — shown directly below the 'تم الشحن' badge.
+            Independent of the 'جديد' cooldown branch above, so the two never
+            interact. Hidden gracefully when shipped_at is absent (historical rows). */}
+        {normStatus(order.Status) === 'تم الشحن' && order.shipped_at && (
+          <div
+            title="وقت شحن الطلب"
+            className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-medium
+              text-slate-500 dark:text-slate-400 tabular-nums leading-tight"
+            dir="ltr"
+          >
+            <svg className="w-3 h-3 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            {formatShippedAt(order.shipped_at)}
+          </div>
         )}
 
         {order.Status === 'تم الرفض' && order.rejectionReason && (

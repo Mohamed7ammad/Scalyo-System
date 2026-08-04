@@ -503,11 +503,14 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
           bostaRes.data?.data?._id            ??
           'N/A';
 
-        /* Persist the tracking code and advance the status */
+        /* Persist the tracking code and advance the status. shipped_at is stamped
+           once here (COALESCE, first-write-wins) — this dispatch IS the moment the
+           order becomes 'تم الشحن' for the vast majority of orders. */
         await pool.query(
           `UPDATE orders
            SET "BostaTrackingCode" = $1,
-               "Status"            = 'تم الشحن'
+               "Status"            = 'تم الشحن',
+               shipped_at          = COALESCE(shipped_at, NOW())
            WHERE id = $2 AND business_id = $3`,
           [String(trackingCode), order.id, businessId]
         );

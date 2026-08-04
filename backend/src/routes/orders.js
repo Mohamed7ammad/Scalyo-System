@@ -90,6 +90,18 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "unit_cost_price" NUMERI
   .then(() => console.log('✅  Orders: "unit_cost_price" column ready'))
   .catch((err) => console.warn('⚠️   Orders unit_cost_price column check:', err.message));
 
+/* ── shipped_at — the exact moment an order first reached 'تم الشحن' ──────────
+   A DEDICATED timestamp (never updated_at, which any later edit would move). It
+   is stamped idempotently — COALESCE(shipped_at, NOW()), first-write-wins — at
+   every transition into 'تم الشحن': Bosta dispatch (shipping.js /forward), a
+   manual status PATCH, and a forward-mapped Bosta webhook event. Mirrors the
+   existing delivered_at column exactly. Historical rows shipped before this
+   migration have shipped_at = NULL (the UI simply shows no timestamp).         */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipped_at TIMESTAMPTZ`)
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS orders_shipped_at_idx ON orders (shipped_at)`))
+  .then(() => console.log('✅  Orders: shipped_at column + index ready'))
+  .catch((err) => console.warn('⚠️   Orders shipped_at migration skipped:', err.message));
+
 /* ── Order quantity ─────────────────────────────────────────────────────────
    Number of units in the order. Defaults to 1 for all legacy/imported rows.
    Used by the Bosta return webhook to restock the EXACT number of units, and
@@ -387,7 +399,7 @@ router.get('/', authenticate, async (req, res) => {
       o."Note", o."ShippingNotes", o."createdAt", o."ProductName", o."ProductPrice",
       o."quantity", o."AssignedTo", o."PostponedDate", o."BostaTrackingCode",
       o."rejectionReason", o."sku", o."hasDeposit", o."depositAmount",
-      o."unit_cost_price", o.no_answer_logs, o.is_lost_order`;
+      o."unit_cost_price", o.no_answer_logs, o.is_lost_order, o.shipped_at`;
 
     let cursorClause = '';
     if (typeof req.query.cursor === 'string' && req.query.cursor.includes('|')) {
@@ -1451,8 +1463,15 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
   const fields     = Object.keys(updates);
   const values     = Object.values(updates);
   // Always stamp the action time so analytics date-filters see the update today.
-  const setClauses = fields.map((f, i) => `"${f}" = $${i + 1}`).join(', ')
+  let   setClauses = fields.map((f, i) => `"${f}" = $${i + 1}`).join(', ')
                    + ', "updatedAt" = NOW()';
+
+  /* Dedicated shipped_at stamp the moment this PATCH moves the order to 'تم الشحن'.
+     Idempotent (COALESCE keeps the first ship time) and a fixed SQL literal — no
+     user parameter — so a later edit that re-touches the row never shifts it. */
+  if (String(updates.Status ?? '').trim() === 'تم الشحن') {
+    setClauses += ', shipped_at = COALESCE(shipped_at, NOW())';
+  }
 
   let updatedOrder;
   try {
