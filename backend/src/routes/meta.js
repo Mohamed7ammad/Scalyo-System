@@ -742,6 +742,24 @@ async function syncSingleAccount(acct, startDate, endDate) {
   let nextUrl      = firstUrl;
   let pagesFetched = 0;
 
+  /* ── TEMP DIAGNOSTIC — verify the EXACT token attached to this request ───────
+     There is no caching on the token read (loadMetaAccounts runs a fresh
+     pool.query every sync), so if Meta still returns 190 this pins down which of
+     two things is happening. Compare the preview below against what
+     GET /api/meta/config shows and the meta_accounts row you updated:
+       • prefixes DIFFER  → the sync is reading a DIFFERENT row than the one you
+         edited (check is_active = TRUE and that business_id matches the account).
+       • prefixes MATCH but 190 persists → the token STRING itself is rejected by
+         Meta (invalid / already-expired short-lived user token / truncated on
+         paste). Regenerate as a System-User token (never expires) and re-paste.
+     Masked (first 10 + last 4 only) — never logs the full secret. Remove once
+     the token issue is resolved. */
+  console.log(
+    `[meta/syncSingleAccount] account #${metaAccountId} "${acct.accountName}" | ` +
+    `act_${adAccountId} | token length=${accessToken.length} | ` +
+    `token=${accessToken.slice(0, 10)}…${accessToken.slice(-4)}`
+  );
+
   while (nextUrl) {
     if (pagesFetched >= MAX_PAGES) {
       console.warn(`[meta/runSync] ⚠️  Reached MAX_PAGES (${MAX_PAGES}) safety cap — stopping pagination.`);
