@@ -258,9 +258,12 @@ router.post('/config', authenticate, requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'معرف حساب الإعلانات يجب أن يحتوي على أرقام فقط (بدون act_)' });
   }
 
+  const client = await pool.connect();
   try {
-    /* Upsert both keys atomically — scoped to the caller's tenant */
-    await pool.query(`
+    await client.query('BEGIN');
+
+    /* 1. Legacy settings keys — still read by GET /config for the masked preview. */
+    await client.query(`
       INSERT INTO settings (key, value, updated_at, business_id) VALUES
         ('meta_ad_account_id', $1, NOW(), $3),
         ('meta_access_token',  $2, NOW(), $3)
@@ -269,7 +272,25 @@ router.post('/config', authenticate, requireAdmin, async (req, res) => {
             updated_at = NOW()
     `, [cleanAccountId, rawToken, req.user.business_id]);
 
-    console.log(`✅  Meta config saved — account: ${cleanAccountId}, token length: ${rawToken.length}`);
+    /* 2. CRITICAL — mirror the token into meta_accounts, the ONLY source the sync
+       engine (runMetaSync → loadMetaAccounts) reads. Without this the settings
+       write above is invisible to the sync and it keeps using the OLD token — the
+       exact bug behind the persistent code 190. Upsert on the per-tenant unique
+       key (ad_account_id, business_id): a new ad account is created; an existing
+       one has ONLY its token refreshed (+ reactivated + touched), preserving its
+       name and Media-Buyer assignment. Same act_-stripped id + trimmed token the
+       sync expects, so both stores stay in lock-step from here on. */
+    await client.query(`
+      INSERT INTO meta_accounts (account_name, ad_account_id, access_token, is_active, updated_at, business_id)
+      VALUES ($1, $2, $3, TRUE, NOW(), $4)
+      ON CONFLICT (ad_account_id, business_id) DO UPDATE
+        SET access_token = EXCLUDED.access_token,
+            is_active    = TRUE,
+            updated_at   = NOW()
+    `, ['الحساب الرئيسي', cleanAccountId, rawToken, req.user.business_id]);
+
+    await client.query('COMMIT');
+    console.log(`✅  Meta config saved (settings + meta_accounts) — account: ${cleanAccountId}, token length: ${rawToken.length}`);
 
     res.json({
       message: 'تم حفظ بيانات Meta بنجاح',
@@ -277,8 +298,11 @@ router.post('/config', authenticate, requireAdmin, async (req, res) => {
       tokenLength: rawToken.length,
     });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('[meta/config POST] Error:', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
+  } finally {
+    client.release();
   }
 });
 
@@ -742,24 +766,6 @@ async function syncSingleAccount(acct, startDate, endDate) {
   let nextUrl      = firstUrl;
   let pagesFetched = 0;
 
-  /* ── TEMP DIAGNOSTIC — verify the EXACT token attached to this request ───────
-     There is no caching on the token read (loadMetaAccounts runs a fresh
-     pool.query every sync), so if Meta still returns 190 this pins down which of
-     two things is happening. Compare the preview below against what
-     GET /api/meta/config shows and the meta_accounts row you updated:
-       • prefixes DIFFER  → the sync is reading a DIFFERENT row than the one you
-         edited (check is_active = TRUE and that business_id matches the account).
-       • prefixes MATCH but 190 persists → the token STRING itself is rejected by
-         Meta (invalid / already-expired short-lived user token / truncated on
-         paste). Regenerate as a System-User token (never expires) and re-paste.
-     Masked (first 10 + last 4 only) — never logs the full secret. Remove once
-     the token issue is resolved. */
-  console.log(
-    `[meta/syncSingleAccount] account #${metaAccountId} "${acct.accountName}" | ` +
-    `act_${adAccountId} | token length=${accessToken.length} | ` +
-    `token=${accessToken.slice(0, 10)}…${accessToken.slice(-4)}`
-  );
-
   while (nextUrl) {
     if (pagesFetched >= MAX_PAGES) {
       console.warn(`[meta/runSync] ⚠️  Reached MAX_PAGES (${MAX_PAGES}) safety cap — stopping pagination.`);
@@ -1053,6 +1059,76 @@ router.post('/sync', authenticate, requireAdmin, async (req, res) => {
     }
     console.error('[meta/sync] Unexpected error:', err);
     res.status(500).json({ error: err.message || 'خطأ داخلي في الخادم' });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GET /api/meta/test-token?account_id=<id>
+   ─────────────────────────────────────────────────────────────────────────
+   Lightweight token validity probe: loads ONE meta_accounts row (the exact same
+   source + token the sync uses) and makes a cheap Graph call
+   (GET /act_<id>?fields=name). Lets the UI confirm a token BEFORE trusting the
+   cron. Always HTTP 200 when the probe RAN — { success } tells the outcome, and
+   the precise Meta code / error_subcode are surfaced for display.
+   ══════════════════════════════════════════════════════════════════════════ */
+router.get('/test-token', authenticate, requireAdmin, async (req, res) => {
+  const accountId = Number.parseInt(req.query.account_id ?? req.query.id, 10);
+  if (!Number.isInteger(accountId)) {
+    return res.status(400).json({ error: 'account_id مطلوب (رقم صحيح)' });
+  }
+
+  let acct;
+  try {
+    /* activeOnly:false so a just-deactivated account can still be tested;
+       businessId scopes strictly to the caller's tenant. */
+    const accounts = await loadMetaAccounts({
+      activeOnly: false, accountId, businessId: req.user.business_id,
+    });
+    if (!accounts.length) {
+      return res.status(404).json({ error: 'الحساب الإعلاني غير موجود' });
+    }
+    acct = accounts[0];
+  } catch (e) {
+    console.error('[meta/test-token] account load error:', e.message);
+    return res.status(500).json({ error: 'خطأ في قراءة الحساب من قاعدة البيانات' });
+  }
+
+  if (!acct.accessToken || !acct.adAccountId) {
+    return res.json({
+      success: false,
+      account_id: acct.id,
+      error: 'التوكن أو معرف حساب الإعلانات مفقود في هذا الحساب.',
+    });
+  }
+
+  const url = `${META_GRAPH}/act_${acct.adAccountId}`
+    + `?fields=name,account_status`
+    + `&access_token=${encodeURIComponent(acct.accessToken)}`;
+
+  try {
+    const r = await axios.get(url, { timeout: 12_000 });
+    return res.json({
+      success:       true,
+      account_id:    acct.id,
+      ad_account_id: acct.adAccountId,
+      account_name:  r.data?.name ?? null,
+      token_length:  acct.accessToken.length,
+      message:       `التوكن صالح ✓ — ${r.data?.name ?? 'حساب إعلاني'}`,
+    });
+  } catch (e) {
+    const metaErr = e.response?.data?.error;
+    console.warn(`[meta/test-token] account #${acct.id} failed: code=${metaErr?.code ?? '—'} subcode=${metaErr?.error_subcode ?? '—'} ${metaErr?.message ?? e.message}`);
+    return res.json({
+      success:       false,
+      account_id:    acct.id,
+      ad_account_id: acct.adAccountId,
+      token_length:  acct.accessToken.length,
+      meta_code:     metaErr?.code ?? null,
+      meta_subcode:  metaErr?.error_subcode ?? null,
+      meta_type:     metaErr?.type ?? null,
+      meta_message:  metaErr?.message ?? e.message,
+      error:         metaErr ? classifyMetaError(metaErr) : 'تعذّر الاتصال بخوادم Meta.',
+    });
   }
 });
 

@@ -1064,6 +1064,27 @@ export const saveMetaConfig = (data: MetaConfigPayload) =>
 export const syncMetaSpend = (startDate?: string, endDate?: string) =>
   api.post<MetaSyncResult>('/api/meta/sync', { startDate, endDate });
 
+/** Result of a token-validity probe (GET /api/meta/test-token). Always HTTP 200
+    when the probe ran; `success` carries the outcome and `meta_*` the exact
+    Graph error for display. */
+export interface MetaTokenTestResult {
+  success:        boolean;
+  account_id:     number;
+  ad_account_id?: string;
+  account_name?:  string | null;
+  token_length?:  number;
+  message?:       string;   // set on success
+  meta_code?:     number | null;
+  meta_subcode?:  number | null;
+  meta_type?:     string | null;
+  meta_message?:  string | null;
+  error?:         string;   // Arabic, set on failure
+}
+
+/** Probe whether an ad account's saved token is valid, before trusting the cron. */
+export const testMetaToken = (accountId: number) =>
+  api.get<MetaTokenTestResult>('/api/meta/test-token', { params: { account_id: accountId } });
+
 /* ── Multi-account Meta integration (agency mode) ────────────────────────── */
 
 /** One Meta ad account row. Token is never exposed — only a masked preview. */
