@@ -191,6 +191,14 @@ router.patch('/:id', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'نوع الطلب غير صالح' });
   }
 
+  /* ── Approval workflow: only an ADMIN may change a request's STATUS ──────────
+     (approve / reject / complete). Every other employee — including the
+     after-sales customer-service role — may CREATE requests and edit notes, but
+     the approval decision is reserved for the admin. */
+  if (has('status') && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'تغيير حالة الطلب (الموافقة/الرفض) مقتصر على المدير فقط.' });
+  }
+
   const sets   = [];
   const params = [];
   const push = (sql, val) => { params.push(val); sets.push(`${sql} = $${params.length}`); };

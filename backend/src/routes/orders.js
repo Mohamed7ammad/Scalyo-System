@@ -435,6 +435,41 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
+/* ── GET /api/orders/lookup?phone=… — read-only order verification ───────────
+   For the After-Sales Customer-Service role (and admins). Returns a DELIBERATELY
+   MINIMAL projection so the customer's order can be VERIFIED without exposing any
+   financials: customer name, phone, status, product(s), and date only — never
+   price, COD, cost, profit or ad spend. Read-only (no write route pairs with it).
+   Matches on digits-only phone containment so formatting differences never miss.
+   Tenant-scoped; gated by the 'order_lookup' permission (admins bypass).        */
+router.get('/lookup', authenticate, requireAdminOrPermission('order_lookup'), async (req, res) => {
+  const raw    = String(req.query.phone ?? '').trim();
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 3) {
+    return res.status(400).json({ error: 'أدخل 3 أرقام على الأقل من رقم الهاتف للبحث.' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id,
+              "FullName"    AS customer_name,
+              "Phone"       AS phone,
+              "Status"      AS status,
+              "ProductName" AS product_name,
+              "createdAt"   AS created_at
+         FROM orders
+        WHERE business_id = $1
+          AND regexp_replace(COALESCE("Phone", ''), '\\D', '', 'g') LIKE '%' || $2 || '%'
+        ORDER BY "createdAt" DESC
+        LIMIT 50`,
+      [req.user.business_id, digits]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[orders/lookup]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء البحث عن الطلبات' });
+  }
+});
+
 /* ── GET /api/orders/stats — lightweight aggregate counters ──────────────────
    Powers the stat cards (Total/New/Confirmed/Rejected/...) on the Order
    Confirmation page WITHOUT waiting for the (paginated, possibly huge) order

@@ -23,9 +23,13 @@ export default function LoginPage() {
     localStorage.setItem('token', token);
     localStorage.setItem('user',  JSON.stringify(user));
     const perms: string[] = user.permissions ?? ['orders'];
-    /* Team-leaders (supervisors) land on the orders system — never the financial
-       analytics dashboard — even if a stale 'analytics' permission lingers. */
-    if (user.role !== 'supervisor' && (user.role === 'admin' || perms.includes('analytics'))) {
+    /* After-Sales customer-service lands on their returns/replacements page — they
+       have no access to the orders confirmation system. */
+    if (user.role === 'after_sales') {
+      router.push('/dashboard/exchange-returns');
+    } else if (user.role !== 'supervisor' && (user.role === 'admin' || perms.includes('analytics'))) {
+      /* Team-leaders (supervisors) land on the orders system — never the financial
+         analytics dashboard — even if a stale 'analytics' permission lingers. */
       router.push('/dashboard/analytics');
     } else {
       router.push('/dashboard');

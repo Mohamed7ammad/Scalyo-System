@@ -26,6 +26,14 @@ interface NavItem {
   children?:           NavChild[];   // optional sub-links shown when parent is active
 }
 
+/* The ONLY pages the After-Sales customer-service role may see — a strict
+   allowlist (returns/replacements + read-only order verification). Everything
+   else in the nav is hidden for this role. */
+const AFTER_SALES_ALLOWED = new Set<string>([
+  '/dashboard/exchange-returns',
+  '/dashboard/order-lookup',
+]);
+
 /* hrefs an 'affiliate' plan tenant is allowed to see */
 const AFFILIATE_ALLOWED = new Set<string>([
   '/dashboard/analytics',
@@ -153,6 +161,16 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: '/dashboard/order-lookup', label: 'التحقق من الطلبات',
+    subLabel: 'Order Lookup', requiredPermission: 'order_lookup',
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/staff', label: 'إدارة الموظفين',
     subLabel: 'Team', requiredPermission: 'manage_staff',
     icon: (
@@ -272,6 +290,8 @@ export default function Sidebar({
 
   /** Returns true if the current user may see this nav item */
   const canSee = (item: NavItem): boolean => {
+    // After-Sales role: strict allowlist — ONLY returns/replacements + order lookup.
+    if (user?.role === 'after_sales') return AFTER_SALES_ALLOWED.has(item.href);
     // Affiliate-plan tenants only ever see a restricted set of links.
     if (user?.plan_type === 'affiliate' && !AFFILIATE_ALLOWED.has(item.href)) return false;
     // Role-level denylist wins over any permission that would otherwise allow it.
@@ -517,7 +537,9 @@ export default function Sidebar({
                     ? 'تيم ليدر'
                     : user?.role === 'media_buyer'
                       ? 'ميديا باير'
-                      : 'موظف تأكيد'}
+                      : user?.role === 'after_sales'
+                        ? 'خدمة ما بعد البيع'
+                        : 'موظف تأكيد'}
               </p>
             </div>
             {/* Theme toggle */}

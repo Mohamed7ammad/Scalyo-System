@@ -57,7 +57,7 @@ interface FormState {
   name:            string;
   email:           string;
   password:        string;
-  role:            'agent'|'admin'|'media_buyer'|'supervisor';
+  role:            'agent'|'admin'|'media_buyer'|'supervisor'|'after_sales';
   is_active:       boolean;
   permissions:     string[];
   comm_confirmed:  number;
@@ -176,6 +176,10 @@ export default function StaffPage() {
      Deliberately NO 'analytics' — team-leaders never see the financial dashboard;
      their agent-performance view is authorised through 'manage_staff'. */
   const SUPERVISOR_PERMISSIONS = ['orders', 'reassign_orders', 'manage_staff'];
+  /* After-Sales customer-service bundle: read-only order lookup only. Returns/
+     replacements needs no permission (open to every employee); the sidebar
+     allowlist + role checks fence everything else. */
+  const AFTER_SALES_PERMISSIONS = ['order_lookup'];
   /* The only access permissions a supervisor may grant an agent. */
   const SUPERVISOR_GRANTABLE   = ['orders', 'shipping_followups'];
   /* A supervisor may act on plain agents only; admins act on everyone. */
@@ -331,7 +335,9 @@ export default function StaffPage() {
       /* A team-leader (supervisor) gets a FIXED privileged bundle — the granular
          permission checkboxes are only meaningful for agents. */
       const resolvedPermissions =
-        form.role === 'supervisor' ? SUPERVISOR_PERMISSIONS : form.permissions;
+        form.role === 'supervisor'   ? SUPERVISOR_PERMISSIONS
+        : form.role === 'after_sales' ? AFTER_SALES_PERMISSIONS
+        : form.permissions;
       if (editTarget) {
         const payload: UpdateStaffPayload = {
           name: form.name, email: form.email, role: form.role,
@@ -672,9 +678,10 @@ export default function StaffPage() {
                           <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
                             ${m.role==='admin'?'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'
                               :m.role==='supervisor'?'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300'
+                              :m.role==='after_sales'?'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300'
                               :m.role==='media_buyer'?'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
                               :'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
-                            {m.role==='admin'?'مدير':m.role==='supervisor'?'تيم ليدر':m.role==='media_buyer'?'ميديا باير':'وكيل'}
+                            {m.role==='admin'?'مدير':m.role==='supervisor'?'تيم ليدر':m.role==='after_sales'?'خدمة ما بعد البيع':m.role==='media_buyer'?'ميديا باير':'وكيل'}
                           </span>
                         </td>
                         <td className="px-5 py-4">
@@ -1679,6 +1686,7 @@ export default function StaffPage() {
                       className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition">
                       <option value="agent">وكيل تأكيد</option>
                       <option value="supervisor">تيم ليدر</option>
+                      <option value="after_sales">خدمة ما بعد البيع</option>
                       <option value="media_buyer">ميديا باير</option>
                       <option value="admin">مدير النظام</option>
                     </select>

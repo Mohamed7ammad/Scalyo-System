@@ -12,7 +12,7 @@ const router = express.Router();
    and sees a data-scoped analytics dashboard. 'supervisor' (تيم ليدر / team-leader)
    is a middle tier: manages front-line agents + reassigns orders + views
    analytics, but is NOT a super-admin (see the guard rails below). */
-const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor'];
+const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor', 'after_sales'];
 
 /* ── Team-leader (supervisor) guard rails — deny-by-default ──────────────────
    A supervisor is authorised via the 'manage_staff' permission but must never

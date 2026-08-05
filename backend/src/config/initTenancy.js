@@ -385,7 +385,7 @@ async function phase4AgencySchema() {
   await pool.query(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`).catch(() => {});
   await pool.query(`
     ALTER TABLE users ADD CONSTRAINT users_role_check
-      CHECK (role IN ('agent', 'admin', 'media_buyer', 'supervisor'))
+      CHECK (role IN ('agent', 'admin', 'media_buyer', 'supervisor', 'after_sales'))
   `).catch((err) =>
     console.warn('⚠️   Phase 4: users_role_check update skipped:', err.message)
   );

@@ -200,9 +200,11 @@ export default function ExchangeReturnsPage() {
     if (!editTarget) return;
     setEditSaving(true);
     try {
+      /* Approval (status change) is admin-only — the backend rejects it for
+         everyone else, so non-admins send ONLY their notes. */
       const res = await updateExchangeReturnRequest(editTarget.id, {
-        status: editStatus,
-        notes:  editNotes.trim() || null,
+        ...(isAdmin ? { status: editStatus } : {}),
+        notes: editNotes.trim() || null,
       });
       setRequests((prev) => prev.map((r) => (r.id === editTarget.id ? { ...r, ...res.data } : r)));
       setEditTarget(null);
@@ -530,11 +532,20 @@ export default function ExchangeReturnsPage() {
           )}
 
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">الحالة</label>
-          <select value={editStatus} onChange={(e) => setEditStatus(e.target.value as ExchangeReturnStatus)} className={inputCls}>
-            {EXCHANGE_RETURN_STATUSES.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
+          {isAdmin ? (
+            <select value={editStatus} onChange={(e) => setEditStatus(e.target.value as ExchangeReturnStatus)} className={inputCls}>
+              {EXCHANGE_RETURN_STATUSES.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          ) : (
+            /* Approval is admin-only — non-admins see the current status read-only
+               and can still add notes below. */
+            <div className={`${inputCls} flex items-center justify-between cursor-not-allowed opacity-90`}>
+              <span>{editStatus}</span>
+              <span className="text-[11px] text-slate-400">الموافقة من صلاحيات المدير</span>
+            </div>
+          )}
 
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 mt-3">الملاحظات</label>
           <textarea rows={4} value={editNotes} onChange={(e) => setEditNotes(e.target.value)}

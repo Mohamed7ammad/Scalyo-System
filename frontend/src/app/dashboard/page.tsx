@@ -221,7 +221,11 @@ export default function DashboardPage() {
     const token    = localStorage.getItem('token');
     const userData = localStorage.getItem('user');
     if (!token || !userData) { router.push('/'); return; }
-    setUser(JSON.parse(userData));
+    const parsed = JSON.parse(userData);
+    /* The after-sales role has no access to the orders confirmation system —
+       bounce them to their returns page even on a direct URL hit. */
+    if (parsed?.role === 'after_sales') { router.replace('/dashboard/exchange-returns'); return; }
+    setUser(parsed);
   }, [router]);
 
   /* ── Server-side filter query ────────────────────────────────── */

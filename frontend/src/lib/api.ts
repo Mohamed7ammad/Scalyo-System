@@ -70,7 +70,7 @@ export type PlanType = 'affiliate' | 'ecommerce';
 
 /** Every role the system recognises. 'supervisor' (تيم ليدر) is the middle
     tier between agent and admin — authorised entirely through `permissions`. */
-export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor';
+export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor' | 'after_sales';
 
 export interface User {
   id:          number;
@@ -1084,6 +1084,21 @@ export interface MetaTokenTestResult {
 /** Probe whether an ad account's saved token is valid, before trusting the cron. */
 export const testMetaToken = (accountId: number) =>
   api.get<MetaTokenTestResult>('/api/meta/test-token', { params: { account_id: accountId } });
+
+/* ── Order verification lookup (After-Sales role — read-only, no financials) ── */
+export interface OrderLookupRow {
+  id:            number;
+  customer_name: string;
+  phone:         string;
+  status:        string;
+  product_name:  string | null;
+  created_at:    string;
+}
+
+/** Read-only order search by customer phone. Returns ONLY name/phone/status/
+    product/date — never any financial field. Backend: GET /api/orders/lookup. */
+export const lookupOrders = (phone: string) =>
+  api.get<OrderLookupRow[]>('/api/orders/lookup', { params: { phone } });
 
 /* ── Multi-account Meta integration (agency mode) ────────────────────────── */
 
