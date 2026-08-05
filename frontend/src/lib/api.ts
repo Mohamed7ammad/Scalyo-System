@@ -1086,19 +1086,23 @@ export const testMetaToken = (accountId: number) =>
   api.get<MetaTokenTestResult>('/api/meta/test-token', { params: { account_id: accountId } });
 
 /* ── Order verification lookup (After-Sales role — read-only, no financials) ── */
+export type OrderLookupBy = 'phone' | 'order_id' | 'tracking';
+
 export interface OrderLookupRow {
-  id:            number;
-  customer_name: string;
-  phone:         string;
-  status:        string;
-  product_name:  string | null;
-  created_at:    string;
+  id:              number;
+  customer_name:   string;
+  phone:           string;
+  status:          string;
+  product_name:    string | null;
+  tracking_number: string | null;
+  created_at:      string;
 }
 
-/** Read-only order search by customer phone. Returns ONLY name/phone/status/
-    product/date — never any financial field. Backend: GET /api/orders/lookup. */
-export const lookupOrders = (phone: string) =>
-  api.get<OrderLookupRow[]>('/api/orders/lookup', { params: { phone } });
+/** Read-only order search by customer phone, Order ID, or Bosta tracking number.
+    Returns ONLY name/phone/status/product/tracking/date — never any financial
+    field. Backend: GET /api/orders/lookup?q=…&by=… */
+export const lookupOrders = (q: string, by: OrderLookupBy = 'phone') =>
+  api.get<OrderLookupRow[]>('/api/orders/lookup', { params: { q, by } });
 
 /* ── Multi-account Meta integration (agency mode) ────────────────────────── */
 

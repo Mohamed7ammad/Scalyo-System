@@ -435,33 +435,59 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-/* ── GET /api/orders/lookup?phone=… — read-only order verification ───────────
-   For the After-Sales Customer-Service role (and admins). Returns a DELIBERATELY
-   MINIMAL projection so the customer's order can be VERIFIED without exposing any
-   financials: customer name, phone, status, product(s), and date only — never
-   price, COD, cost, profit or ad spend. Read-only (no write route pairs with it).
-   Matches on digits-only phone containment so formatting differences never miss.
-   Tenant-scoped; gated by the 'order_lookup' permission (admins bypass).        */
+/* ── GET /api/orders/lookup?q=…&by=phone|order_id|tracking ───────────────────
+   Read-only order verification for the After-Sales Customer-Service role (and
+   admins). Search by customer phone, Order ID, or Bosta tracking number. Returns
+   a DELIBERATELY MINIMAL projection so an order can be VERIFIED without exposing
+   any financials: customer name, phone, status, product(s), tracking and date
+   only — never price, COD, cost, profit or ad spend. Read-only. Tenant-scoped;
+   gated by the 'order_lookup' permission (admins bypass).
+   Back-compat: a bare ?phone= still works (treated as by=phone).                */
 router.get('/lookup', authenticate, requireAdminOrPermission('order_lookup'), async (req, res) => {
-  const raw    = String(req.query.phone ?? '').trim();
-  const digits = raw.replace(/\D/g, '');
-  if (digits.length < 3) {
-    return res.status(400).json({ error: 'أدخل 3 أرقام على الأقل من رقم الهاتف للبحث.' });
+  const by = String(req.query.by ?? 'phone').trim().toLowerCase();
+  const q  = String(req.query.q ?? req.query.phone ?? '').trim();
+  if (!q) return res.status(400).json({ error: 'أدخل قيمة للبحث.' });
+
+  /* Escape LIKE wildcards so a literal % / _ in a term can't widen the match. */
+  const escLike = (s) => s.replace(/[\\%_]/g, '\\$&');
+
+  const SELECT = `
+    SELECT id,
+           "FullName"          AS customer_name,
+           "Phone"             AS phone,
+           "Status"            AS status,
+           "ProductName"       AS product_name,
+           "BostaTrackingCode" AS tracking_number,
+           "createdAt"         AS created_at
+      FROM orders
+     WHERE business_id = $1`;
+
+  let whereClause;
+  const params = [req.user.business_id];
+
+  if (by === 'order_id') {
+    const idNum = Number.parseInt(q.replace(/\D/g, ''), 10);
+    if (!Number.isInteger(idNum) || idNum <= 0) {
+      return res.status(400).json({ error: 'رقم الطلب غير صالح.' });
+    }
+    params.push(idNum);
+    whereClause = `AND id = $2`;
+  } else if (by === 'tracking') {
+    if (q.length < 3) return res.status(400).json({ error: 'أدخل 3 خانات على الأقل من رقم التتبع.' });
+    params.push(escLike(q));
+    whereClause = `AND UPPER(COALESCE("BostaTrackingCode", '')) LIKE '%' || UPPER($2) || '%'`;
+  } else {
+    // phone (default)
+    const digits = q.replace(/\D/g, '');
+    if (digits.length < 3) return res.status(400).json({ error: 'أدخل 3 أرقام على الأقل من رقم الهاتف.' });
+    params.push(digits);
+    whereClause = `AND regexp_replace(COALESCE("Phone", ''), '\\D', '', 'g') LIKE '%' || $2 || '%'`;
   }
+
   try {
     const { rows } = await pool.query(
-      `SELECT id,
-              "FullName"    AS customer_name,
-              "Phone"       AS phone,
-              "Status"      AS status,
-              "ProductName" AS product_name,
-              "createdAt"   AS created_at
-         FROM orders
-        WHERE business_id = $1
-          AND regexp_replace(COALESCE("Phone", ''), '\\D', '', 'g') LIKE '%' || $2 || '%'
-        ORDER BY "createdAt" DESC
-        LIMIT 50`,
-      [req.user.business_id, digits]
+      `${SELECT} ${whereClause} ORDER BY "createdAt" DESC LIMIT 50`,
+      params
     );
     res.json(rows);
   } catch (err) {

@@ -14,7 +14,14 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { lookupOrders, OrderLookupRow } from '@/lib/api';
+import { lookupOrders, OrderLookupRow, OrderLookupBy } from '@/lib/api';
+
+/* Search modes — label + input hints per mode. */
+const SEARCH_MODES: { key: OrderLookupBy; label: string; placeholder: string; ltr: boolean }[] = [
+  { key: 'phone',    label: 'رقم الهاتف',  placeholder: '01xxxxxxxxx',      ltr: true },
+  { key: 'order_id', label: 'رقم الطلب',   placeholder: 'مثال: 1024',        ltr: true },
+  { key: 'tracking', label: 'رقم التتبع',  placeholder: 'رقم شحنة بوسطة',    ltr: true },
+];
 
 /* Status → badge colour (mirrors the orders table palette). */
 const STATUS_BADGE: Record<string, string> = {
@@ -53,23 +60,36 @@ export default function OrderLookupPage() {
     } catch { router.replace('/'); }
   }, [router]);
 
-  const [phone,    setPhone]    = useState('');
+  const [by,       setBy]       = useState<OrderLookupBy>('phone');
+  const [term,     setTerm]     = useState('');
   const [rows,     setRows]     = useState<OrderLookupRow[] | null>(null);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState('');
 
+  const activeMode = SEARCH_MODES.find((m) => m.key === by) ?? SEARCH_MODES[0];
+
   const search = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    const digits = phone.replace(/\D/g, '');
-    if (digits.length < 3) { setError('أدخل 3 أرقام على الأقل من رقم الهاتف.'); return; }
+    const value = term.trim();
+    // Per-mode minimum: phone/tracking need ≥3 chars; order id needs a number.
+    if (by === 'order_id') {
+      if (!/\d/.test(value)) { setError('أدخل رقم طلب صالح.'); return; }
+    } else if (value.replace(/\D/g, '').length < 3 && value.length < 3) {
+      setError(`أدخل 3 خانات على الأقل من ${activeMode.label}.`); return;
+    }
     setLoading(true); setError('');
     try {
-      const res = await lookupOrders(phone.trim());
+      const res = await lookupOrders(value, by);
       setRows(res.data);
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'تعذّر البحث عن الطلبات.';
       setError(msg); setRows(null);
     } finally { setLoading(false); }
+  };
+
+  /* Switching mode clears the previous result set so stale rows never linger. */
+  const changeMode = (mode: OrderLookupBy) => {
+    setBy(mode); setTerm(''); setRows(null); setError('');
   };
 
   if (!allowed) return null;
@@ -81,33 +101,53 @@ export default function OrderLookupPage() {
         <div>
           <h1 className="text-xl font-bold text-gray-900 dark:text-white leading-tight">التحقق من الطلبات</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            ابحث برقم هاتف العميل للتحقق من طلباته وحالتها — عرض فقط، بدون أي بيانات مالية.
+            ابحث برقم الهاتف أو رقم الطلب أو رقم التتبع للتحقق من الطلبات وحالتها — عرض فقط، بدون أي بيانات مالية.
           </p>
         </div>
 
         {/* Search bar */}
-        <form onSubmit={search}
-          className="flex flex-wrap items-center gap-3 bg-white dark:bg-slate-900 rounded-2xl
-            border border-slate-200 dark:border-slate-800 px-4 py-3.5 shadow-sm">
-          <div className="relative flex-1 min-w-[220px]">
-            <svg className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            <input
-              type="tel" inputMode="numeric" dir="ltr"
-              value={phone} onChange={(e) => setPhone(e.target.value)}
-              placeholder="01xxxxxxxxx"
-              className="w-full pr-9 pl-3 py-2.5 rounded-xl text-sm text-left bg-slate-50 dark:bg-slate-800
-                border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200
-                outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
-            />
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 px-4 py-3.5 shadow-sm space-y-3">
+          {/* Mode selector — phone / order id / tracking */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-slate-400 dark:text-slate-500 ml-1">البحث بواسطة:</span>
+            {SEARCH_MODES.map((m) => (
+              <button
+                key={m.key}
+                type="button"
+                onClick={() => changeMode(m.key)}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all duration-150
+                  ${by === m.key
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'}`}
+              >
+                {m.label}
+              </button>
+            ))}
           </div>
-          <button type="submit" disabled={loading}
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white
-              rounded-xl text-sm font-semibold shadow-sm transition disabled:opacity-50">
-            {loading ? 'جارٍ البحث…' : 'بحث'}
-          </button>
-        </form>
+
+          <form onSubmit={search} className="flex flex-wrap items-center gap-3">
+            <div className="relative flex-1 min-w-[220px]">
+              <svg className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              <input
+                type="text"
+                inputMode={by === 'tracking' ? 'text' : 'numeric'}
+                dir={activeMode.ltr ? 'ltr' : 'rtl'}
+                value={term} onChange={(e) => setTerm(e.target.value)}
+                placeholder={activeMode.placeholder}
+                className="w-full pr-9 pl-3 py-2.5 rounded-xl text-sm text-left bg-slate-50 dark:bg-slate-800
+                  border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200
+                  outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+              />
+            </div>
+            <button type="submit" disabled={loading}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white
+                rounded-xl text-sm font-semibold shadow-sm transition disabled:opacity-50">
+              {loading ? 'جارٍ البحث…' : 'بحث'}
+            </button>
+          </form>
+        </div>
 
         {error && <p className="text-sm text-red-500 dark:text-red-400">{error}</p>}
 
@@ -115,7 +155,7 @@ export default function OrderLookupPage() {
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
           {rows === null ? (
             <div className="text-center py-16 px-6 text-slate-400 text-sm">
-              أدخل رقم الهاتف واضغط «بحث» لعرض طلبات العميل.
+              اختر طريقة البحث وأدخل {activeMode.label} ثم اضغط «بحث» لعرض الطلبات.
             </div>
           ) : rows.length === 0 ? (
             <div className="text-center py-16 px-6">
@@ -127,16 +167,19 @@ export default function OrderLookupPage() {
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
                   <tr>
+                    <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">#</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العميل</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الهاتف</th>
                     <th className="text-right font-semibold px-4 py-3">المنتج</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الحالة</th>
+                    <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">رقم التتبع</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">التاريخ</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {rows.map((r) => (
                     <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                      <td className="px-4 py-3 text-slate-400 dark:text-slate-500 whitespace-nowrap tabular-nums text-xs" dir="ltr">{r.id}</td>
                       <td className="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">{r.customer_name || '—'}</td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap" dir="ltr">{r.phone || '—'}</td>
                       <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[18rem]">
@@ -147,6 +190,7 @@ export default function OrderLookupPage() {
                           {r.status || '—'}
                         </span>
                       </td>
+                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap font-mono text-xs" dir="ltr">{r.tracking_number || '—'}</td>
                       <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap text-xs" dir="ltr">{fmtDate(r.created_at)}</td>
                     </tr>
                   ))}
