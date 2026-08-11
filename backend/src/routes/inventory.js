@@ -21,6 +21,43 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+/* ── GET /api/inventory/in-transit — stock currently WITH the courier ─────────
+   "بضاعة لدى شركة الشحن" — every order dispatched to Bosta and not yet delivered
+   or returned sits at Status = 'تم الشحن' (Bosta's forward/قيد التنفيذ leg). We
+   group those by product name and sum the quantities so the admin can see exactly
+   how many units of each product are floating in transit right now.
+   Admin-only, tenant-scoped, live imports only (excludes the isolated lost-order
+   queue). Registered BEFORE any '/:param' route so the literal path wins.        */
+router.get('/in-transit', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(NULLIF(TRIM("ProductName"), ''), 'غير محدد') AS product,
+              COUNT(*)::int                              AS orders,
+              COALESCE(SUM(COALESCE("quantity", 1)), 0)::int AS count
+         FROM orders
+        WHERE business_id = $1
+          AND "Status" = 'تم الشحن'
+          AND COALESCE(is_lost_order, FALSE) = FALSE
+        GROUP BY 1
+        ORDER BY count DESC, orders DESC`,
+      [req.user.business_id]
+    );
+
+    const total_orders = rows.reduce((s, r) => s + r.orders, 0);
+    const total_units  = rows.reduce((s, r) => s + r.count,  0);
+
+    res.json({
+      status:       'تم الشحن',
+      total_orders,                                    // e.g. 298 floating orders
+      total_units,                                     // total units across products
+      breakdown: rows.map((r) => ({ product: r.product, count: r.count, orders: r.orders })),
+    });
+  } catch (err) {
+    console.error('[inventory/in-transit]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء حساب البضاعة قيد الشحن' });
+  }
+});
+
 // POST /api/inventory — admin only, upsert stock for a product
 router.post('/', authenticate, requireAdmin, async (req, res) => {
   const { ProductName, StockQuantity } = req.body;

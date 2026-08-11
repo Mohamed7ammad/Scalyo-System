@@ -296,6 +296,22 @@ export interface InventoryItem {
 export const getInventory = () =>
   api.get<InventoryItem[]>('/api/inventory');
 
+/* ── In-transit inventory summary — stock currently with the courier ────────── */
+export interface InTransitRow {
+  product: string;
+  count:   number;   // units in transit (Σ quantity) for this product
+  orders:  number;   // number of orders
+}
+export interface InTransitSummary {
+  status:       string;
+  total_orders: number;
+  total_units:  number;
+  breakdown:    InTransitRow[];
+}
+/** Admin-only: aggregate of orders at 'تم الشحن' grouped by product. */
+export const getInTransitInventory = () =>
+  api.get<InTransitSummary>('/api/inventory/in-transit');
+
 export const upsertInventory = (ProductName: string, StockQuantity: number) =>
   api.post<InventoryItem>('/api/inventory', { ProductName, StockQuantity });
 

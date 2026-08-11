@@ -5,6 +5,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import {
   getOrders, getOrderStats, updateOrder, updateOrderPrice, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
+  getInTransitInventory, InTransitSummary,
   getStaff, distributeOrders, autoDistributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
   getBostaFollowUps, saveFollowUpAction,
@@ -147,6 +148,7 @@ export default function DashboardPage() {
      over the WHOLE tenant scope so the cards are correct and paint immediately,
      without waiting for any order rows to arrive. */
   const [serverStats, setServerStats] = useState<OrderStats | null>(null);
+  const [inTransit,   setInTransit]   = useState<InTransitSummary | null>(null);
   const [activeAgent,   setActiveAgent]   = useState('كل الفريق');
   const [activeProduct, setActiveProduct] = useState('كل المنتجات');
   const [activeFilter,  setActiveFilter]  = useState('الكل');
@@ -380,6 +382,18 @@ export default function DashboardPage() {
     const id = setInterval(fetchStats, 30_000);
     return () => clearInterval(id);
   }, [fetchStats]);
+
+  /* ── In-transit inventory summary (admin only, not lost queue) ────────────── */
+  const fetchInTransit = useCallback(async () => {
+    try { const res = await getInTransitInventory(); setInTransit(res.data); }
+    catch { /* admin-only endpoint — silently ignore for non-admins / errors */ }
+  }, []);
+  useEffect(() => {
+    if (user?.role !== 'admin' || lostMode) return;   // banner is admin-only + live queue
+    fetchInTransit();
+    const id = setInterval(fetchInTransit, 30_000);
+    return () => clearInterval(id);
+  }, [user, lostMode, fetchInTransit]);
 
   // Initial load (skeleton) + every filter/search change (silent replace).
   // fetchOrders' identity changes ONLY when serverFilters does, so this effect
@@ -1299,6 +1313,7 @@ export default function DashboardPage() {
       // Refresh the current page silently so statuses update without scroll disruption
       await silentRefresh();
       fetchStats();
+      fetchInTransit();   // orders just moved to 'تم الشحن' — update the in-transit banner
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
@@ -1508,6 +1523,51 @@ export default function DashboardPage() {
             </button>
           </div>
         </div>
+
+        {/* ── In-transit inventory banner — بضاعة لدى شركة الشحن (admin, live queue) ── */}
+        {isAdmin && !lostMode && inTransit && inTransit.total_orders > 0 && (
+          <div className="rounded-2xl border border-indigo-200 dark:border-indigo-800/50
+            bg-gradient-to-l from-indigo-50 to-white dark:from-indigo-950/40 dark:to-slate-900
+            px-5 py-4 shadow-sm">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+              {/* Total floating orders */}
+              <div className="flex items-center gap-3 shrink-0">
+                <div className="w-11 h-11 rounded-xl bg-indigo-100 dark:bg-indigo-900/50
+                  flex items-center justify-center text-indigo-600 dark:text-indigo-300 shrink-0">
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                      d="M9 17a2 2 0 11-4 0 2 2 0 014 0zm10 0a2 2 0 11-4 0 2 2 0 014 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                      d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="text-[11px] font-semibold text-indigo-500 dark:text-indigo-400 uppercase tracking-wide">
+                    بضاعة لدى شركة الشحن (قيد التوصيل)
+                  </p>
+                  <p className="text-2xl font-extrabold text-slate-900 dark:text-white leading-none tabular-nums mt-0.5">
+                    {inTransit.total_orders.toLocaleString('en-US')}
+                    <span className="text-sm font-semibold text-slate-400 dark:text-slate-500 mr-1.5">طلب قيد التوصيل</span>
+                  </p>
+                </div>
+              </div>
+
+              {/* Per-product breakdown badges */}
+              <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[200px]">
+                {inTransit.breakdown.map((b) => (
+                  <span key={b.product}
+                    title={`${b.product} — ${b.count} قطعة في ${b.orders} طلب`}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
+                      bg-white dark:bg-slate-800 border border-indigo-100 dark:border-slate-700
+                      text-slate-700 dark:text-slate-200">
+                    <span className="truncate max-w-[150px]">{b.product}</span>
+                    <span className="tabular-nums text-indigo-600 dark:text-indigo-300 font-bold">{b.count}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Team filter — admin OR reassigning team-leader ─────────── */}
         {canReassign && uniqueAgents.length > 0 && (
