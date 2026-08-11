@@ -308,9 +308,30 @@ export interface InTransitSummary {
   total_units:  number;
   breakdown:    InTransitRow[];
 }
-/** Admin-only: aggregate of orders at 'تم الشحن' grouped by product. */
+/** Admin-only: aggregate of live Bosta 'قيد التنفيذ' parcels grouped by product. */
 export const getInTransitInventory = () =>
   api.get<InTransitSummary>('/api/inventory/in-transit');
+
+/* Full order rows for the in-transit orders page. */
+export interface InTransitOrderRow {
+  id:              number;
+  customer_name:   string;
+  phone:           string;
+  product_name:    string | null;
+  quantity:        number;
+  tracking_number: string | null;
+  status:          string;
+  created_at:      string;
+}
+export interface InTransitDetailsResponse {
+  total_orders: number;                 // Bosta's authoritative count (e.g. 298)
+  matched:      number;                 // local rows resolved from those trackings
+  orders:       InTransitOrderRow[];
+  cached?:      boolean;
+}
+/** Admin-only: the full order rows behind the in-transit summary (shares cache). */
+export const getInTransitDetails = () =>
+  api.get<InTransitDetailsResponse>('/api/inventory/in-transit/details');
 
 export const upsertInventory = (ProductName: string, StockQuantity: number) =>
   api.post<InventoryItem>('/api/inventory', { ProductName, StockQuantity });

@@ -131,6 +131,18 @@ const NAV_ITEMS: NavItem[] = [
     ],
   },
   {
+    href: '/dashboard/in-transit-orders', label: 'البضاعة قيد التنفيذ',
+    subLabel: 'In-Transit', adminOnly: true,
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M9 17a2 2 0 11-4 0 2 2 0 014 0zm10 0a2 2 0 11-4 0 2 2 0 014 0z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/returns-collection', label: 'إدارة تحصيل المرتجعات',
     subLabel: 'Returns', requiredPermission: 'shipping_followups',
     icon: (
