@@ -517,6 +517,18 @@ const ACTION_REQUIRED_STATE_CODES = ['125.5,103'];
    older backlogs are handled by scripts/repairGhostInTransit.js.              */
 const DELIVERED_STATE_CODES = ['45'];
 
+/* ── In-transit / "قيد التنفيذ" bucket — the FORWARD leg ─────────────────────
+   Bosta's "قيد التنفيذ" (In Progress) tab is everything actively moving toward the
+   customer: created → processing → in-transit → out-for-delivery (+ recoverable
+   exceptions). These are the FORWARD (non-":R") versions of the very master codes
+   Bosta uses for the return leg (see RETURNING_STATE_CODES) — reverse-engineered
+   the same way. Feeds the in-transit inventory summary so it mirrors the Bosta
+   dashboard 1:1 instead of trusting our local 'تم الشحن' snapshot.
+   NOTE: if Bosta's count and this ever diverge, this is the single list to tune. */
+const IN_TRANSIT_STATE_CODES = [
+  '10', '11', '20', '21', '24', '30', '41', '47', '102', '103', '105',
+];
+
 /* Extract the most DESCRIPTIVE Arabic status/reason from a delivery object.
    Bosta surfaces returns and exceptions under generic master states like
    "Processing", but the real reason (e.g. "إلغاء - العميل رفض استلام الشحنة")
@@ -663,6 +675,21 @@ async function fetchReturningParcels(businessId) {
   const returning = await fetchFollowupBucket(creds, RETURNING_STATE_CODES, 'returning');
   await enrichWithLocalOrder(returning, businessId);
   return returning;
+}
+
+/* Fetch the LIVE "قيد التنفيذ" (in-transit / forward) parcels for a business
+   straight from Bosta — paginated, deduped by tracking number. Returns the mapped
+   delivery rows (each carries .trackingNumber). Powers the real-time in-transit
+   inventory summary, which cross-references these tracking numbers against the
+   local orders table. Throws a coded error when Bosta isn't configured.          */
+async function fetchInTransitParcels(businessId) {
+  const creds = await readBostaCreds(businessId);
+  if (!creds.bearerToken && !(creds.email && creds.password)) {
+    const err = new Error('Bosta غير مهيأ. الرجاء حفظ التوكن (Bearer) أو البريد/كلمة المرور في إعدادات الشحن.');
+    err.code = 'BOSTA_NOT_CONFIGURED';
+    throw err;
+  }
+  return fetchFollowupBucket(creds, IN_TRANSIT_STATE_CODES, 'in-transit');
 }
 
 router.get('/follow-ups', authenticate, requireAdminOrPermission('shipping_followups'), async (req, res) => {
@@ -1184,3 +1211,4 @@ async function reconcileInTransitOrders(businessId) {
 module.exports = router;
 module.exports.reconcileInTransitOrders = reconcileInTransitOrders;
 module.exports.fetchReturningParcels = fetchReturningParcels;
+module.exports.fetchInTransitParcels = fetchInTransitParcels;
