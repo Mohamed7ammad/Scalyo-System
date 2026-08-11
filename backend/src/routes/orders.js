@@ -1402,6 +1402,45 @@ function canonicalizeStatusKey(req, _res, next) {
   next();
 }
 
+/* ── PATCH /api/orders/:id/price — ADMIN-ONLY inline total-price edit ─────────
+   Lets an admin correct an order's total price (the "الدفع" column) directly from
+   the orders table. Strictly requireAdmin — agents / after-sales / supervisors
+   can neither see the control nor reach this route. Validates a finite, positive
+   number, stores it as a plain numeric string (matching ProductPrice), and logs
+   who changed what from→to. Deliberately narrow: touches ONLY ProductPrice, so it
+   can't be used to mutate status/assignment/etc.                                */
+router.patch('/:id/price', authenticate, requireAdmin, async (req, res) => {
+  const { id }     = req.params;
+  const businessId = req.user.business_id;
+
+  const price = parseFloat(String(req.body.price ?? req.body.ProductPrice ?? '').replace(/[^0-9.]/g, ''));
+  if (!Number.isFinite(price) || price < 0) {
+    return res.status(400).json({ error: 'السعر يجب أن يكون رقماً موجباً صالحاً.' });
+  }
+
+  try {
+    const { rows: cur } = await pool.query(
+      `SELECT "ProductPrice" FROM orders WHERE id = $1 AND business_id = $2`,
+      [id, businessId]
+    );
+    if (!cur.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+    const oldPrice = cur[0].ProductPrice;
+
+    const { rows } = await pool.query(
+      `UPDATE orders SET "ProductPrice" = $1, "updatedAt" = NOW()
+        WHERE id = $2 AND business_id = $3
+        RETURNING id, "ProductPrice"`,
+      [String(price), id, businessId]
+    );
+
+    console.log(`[orders/price] ✏️  admin ${req.user.email} set order #${id} price: ${oldPrice ?? '—'} → ${price}`);
+    res.json({ id: rows[0].id, ProductPrice: rows[0].ProductPrice, oldPrice: oldPrice ?? null });
+  } catch (err) {
+    console.error('[orders/price]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء تحديث السعر' });
+  }
+});
+
 router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, async (req, res) => {
   const { id } = req.params;
   const businessId = req.user.business_id;

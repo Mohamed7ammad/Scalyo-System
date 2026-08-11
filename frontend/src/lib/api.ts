@@ -208,6 +208,12 @@ export const createOrder = (data: CreateOrderPayload) =>
 export const updateOrder = (id: number, data: AgentUpdate | AdminUpdate) =>
   api.patch<Order>(`/api/orders/${id}`, data);
 
+/** ADMIN-ONLY: update just an order's total price (the "الدفع" column). Backend
+    enforces requireAdmin + positive-number validation. */
+export const updateOrderPrice = (id: number, price: number) =>
+  api.patch<{ id: number; ProductPrice: string; oldPrice: string | null }>(
+    `/api/orders/${id}/price`, { price });
+
 export const deleteOrder = (id: number) =>
   api.delete(`/api/orders/${id}`);
 

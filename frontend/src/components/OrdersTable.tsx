@@ -167,6 +167,9 @@ interface Props {
   canDelete?:       boolean;
   onUpdate:         (id: number, data: Partial<Order>) => Promise<void>;
   onDelete:         (id: number) => Promise<void>;
+  /* ADMIN-ONLY inline total-price edit. Optional — only wired on the admin table;
+     the edit control renders only for role==='admin'. */
+  onPriceChange?:   (id: number, price: number) => Promise<void>;
   /* Bulk-selection props — enabled for reassign-capable users ───────── */
   selectedIds?:     number[];                     // controlled from parent
   onToggleSelect?:  (id: number) => void;         // toggle one row
@@ -186,7 +189,7 @@ function OrdersTable({
   orders, role,
   canReassign = role === 'admin',
   canDelete   = role === 'admin',
-  onUpdate, onDelete,
+  onUpdate, onDelete, onPriceChange,
   selectedIds = [], onToggleSelect, onSelectAll,
   agents = [],
   emptyMessage = 'لا توجد طلبات لعرضها',
@@ -539,6 +542,7 @@ function OrdersTable({
                     onQuickEdit={openQuickEdit}
                     onEditModal={openEditModal}
                     onDelete={setDeleteConfirm}
+                    onPriceChange={onPriceChange}
                   />
                 );
               })}
@@ -1399,6 +1403,7 @@ interface OrderRowProps {
   onQuickEdit:          (order: Order) => void;
   onEditModal:          (order: Order) => void;
   onDelete:             (id: number) => void;
+  onPriceChange?:       (id: number, price: number) => Promise<void>;
 }
 
 function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
@@ -1426,8 +1431,24 @@ const OrderRow = memo(function OrderRow({
   order, index, rowRef, role, canReassign, canDelete, now, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onShippingNotesBlur, onInlineAttempt,
-  onQuickEdit, onEditModal, onDelete,
+  onQuickEdit, onEditModal, onDelete, onPriceChange,
 }: OrderRowProps) {
+  /* ── Admin inline price edit (local row state) ────────────────────────────── */
+  const [editingPrice, setEditingPrice] = useState(false);
+  const [priceInput,   setPriceInput]   = useState('');
+  const [savingPrice,  setSavingPrice]  = useState(false);
+  const startEditPrice = () => { setPriceInput(String(asNum(order.ProductPrice) || '')); setEditingPrice(true); };
+  const cancelEditPrice = () => { setEditingPrice(false); setSavingPrice(false); };
+  const priceValid = (() => { const n = parseFloat(priceInput); return Number.isFinite(n) && n >= 0; })();
+  const commitPrice = async () => {
+    const n = parseFloat(priceInput);
+    if (!Number.isFinite(n) || n < 0 || !onPriceChange) return;
+    if (n === asNum(order.ProductPrice)) { setEditingPrice(false); return; }
+    setSavingPrice(true);
+    try { await onPriceChange(order.id, n); setEditingPrice(false); }
+    catch { /* parent already surfaced the error + rolled back; keep editor open */ }
+    finally { setSavingPrice(false); }
+  };
   /* ── New-order 15-minute cooldown ──────────────────────────────────────────
      A brand-new order ('جديد') placed less than 15 minutes ago is on hold: the
      team must not call yet. `elapsedMin` drives both the elapsed label and the
@@ -1719,31 +1740,73 @@ const OrderRow = memo(function OrderRow({
       </td>
 
       {/* Financials / Payment column */}
-      <td className="px-4 py-3">
+      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
         <div className="flex flex-col items-center justify-center gap-1.5">
-          {order.hasDeposit ? (
-            <>
-              <div className="inline-flex items-center justify-center
-                rounded-md px-2 py-1 border
-                border-rose-200 bg-rose-50
-                dark:bg-rose-900/30 dark:border-rose-800/50
-                text-rose-700 dark:text-rose-400
-                text-xs font-bold whitespace-nowrap">
-                COD: {fmtNum(Math.max(0, asNum(order.ProductPrice) - asNum(order.depositAmount)))} ج.م
-              </div>
-              <div className="flex items-center gap-1 text-[11px] font-medium
-                text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
-                <span>عربون:</span>
-                <span dir="ltr">{fmtNum(asNum(order.depositAmount))} ج.م</span>
-                <span>💰</span>
-              </div>
-            </>
-          ) : order.ProductPrice ? (
-            <span className="text-gray-500 dark:text-gray-400 text-sm whitespace-nowrap">
-              {fmtNum(asNum(order.ProductPrice))} ج.م
-            </span>
+          {editingPrice ? (
+            /* ── Admin inline price editor (total ProductPrice) ── */
+            <div className="flex items-center gap-1">
+              <input
+                type="number" min="0" step="1" autoFocus
+                value={priceInput}
+                onChange={(e) => setPriceInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') commitPrice(); if (e.key === 'Escape') cancelEditPrice(); }}
+                disabled={savingPrice}
+                dir="ltr"
+                className={`w-24 px-2 py-1 text-sm rounded-lg text-right tabular-nums outline-none
+                  bg-white dark:bg-slate-800 text-gray-800 dark:text-slate-100
+                  border ${priceValid ? 'border-indigo-400 focus:ring-2 focus:ring-indigo-400/50' : 'border-red-400 focus:ring-2 focus:ring-red-400/50'}
+                  [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+              />
+              <button onClick={commitPrice} disabled={!priceValid || savingPrice} title="حفظ"
+                className="p-1 rounded-md text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 disabled:opacity-40 disabled:cursor-not-allowed">
+                {savingPrice
+                  ? <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
+                  : <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>}
+              </button>
+              <button onClick={cancelEditPrice} disabled={savingPrice} title="إلغاء"
+                className="p-1 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-40">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
           ) : (
-            <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
+            <>
+              {order.hasDeposit ? (
+                <>
+                  <div className="inline-flex items-center justify-center
+                    rounded-md px-2 py-1 border
+                    border-rose-200 bg-rose-50
+                    dark:bg-rose-900/30 dark:border-rose-800/50
+                    text-rose-700 dark:text-rose-400
+                    text-xs font-bold whitespace-nowrap">
+                    COD: {fmtNum(Math.max(0, asNum(order.ProductPrice) - asNum(order.depositAmount)))} ج.م
+                  </div>
+                  <div className="flex items-center gap-1 text-[11px] font-medium
+                    text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                    <span>عربون:</span>
+                    <span dir="ltr">{fmtNum(asNum(order.depositAmount))} ج.م</span>
+                    <span>💰</span>
+                  </div>
+                </>
+              ) : order.ProductPrice ? (
+                <span className="text-gray-500 dark:text-gray-400 text-sm whitespace-nowrap">
+                  {fmtNum(asNum(order.ProductPrice))} ج.م
+                </span>
+              ) : (
+                <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
+              )}
+              {/* Admin-only edit affordance — edits the TOTAL price (ProductPrice) */}
+              {role === 'admin' && onPriceChange && (
+                <button onClick={startEditPrice} title="تعديل السعر"
+                  className="inline-flex items-center gap-1 text-[10px] font-medium
+                    text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                  تعديل السعر
+                </button>
+              )}
+            </>
           )}
         </div>
       </td>

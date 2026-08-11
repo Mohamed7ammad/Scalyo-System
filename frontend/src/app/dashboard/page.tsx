@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import {
-  getOrders, getOrderStats, updateOrder, deleteOrder, createOrder,
+  getOrders, getOrderStats, updateOrder, updateOrderPrice, deleteOrder, createOrder,
   getInventory, upsertInventory, getProducts, forwardToShipping,
   getStaff, distributeOrders, autoDistributeOrders, saveDistributionConfig, transferOrders, bulkDeleteOrders, getBulkAwb,
   DistributionAllocation,
@@ -528,6 +528,30 @@ export default function DashboardPage() {
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
         'فشل في الحفظ — تم التراجع';
       setTimeout(() => showToast(msg, 'error'), 0);
+    }
+  };
+
+  /* ── Admin-only inline price edit ────────────────────────────── */
+  const handlePriceChange = async (id: number, price: number) => {
+    let prevOrder: Order | null = null;
+    setOrders((prev) => prev.map((o) => {
+      if (o.id !== id) return o;
+      prevOrder = o;
+      return { ...o, ProductPrice: String(price) };   // optimistic
+    }));
+    try {
+      await updateOrderPrice(id, price);
+      setTimeout(() => showToast('تم تحديث السعر بنجاح', 'success'), 0);
+    } catch (err: unknown) {
+      if (prevOrder) {
+        const snapshot = prevOrder;
+        setOrders((prev) => prev.map((o) => (o.id === id ? snapshot : o)));
+      }
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        'فشل تحديث السعر — تم التراجع';
+      setTimeout(() => showToast(msg, 'error'), 0);
+      throw err;   // let the row keep the editor open on failure
     }
   };
 
@@ -3273,6 +3297,7 @@ export default function DashboardPage() {
             canDelete={isAdmin}
             onUpdate={handleUpdate}
             onDelete={handleDelete}
+            onPriceChange={isAdmin ? handlePriceChange : undefined}
             selectedIds={selectedIds}
             onToggleSelect={canReassign ? toggleSelection : undefined}
             onSelectAll={canReassign ? toggleSelectAll : undefined}
