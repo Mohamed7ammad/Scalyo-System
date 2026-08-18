@@ -20,7 +20,14 @@ import {
   getProducts,
   ExchangeReturnRequest, ExchangeReturnType, ExchangeReturnStatus,
   EXCHANGE_RETURN_TYPES, EXCHANGE_RETURN_STATUSES, Product,
+  RefundMethod, REFUND_METHOD_LABELS,
 } from '@/lib/api';
+
+/* Refund-method badge colours. */
+const REFUND_METHOD_BADGE: Record<RefundMethod, string> = {
+  vodafone_cash: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  instapay:      'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+};
 
 /* ── Status / type presentation ──────────────────────────────────────────── */
 const STATUS_BADGE: Record<ExchangeReturnStatus, string> = {
@@ -86,12 +93,19 @@ export default function ExchangeReturnsPage() {
   const [newProduct,   setNewProduct]   = useState('');   // product id ('' = not chosen)
   const [newReason,    setNewReason]    = useState('');
   const [newVideo,     setNewVideo]     = useState('');
+  /* Deposit / insurance (200 EGP) */
+  const [newDepositUrl,   setNewDepositUrl]   = useState('');
+  const [newRefundPhone,  setNewRefundPhone]  = useState('');
+  const [newRefundMethod, setNewRefundMethod] = useState<RefundMethod | ''>('');
   const [createSaving, setCreateSaving] = useState(false);
 
   /* Edit / review modal */
   const [editTarget, setEditTarget] = useState<ExchangeReturnRequest | null>(null);
   const [editStatus, setEditStatus] = useState<ExchangeReturnStatus>('قيد المراجعة');
   const [editNotes,  setEditNotes]  = useState('');
+  const [editDepositUrl,   setEditDepositUrl]   = useState('');
+  const [editRefundPhone,  setEditRefundPhone]  = useState('');
+  const [editRefundMethod, setEditRefundMethod] = useState<RefundMethod | ''>('');
   const [editSaving, setEditSaving] = useState(false);
 
   const [busyRow, setBusyRow] = useState<number | null>(null);
@@ -161,6 +175,7 @@ export default function ExchangeReturnsPage() {
   const openCreate = () => {
     setNewName(''); setNewPhone(''); setNewType('استبدال');
     setNewProduct(''); setNewReason(''); setNewVideo('');
+    setNewDepositUrl(''); setNewRefundPhone(''); setNewRefundMethod('');
     setShowCreate(true);
   };
 
@@ -178,6 +193,9 @@ export default function ExchangeReturnsPage() {
         product_id:     newProduct,
         reason:         newReason.trim(),
         video_link:     newVideo.trim() || null,
+        deposit_screenshot_url: newDepositUrl.trim() || null,
+        refund_phone_number:    newRefundPhone.trim() || null,
+        refund_method:          newRefundMethod || null,
       });
       setRequests((prev) => [res.data, ...prev]);
       setShowCreate(false);
@@ -194,6 +212,9 @@ export default function ExchangeReturnsPage() {
     setEditTarget(row);
     setEditStatus(row.status);
     setEditNotes(row.notes ?? '');
+    setEditDepositUrl(row.deposit_screenshot_url ?? '');
+    setEditRefundPhone(row.refund_phone_number ?? '');
+    setEditRefundMethod(row.refund_method ?? '');
   };
 
   const handleEdit = async () => {
@@ -205,6 +226,9 @@ export default function ExchangeReturnsPage() {
       const res = await updateExchangeReturnRequest(editTarget.id, {
         ...(isAdmin ? { status: editStatus } : {}),
         notes: editNotes.trim() || null,
+        deposit_screenshot_url: editDepositUrl.trim() || null,
+        refund_phone_number:    editRefundPhone.trim() || null,
+        refund_method:          editRefundMethod || null,
       });
       setRequests((prev) => prev.map((r) => (r.id === editTarget.id ? { ...r, ...res.data } : r)));
       setEditTarget(null);
@@ -373,6 +397,7 @@ export default function ExchangeReturnsPage() {
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المنتج</th>
                     <th className="text-right font-semibold px-4 py-3">السبب</th>
                     <th className="text-right font-semibold px-4 py-3">الملاحظات</th>
+                    <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">بيانات التأمين</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">فيديو توضيحي</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الحالة</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">أضيف بواسطة</th>
@@ -406,6 +431,35 @@ export default function ExchangeReturnsPage() {
                         <td className="px-4 py-3 text-slate-600 dark:text-slate-300 max-w-[18rem]">
                           {r.notes ? (
                             <span className="line-clamp-3 whitespace-pre-wrap" title={r.notes}>{r.notes}</span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                        {/* ── Deposit / insurance details ── */}
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          {(r.refund_phone_number || r.refund_method || r.deposit_screenshot_url) ? (
+                            <div className="flex flex-col items-start gap-1">
+                              {r.refund_phone_number && (
+                                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200" dir="ltr">{r.refund_phone_number}</span>
+                              )}
+                              {r.refund_method && (
+                                <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ${REFUND_METHOD_BADGE[r.refund_method]}`}>
+                                  {REFUND_METHOD_LABELS[r.refund_method]}
+                                </span>
+                              )}
+                              {r.deposit_screenshot_url && (
+                                <a href={r.deposit_screenshot_url} target="_blank" rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:underline text-[11px] font-medium">
+                                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                  </svg>
+                                  مشاهدة الإيصال
+                                </a>
+                              )}
+                            </div>
                           ) : (
                             <span className="text-slate-400">—</span>
                           )}
@@ -502,6 +556,33 @@ export default function ExchangeReturnsPage() {
           <input type="url" dir="ltr" value={newVideo} onChange={(e) => setNewVideo(e.target.value)}
             placeholder="https://…" className={inputCls} />
 
+          {/* ── Deposit / insurance (200 ج.م) ── */}
+          <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 space-y-3">
+            <p className="text-xs font-bold text-slate-500 dark:text-slate-400">بيانات تأمين الاستبدال/الاسترجاع (200 ج.م)</p>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">سكرين تحويل التأمين</label>
+              <input type="url" dir="ltr" value={newDepositUrl} onChange={(e) => setNewDepositUrl(e.target.value)}
+                placeholder="https://… (رابط صورة إيصال التحويل)" className={inputCls} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">رقم العميل للتحويل</label>
+                <input type="text" dir="ltr" value={newRefundPhone} onChange={(e) => setNewRefundPhone(e.target.value)}
+                  placeholder="01xxxxxxxxx" className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">طريقة التحويل</label>
+                <select value={newRefundMethod} onChange={(e) => setNewRefundMethod(e.target.value as RefundMethod | '')} className={inputCls}>
+                  <option value="">— اختر —</option>
+                  <option value="vodafone_cash">فودافون كاش</option>
+                  <option value="instapay">إنستاباي</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           <div className="flex gap-3 mt-6">
             <button onClick={handleCreate} disabled={createSaving}
               className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50">
@@ -551,6 +632,37 @@ export default function ExchangeReturnsPage() {
           <textarea rows={4} value={editNotes} onChange={(e) => setEditNotes(e.target.value)}
             placeholder="سجّل الإجراءات المتخذة أو المتابعات (مثال: تم الاتصال بالعميل ولم يرد)…"
             className={`${inputCls} resize-y`} />
+
+          {/* ── Deposit / insurance (200 ج.م) ── */}
+          <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 space-y-3">
+            <p className="text-xs font-bold text-slate-500 dark:text-slate-400">بيانات التأمين (200 ج.م)</p>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">سكرين تحويل التأمين</label>
+              <input type="url" dir="ltr" value={editDepositUrl} onChange={(e) => setEditDepositUrl(e.target.value)}
+                placeholder="https://… (رابط صورة إيصال التحويل)" className={inputCls} />
+              {editDepositUrl.trim() && (
+                <a href={editDepositUrl.trim()} target="_blank" rel="noopener noreferrer"
+                  className="inline-block mt-1 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:underline">مشاهدة الإيصال ↗</a>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">رقم العميل للتحويل</label>
+                <input type="text" dir="ltr" value={editRefundPhone} onChange={(e) => setEditRefundPhone(e.target.value)}
+                  placeholder="01xxxxxxxxx" className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">طريقة التحويل</label>
+                <select value={editRefundMethod} onChange={(e) => setEditRefundMethod(e.target.value as RefundMethod | '')} className={inputCls}>
+                  <option value="">— اختر —</option>
+                  <option value="vodafone_cash">فودافون كاش</option>
+                  <option value="instapay">إنستاباي</option>
+                </select>
+              </div>
+            </div>
+          </div>
 
           <div className="flex gap-3 mt-6">
             <button onClick={handleEdit} disabled={editSaving}

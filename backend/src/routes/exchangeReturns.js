@@ -35,6 +35,19 @@ const ALLOWED_STATUSES = [
 ];
 const DEFAULT_STATUS = 'قيد المراجعة';
 
+/* Deposit-refund transfer methods — canonical values stored in the DB; the
+   frontend renders the Arabic labels (فودافون كاش / إنستاباي). */
+const ALLOWED_REFUND_METHODS = ['vodafone_cash', 'instapay'];
+/* Normalize an incoming refund_method to a canonical value (or null). Accepts the
+   canonical value OR the Arabic label, so either the UI or an API caller works. */
+function normalizeRefundMethod(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return null;
+  if (s === 'vodafone_cash' || s.includes('فودافون') || s.includes('vodafone')) return 'vodafone_cash';
+  if (s === 'instapay'      || s.includes('انستا') || s.includes('إنستا') || s.includes('insta')) return 'instapay';
+  return null;
+}
+
 /* ── Idempotent schema bootstrap (runs once at module load) ─────────────────
    Same pattern as afterSales.js / returnCollections.js — IF NOT EXISTS only.
    product_id is a soft link to products(id) (UUID, no FK so deleting a product
@@ -63,6 +76,10 @@ pool.query(`
   .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS product_id UUID`))
   .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS product_name TEXT`))
   .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS notes TEXT`))
+  /* ── 200 EGP deposit / insurance tracking (refund on request completion) ── */
+  .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS deposit_screenshot_url TEXT`))
+  .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS refund_phone_number VARCHAR(50)`))
+  .then(() => pool.query(`ALTER TABLE after_sales_requests ADD COLUMN IF NOT EXISTS refund_method VARCHAR(30)`))
   .then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS after_sales_requests_status_idx
       ON after_sales_requests (business_id, status)
@@ -139,6 +156,10 @@ router.post('/', authenticate, async (req, res) => {
   const rawProductName = req.body.product_name ? String(req.body.product_name).trim() : null;
   const reason        = String(req.body.reason ?? '').trim();
   const videoLink     = req.body.video_link ? String(req.body.video_link).trim() : null;
+  /* ── Deposit / insurance fields (all optional) ── */
+  const depositUrl    = req.body.deposit_screenshot_url ? String(req.body.deposit_screenshot_url).trim() : null;
+  const refundPhone   = req.body.refund_phone_number ? String(req.body.refund_phone_number).trim() : null;
+  const refundMethod  = normalizeRefundMethod(req.body.refund_method);
 
   if (!customerName)  return res.status(400).json({ error: 'اسم العميل مطلوب' });
   if (!customerPhone) return res.status(400).json({ error: 'رقم هاتف العميل مطلوب' });
@@ -160,11 +181,13 @@ router.post('/', authenticate, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO after_sales_requests
          (business_id, customer_name, customer_phone, request_type, product_id,
-          product_name, reason, video_link, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          product_name, reason, video_link, deposit_screenshot_url,
+          refund_phone_number, refund_method, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [businessId, customerName, customerPhone, requestType, productId,
-       productName, reason, videoLink, DEFAULT_STATUS, req.user.id]
+       productName, reason, videoLink, depositUrl, refundPhone, refundMethod,
+       DEFAULT_STATUS, req.user.id]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -208,6 +231,9 @@ router.patch('/:id', authenticate, async (req, res) => {
   if (has('reason'))         push('reason',         req.body.reason == null ? '' : String(req.body.reason));
   if (has('notes'))          push('notes',          req.body.notes == null ? null : String(req.body.notes));
   if (has('video_link'))     push('video_link',     req.body.video_link ? String(req.body.video_link).trim() : null);
+  if (has('deposit_screenshot_url')) push('deposit_screenshot_url', req.body.deposit_screenshot_url ? String(req.body.deposit_screenshot_url).trim() : null);
+  if (has('refund_phone_number'))    push('refund_phone_number',    req.body.refund_phone_number ? String(req.body.refund_phone_number).trim() : null);
+  if (has('refund_method'))          push('refund_method',          normalizeRefundMethod(req.body.refund_method));
   if (has('customer_name'))  push('customer_name',  String(req.body.customer_name ?? '').trim());
   if (has('customer_phone')) push('customer_phone', String(req.body.customer_phone ?? '').trim());
   if (has('product_id')) {

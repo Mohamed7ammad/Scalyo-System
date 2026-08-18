@@ -1715,6 +1715,10 @@ export interface ExchangeReturnRequest {
   reason:            string | null;
   video_link:        string | null;   // evidence video URL supplied by the customer
   notes:             string | null;   // team follow-up log (actions taken, unresponsive customer…)
+  /* ── 200 EGP deposit / insurance ── */
+  deposit_screenshot_url: string | null;   // URL of the transfer-receipt screenshot
+  refund_phone_number:    string | null;   // customer's receiving number for the refund
+  refund_method:          RefundMethod | null;   // 'vodafone_cash' | 'instapay'
   status:            ExchangeReturnStatus;
   created_by:        string | null;
   created_by_name?:  string | null;   // resolved display name (GET join)
@@ -1722,6 +1726,13 @@ export interface ExchangeReturnRequest {
   created_at:        string;
   updated_at:        string;
 }
+
+/** Deposit-refund transfer method — canonical values; UI shows Arabic labels. */
+export type RefundMethod = 'vodafone_cash' | 'instapay';
+export const REFUND_METHOD_LABELS: Record<RefundMethod, string> = {
+  vodafone_cash: 'فودافون كاش',
+  instapay:      'إنستاباي',
+};
 
 export interface CreateExchangeReturnPayload {
   customer_name:  string;
@@ -1731,12 +1742,16 @@ export interface CreateExchangeReturnPayload {
   product_name?:  string | null;
   reason:         string;
   video_link?:    string | null;
+  deposit_screenshot_url?: string | null;
+  refund_phone_number?:    string | null;
+  refund_method?:          RefundMethod | null;
 }
 
 export type UpdateExchangeReturnPayload = Partial<
   Pick<ExchangeReturnRequest,
     'status' | 'request_type' | 'reason' | 'video_link' | 'notes' |
-    'customer_name' | 'customer_phone' | 'product_id' | 'product_name'>
+    'customer_name' | 'customer_phone' | 'product_id' | 'product_name' |
+    'deposit_screenshot_url' | 'refund_phone_number' | 'refund_method'>
 >;
 
 /** List the tenant's requests, optionally narrowed to one type and/or status. */
