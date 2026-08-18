@@ -533,6 +533,7 @@ export interface StaffMember {
   comm_rejected:   number;       // payout per rejected order
   comm_no_answer:  number;       // payout per no-answer / postponed order
   distribution_percentage?: number;  // saved auto-distribution weight (%)
+  allowed_products?: string[];       // product-routing restriction ([] = all products)
   last_active_at?: string | null;    // presence heartbeat timestamp (ISO)
   referral_code?:  string | null;    // media-buyer UTM/Sub-ID (agency model)
   created_at:      string;
@@ -549,6 +550,7 @@ export interface CreateStaffPayload {
   comm_delivered?:  number;
   comm_rejected?:   number;
   comm_no_answer?:  number;
+  allowed_products?: string[];   // product-routing restriction ([] = all)
   /* Agency model (media_buyer only): referral code + assigned ad-account ids. */
   referral_code?:   string | null;
   ad_account_ids?:  number[];
@@ -566,6 +568,7 @@ export interface UpdateStaffPayload {
   comm_delivered?:  number;
   comm_rejected?:   number;
   comm_no_answer?:  number;
+  allowed_products?: string[];   // product-routing restriction ([] = all)
   /* Agency model (media_buyer only): referral code + assigned ad-account ids. */
   referral_code?:   string | null;
   ad_account_ids?:  number[];

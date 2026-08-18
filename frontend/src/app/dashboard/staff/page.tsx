@@ -4,8 +4,8 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getStaff, createStaff, updateStaff, toggleAttendance, deleteStaff,
-  getAgentAnalytics, createEmployeePayout, getMetaAccounts,
-  StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics, MetaAccount,
+  getAgentAnalytics, createEmployeePayout, getMetaAccounts, getProducts,
+  StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics, MetaAccount, Product,
 } from '@/lib/api';
 
 /* ── Types ──────────────────────────────────────────────────────── */
@@ -64,6 +64,8 @@ interface FormState {
   comm_delivered:  number;
   comm_rejected:   number;
   comm_no_answer:  number;
+  /* Product-routing restriction (agents only). [] = handles ALL products. */
+  allowed_products: string[];
   /* Agency model (media_buyer only). */
   referral_code:   string;
   ad_account_ids:  number[];
@@ -77,7 +79,7 @@ const ALL_PERMISSIONS = [
 const EMPTY_FORM: FormState = {
   name:'', email:'', password:'', role:'agent', is_active:true, permissions:['orders'],
   comm_confirmed:0, comm_delivered:0, comm_rejected:0, comm_no_answer:0,
-  referral_code:'', ad_account_ids:[],
+  allowed_products:[], referral_code:'', ad_account_ids:[],
 };
 
 /* ── Analytics sub-components ──────────────────────────────────── */
@@ -299,6 +301,16 @@ export default function StaffPage() {
   }, []);
   useEffect(() => { refreshMetaAccounts(); }, [refreshMetaAccounts]);
 
+  /* Product catalogue — options for the per-agent product-routing multi-select. */
+  const [products, setProducts] = useState<Product[]>([]);
+  useEffect(() => {
+    getProducts().then((r) => setProducts(Array.isArray(r.data) ? r.data : [])).catch(() => setProducts([]));
+  }, []);
+  const productNames = useMemo(
+    () => [...new Set(products.map((p) => (p.name || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ar')),
+    [products]
+  );
+
   /* Ad-account ids currently assigned to a given user (string/number-id safe). */
   const accountsAssignedTo = useCallback(
     (userId: number | string) =>
@@ -317,6 +329,7 @@ export default function StaffPage() {
       comm_delivered: toN(m.comm_delivered),
       comm_rejected:  toN(m.comm_rejected),
       comm_no_answer: toN(m.comm_no_answer),
+      allowed_products: Array.isArray(m.allowed_products) ? m.allowed_products : [],
       referral_code:  m.referral_code ?? '',
       ad_account_ids: accountsAssignedTo(m.id),
     });
@@ -346,6 +359,8 @@ export default function StaffPage() {
           comm_delivered: form.comm_delivered,
           comm_rejected:  form.comm_rejected,
           comm_no_answer: form.comm_no_answer,
+          /* Product-routing restriction only applies to agents; clear it for others. */
+          allowed_products: form.role === 'agent' ? form.allowed_products : [],
         };
         if (isBuyer) {
           payload.referral_code  = form.referral_code.trim() || null;
@@ -364,6 +379,7 @@ export default function StaffPage() {
           comm_delivered: form.comm_delivered,
           comm_rejected:  form.comm_rejected,
           comm_no_answer: form.comm_no_answer,
+          allowed_products: form.role === 'agent' ? form.allowed_products : [],
         };
         if (isBuyer) {
           payload.referral_code  = form.referral_code.trim() || null;
@@ -1839,6 +1855,54 @@ export default function StaffPage() {
                     })}
                   </div>
                   <p className="text-xs text-slate-400 dark:text-slate-600 mt-1.5 pr-1">المديرون يملكون وصولاً كاملاً بغض النظر عن هذه الإعدادات.</p>
+                </div>
+              )}
+
+              {/* ── Product-routing restriction — agents only ────────────────────
+                  Empty = handles ALL products; selecting products restricts the
+                  agent to ONLY those (blocks assignment/distribution of others). */}
+              {form.role === 'agent' && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                    المنتجات المسموح بها
+                    <span className="font-normal text-slate-400"> — اتركها فارغة ليتعامل الموظف مع كل المنتجات</span>
+                  </label>
+
+                  {/* Selected products as removable chips */}
+                  {form.allowed_products.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {form.allowed_products.map((p) => (
+                        <span key={p} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+                          bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                          <span className="truncate max-w-[160px]">{p}</span>
+                          <button type="button" title="إزالة"
+                            onClick={() => setForm(f => ({ ...f, allowed_products: f.allowed_products.filter(x => x !== p) }))}
+                            className="hover:text-red-600 dark:hover:text-red-400">✕</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Add-product dropdown (options = catalogue names not already chosen) */}
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v) setForm(f => ({ ...f, allowed_products: [...new Set([...f.allowed_products, v])] }));
+                    }}
+                    className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition"
+                  >
+                    <option value="">{form.allowed_products.length ? '➕ أضف منتجاً آخر…' : '➕ اختر المنتجات المسموح بها…'}</option>
+                    {productNames.filter(n => !form.allowed_products.includes(n)).map(n => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+
+                  <p className="text-xs mt-1.5 pr-1 leading-relaxed">
+                    {form.allowed_products.length
+                      ? <span className="text-amber-600 dark:text-amber-400">🔒 هذا الموظف سيستقبل طلبات هذه المنتجات فقط.</span>
+                      : <span className="text-slate-400 dark:text-slate-600">🔓 لا يوجد تقييد — يتعامل الموظف مع جميع المنتجات.</span>}
+                  </p>
                 </div>
               )}
             </div>

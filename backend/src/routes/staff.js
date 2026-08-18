@@ -24,8 +24,8 @@ const SUPERVISOR_MANAGED_ROLE    = 'agent';   // may only create/edit/suspend ag
 const SUPERVISOR_GRANTABLE_PERMS = ['orders', 'shipping_followups'];
 /* Body fields a supervisor may set. 'role' is allowed but ONLY as 'agent'
    (enforced separately); commission / agency / financial fields are absent by design. */
-const SUPERVISOR_CREATE_FIELDS = new Set(['name', 'email', 'password', 'role', 'permissions']);
-const SUPERVISOR_EDIT_FIELDS   = new Set(['name', 'role', 'is_active', 'permissions', 'password']);
+const SUPERVISOR_CREATE_FIELDS = new Set(['name', 'email', 'password', 'role', 'permissions', 'allowed_products']);
+const SUPERVISOR_EDIT_FIELDS   = new Set(['name', 'role', 'is_active', 'permissions', 'password', 'allowed_products']);
 
 /* Returns an Arabic error string if a NON-admin (supervisor) caller's payload
    exceeds the guard rails, or null when the action is permitted. `targetRole`
@@ -67,6 +67,9 @@ const migrations = [
   /* ── Persisted auto-distribution weight (%) — drives weighted round-robin
         assignment of incoming EasyOrder webhook orders. 0 = excluded. ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS distribution_percentage NUMERIC(5,2) NOT NULL DEFAULT 0`,
+  /* ── Product-based routing restriction. Empty/NULL = agent handles ALL
+        products (back-compat); non-empty = only these product names. ── */
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_products TEXT[] DEFAULT '{}'`,
   /* ── Presence heartbeat — last time the user pinged while logged in. Powers
         the Online/Offline badge in the staff table. ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ`,
@@ -110,6 +113,7 @@ const RETURNING = `
     COALESCE(comm_delivered, 0)                 AS comm_delivered,
     COALESCE(comm_rejected,  0)                 AS comm_rejected,
     COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
+    COALESCE(allowed_products, '{}'::TEXT[])     AS allowed_products,
     referral_code,
     created_at
 `;
@@ -165,6 +169,7 @@ router.get('/', authenticate, requireAdminOrAnyPermission('manage_staff', 'reass
         COALESCE(comm_rejected,  0)                 AS comm_rejected,
         COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
         COALESCE(distribution_percentage, 0)        AS distribution_percentage,
+        COALESCE(allowed_products, '{}'::TEXT[])     AS allowed_products,
         referral_code,
         last_active_at,
         created_at
@@ -230,12 +235,18 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
        PRE-VERIFIED (email_verified=true, no otp_code) and can log in immediately —
        the login OTP gate never fires for them. Only self-service signups via
        /api/auth/register go through email-OTP verification. */
+    /* Product-routing restriction — sanitize to distinct, trimmed, non-empty
+       names. Only meaningful for agents; harmless (empty) for other roles. */
+    const allowedProducts = Array.isArray(req.body.allowed_products)
+      ? [...new Set(req.body.allowed_products.map((s) => String(s).trim()).filter(Boolean))]
+      : [];
+
     const result = await pool.query(
       `INSERT INTO users
          (name, email, password_hash, role, is_active, is_absent,
           permissions, commission_rate, comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
-          email_verified, otp_code, referral_code, business_id)
-       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,true,NULL,$11,$12)
+          email_verified, otp_code, referral_code, allowed_products, business_id)
+       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,true,NULL,$11,$12,$13)
        ${RETURNING}`,
       [
         name.trim() || null,
@@ -249,7 +260,8 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
         parseFloat(comm_rejected)   || 0,
         parseFloat(comm_no_answer)  || 0,
         refCode,                     // $11 — media-buyer referral code (nullable)
-        req.user.business_id,        // $12
+        allowedProducts,             // $12 — product-routing restriction
+        req.user.business_id,        // $13
       ]
     );
 
@@ -319,6 +331,13 @@ router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), asy
   if (comm_delivered  !== undefined) { sets.push(`comm_delivered  = $${idx++}`); vals.push(parseFloat(comm_delivered)  || 0); }
   if (comm_rejected   !== undefined) { sets.push(`comm_rejected   = $${idx++}`); vals.push(parseFloat(comm_rejected)   || 0); }
   if (comm_no_answer  !== undefined) { sets.push(`comm_no_answer  = $${idx++}`); vals.push(parseFloat(comm_no_answer)  || 0); }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'allowed_products')) {
+    /* Product-routing restriction — distinct, trimmed, non-empty. []/null = all. */
+    const allowedProducts = Array.isArray(req.body.allowed_products)
+      ? [...new Set(req.body.allowed_products.map((s) => String(s).trim()).filter(Boolean))]
+      : [];
+    sets.push(`allowed_products = $${idx++}`); vals.push(allowedProducts);
+  }
 
   if (password !== undefined) {
     if (password.length < 6)

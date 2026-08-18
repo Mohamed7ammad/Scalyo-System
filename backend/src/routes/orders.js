@@ -2,6 +2,19 @@ const express       = require('express');
 const pool          = require('../config/db');
 const authenticate  = require('../middleware/auth');
 const { requireAdmin, filterAgentFields, requireAdminOrPermission } = require('../middleware/roleGuard');
+const { agentAllowsProduct } = require('../utils/productRouting');
+
+/* Look up ONE agent's product-routing restriction (allowed_products) by email,
+   tenant-scoped. Returns [] when unrestricted / unknown → handles all products. */
+async function agentAllowedProducts(email, businessId) {
+  if (!email) return [];
+  const { rows } = await pool.query(
+    `SELECT COALESCE(allowed_products, '{}'::TEXT[]) AS allowed_products
+       FROM users WHERE email = $1 AND business_id = $2 LIMIT 1`,
+    [email, businessId]
+  );
+  return rows.length ? (rows[0].allowed_products || []) : [];
+}
 
 /* Callers who may see + act on the WHOLE tenant order pool: full admins, and
    team-leaders (supervisors) carrying the 'reassign_orders' permission. Anyone
@@ -642,8 +655,11 @@ router.post('/', authenticate, async (req, res) => {
       if (req.user.role === 'agent') {
         assignee = req.user.email;
       } else {
+        /* Least-loaded present agent — but ONLY among agents allowed to handle
+           this order's product. Ordered by load, so the first eligible wins. */
         const { rows: agentRows } = await pool.query(
           `SELECT u.email,
+                  COALESCE(u.allowed_products, '{}'::TEXT[]) AS allowed_products,
                   COUNT(o.id) FILTER (WHERE o."Status" = 'جديد') AS load
              FROM users u
              LEFT JOIN orders o
@@ -652,12 +668,12 @@ router.post('/', authenticate, async (req, res) => {
               AND COALESCE(u.is_active,  true)  = true
               AND COALESCE(u.is_absent, false)  = false
               AND u.business_id = $1
-            GROUP BY u.email
-            ORDER BY load ASC, u.email ASC
-            LIMIT 1`,
+            GROUP BY u.email, u.allowed_products
+            ORDER BY load ASC, u.email ASC`,
           [req.user.business_id]
         );
-        if (agentRows.length) assignee = agentRows[0].email;
+        const eligible = agentRows.find((a) => agentAllowsProduct(a.allowed_products, order.ProductName));
+        if (eligible) assignee = eligible.email;
       }
 
       if (assignee) {
@@ -932,28 +948,41 @@ router.post('/bulk-transfer', authenticate, requireAdminOrPermission('reassign_o
   }
 
   try {
-    /* Only 'جديد' orders move — committed work stays with its agent (matches
-       /transfer's guard; a bulk agent→agent move must never steal confirmed COD). */
-    const result = await pool.query(
-      `UPDATE orders
-       SET    "AssignedTo" = $1,
-              "updatedAt"  = NOW()
-       WHERE  "AssignedTo" = $2
-         AND  "Status"     = 'جديد'
-         AND  business_id  = $3
-       RETURNING id`,
-      [toAgent, fromAgent, req.user.business_id]
+    /* Only 'جديد' orders move — committed work stays with its agent. And only
+       orders whose product the TARGET agent is allowed to handle move; the rest
+       stay with fromAgent (product-routing restriction). */
+    const { rows: cands } = await pool.query(
+      `SELECT id, "ProductName" AS product FROM orders
+        WHERE "AssignedTo" = $1 AND "Status" = 'جديد' AND business_id = $2`,
+      [fromAgent, req.user.business_id]
     );
+    const targetAllowed = await agentAllowedProducts(toAgent, req.user.business_id);
+    const movableIds = cands.filter((o) => agentAllowsProduct(targetAllowed, o.product)).map((o) => o.id);
+    const blocked    = cands.length - movableIds.length;
+
+    let moved = [];
+    if (movableIds.length) {
+      const result = await pool.query(
+        `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+          WHERE id = ANY($2::int[]) AND business_id = $3 AND "Status" = 'جديد'
+          RETURNING id`,
+        [toAgent, movableIds, req.user.business_id]
+      );
+      moved = result.rows;
+    }
 
     /* Audit trail — bulk agent→agent move (all rows are 'جديد'). */
     await recordAssignmentLog(
-      result.rows.map((r) => ({ orderId: r.id, fromAgent, toAgent, status: 'جديد' })),
+      moved.map((r) => ({ orderId: r.id, fromAgent, toAgent, status: 'جديد' })),
       { businessId: req.user.business_id, changedBy: req.user.email, changedById: req.user.id, source: 'bulk-transfer' }
     );
 
     res.json({
-      message:     `تم نقل ${result.rows.length} طلب بنجاح`,
-      transferred: result.rows.length,
+      message: blocked
+        ? `تم نقل ${moved.length} طلب — و${blocked} طلب بقيت لأن الموظف غير مصرّح له بمنتجها`
+        : `تم نقل ${moved.length} طلب بنجاح`,
+      transferred: moved.length,
+      blockedByProduct: blocked,
     });
   } catch (err) {
     console.error(err);
@@ -978,52 +1007,58 @@ router.post('/auto-distribute', authenticate, requireAdminOrPermission('reassign
 
     /* 1. ALL 'جديد' orders in THIS queue (live or lost) — regardless of AssignedTo */
     const unassignedResult = await client.query(
-      `SELECT id FROM orders
+      `SELECT id, "ProductName" AS product FROM orders
         WHERE "Status" = 'جديد' AND business_id = $1 AND is_lost_order = $2
         ORDER BY id ASC`,
       [businessId, lostOnly]
     );
-    const orderIds = unassignedResult.rows.map((r) => r.id);
+    const orders = unassignedResult.rows;
 
-    if (orderIds.length === 0) {
+    if (orders.length === 0) {
       await client.query('ROLLBACK');
       return res.json({ message: 'لا توجد طلبات بحالة جديد', distributed: 0, agentsCount: 0 });
     }
 
-    /* 2. Present, active agents */
+    /* 2. Present, active agents (+ their product restrictions) */
     const agentsResult = await client.query(
-      `SELECT email FROM users
+      `SELECT email, COALESCE(allowed_products, '{}'::TEXT[]) AS allowed_products FROM users
        WHERE  role = 'agent'
          AND  COALESCE(is_active, true)  = true
          AND  COALESCE(is_absent, false) = false
          AND  business_id = $1`,
       [businessId]
     );
-    const agents = agentsResult.rows;
+    const agents = agentsResult.rows.map((r) => ({ email: r.email, weight: 1, allowed: r.allowed_products || [] }));
 
     if (agents.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'لا يوجد موظفون حاضرون لتوزيع الطلبات عليهم' });
     }
 
-    /* 3. Round-robin assignment */
-    for (let i = 0; i < orderIds.length; i++) {
-      const target = agents[i % agents.length];
-      await client.query(
-        `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW() WHERE id = $2 AND business_id = $3`,
-        [target.email, orderIds[i], businessId]
-      );
+    /* 3. Product-aware balanced assignment — an order only goes to an agent
+          allowed to handle its product; the rest are left unassigned. */
+    const { byAgent, unassigned } = assignProductAware(orders, agents);
+    for (const a of agents) {
+      const ids = byAgent.get(a.email) || [];
+      if (ids.length) {
+        await client.query(
+          `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+            WHERE id = ANY($2::int[]) AND business_id = $3 AND "Status" = 'جديد'`,
+          [a.email, ids, businessId]
+        );
+      }
     }
 
     await client.query('COMMIT');
-
-    console.log(
-      `[AutoDistribute] ✅ ${orderIds.length} orders → ${agents.length} agents`
-    );
+    const distributed = orders.length - unassigned.length;
+    console.log(`[AutoDistribute] ✅ ${distributed}/${orders.length} orders → ${agents.length} agents` +
+      (unassigned.length ? ` | ${unassigned.length} unassigned (product restriction)` : ''));
 
     res.json({
-      message:     `تم توزيع ${orderIds.length} طلب على ${agents.length} موظف`,
-      distributed: orderIds.length,
+      message:     `تم توزيع ${distributed} طلب على ${agents.length} موظف` +
+                   (unassigned.length ? ` — و${unassigned.length} طلب بدون موظف مصرّح لمنتجها` : ''),
+      distributed,
+      unassigned:  unassigned.length,
       agentsCount: agents.length,
     });
   } catch (err) {
@@ -1057,6 +1092,33 @@ function apportion(total, weights) {
   return counts;
 }
 
+/* ── Product-aware weighted assignment ───────────────────────────────────────
+   `agents` = [{ email, weight, allowed }]; each `order` = { id, product }.
+   For every order, among the agents ALLOWED to handle that product, picks the
+   one furthest behind their weighted pace ((count+1)/weight is lowest) — a smooth
+   weighted round-robin that also honours per-agent product restrictions. Orders
+   with NO eligible agent are left unassigned (never force-routed to an untrained
+   agent). With no restrictions this reproduces the old balanced distribution.
+   Returns { byAgent: Map email→[orderIds], counts: Map email→n, unassigned:[] }. */
+function assignProductAware(orders, agents) {
+  const counts  = new Map(agents.map((a) => [a.email, 0]));
+  const byAgent = new Map(agents.map((a) => [a.email, []]));
+  const unassigned = [];
+  for (const ord of orders) {
+    let best = null, bestScore = Infinity;
+    for (const a of agents) {
+      if (!agentAllowsProduct(a.allowed, ord.product)) continue;
+      const w = a.weight > 0 ? a.weight : 0.0001;
+      const score = (counts.get(a.email) + 1) / w;
+      if (score < bestScore) { bestScore = score; best = a; }
+    }
+    if (!best) { unassigned.push(ord.id); continue; }
+    byAgent.get(best.email).push(ord.id);
+    counts.set(best.email, counts.get(best.email) + 1);
+  }
+  return { byAgent, counts, unassigned };
+}
+
 /* ── POST /api/orders/distribute — admin only ────────────────────────────────
    Distributes ALL 'جديد' orders across agents, either equally or by custom %.
    Body:
@@ -1078,19 +1140,19 @@ router.post('/distribute', authenticate, requireAdminOrPermission('reassign_orde
        are excluded here — they're distributed only from the dedicated lost page via
        /auto-distribute { lost: true }, never through the live distribution modal. */
     const ordRes = await client.query(
-      `SELECT id FROM orders
+      `SELECT id, "ProductName" AS product FROM orders
         WHERE "Status" = 'جديد' AND business_id = $1 AND is_lost_order = FALSE
         ORDER BY id ASC`,
       [businessId]
     );
-    const orderIds = ordRes.rows.map((r) => r.id);
-    if (orderIds.length === 0) {
+    const orders = ordRes.rows;
+    if (orders.length === 0) {
       await client.query('ROLLBACK');
       return res.json({ message: 'لا توجد طلبات بحالة جديد', distributed: 0, breakdown: [] });
     }
 
-    /* 2. Resolve the target agents + their weights. */
-    let targets;   // [{ email, weight }]
+    /* 2. Resolve the target agents + their weights + product restrictions. */
+    let targets;   // [{ email, weight, allowed }]
     if (mode === 'custom') {
       const allocations = Array.isArray(req.body.allocations) ? req.body.allocations : [];
       if (allocations.length === 0) {
@@ -1110,18 +1172,21 @@ router.post('/distribute', authenticate, requireAdminOrPermission('reassign_orde
          int[] (which throws "invalid input syntax for integer" / type mismatch). */
       const ids = allocations.map((a) => String(a.agentId));
       const usersRes = await client.query(
-        `SELECT id, email FROM users
+        `SELECT id, email, COALESCE(allowed_products, '{}'::TEXT[]) AS allowed_products FROM users
           WHERE id::text = ANY($1::text[]) AND role = 'agent'
             AND COALESCE(is_active, true) = true
             AND COALESCE(is_absent, false) = false      -- skip ABSENT agents even if given a %
             AND business_id = $2`,
         [ids, businessId]
       );
-      const emailById = new Map(usersRes.rows.map((u) => [String(u.id), u.email]));
+      const byId = new Map(usersRes.rows.map((u) => [String(u.id), u]));
 
       targets = allocations
-        .map((a) => ({ email: emailById.get(String(a.agentId)), weight: Number(a.percentage) || 0 }))
-        .filter((t) => t.email && t.weight > 0);   // drop unknown agents / 0%
+        .map((a) => {
+          const u = byId.get(String(a.agentId));
+          return u ? { email: u.email, weight: Number(a.percentage) || 0, allowed: u.allowed_products || [] } : null;
+        })
+        .filter((t) => t && t.weight > 0);   // drop unknown agents / 0%
 
       if (targets.length === 0) {
         await client.query('ROLLBACK');
@@ -1130,7 +1195,7 @@ router.post('/distribute', authenticate, requireAdminOrPermission('reassign_orde
     } else {
       /* Equal mode — present, active agents share evenly. */
       const agentsRes = await client.query(
-        `SELECT email FROM users
+        `SELECT email, COALESCE(allowed_products, '{}'::TEXT[]) AS allowed_products FROM users
           WHERE role = 'agent' AND COALESCE(is_active, true) = true
             AND COALESCE(is_absent, false) = false AND business_id = $1
           ORDER BY id ASC`,
@@ -1140,38 +1205,39 @@ router.post('/distribute', authenticate, requireAdminOrPermission('reassign_orde
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'لا يوجد موظفون حاضرون لتوزيع الطلبات عليهم' });
       }
-      const equalWeight = 100 / agentsRes.rows.length;
-      targets = agentsRes.rows.map((r) => ({ email: r.email, weight: equalWeight }));
+      targets = agentsRes.rows.map((r) => ({ email: r.email, weight: 1, allowed: r.allowed_products || [] }));
     }
 
-    /* 3. Exact integer counts via largest-remainder. */
-    const counts = apportion(orderIds.length, targets.map((t) => t.weight));
+    /* 3. Product-aware weighted assignment — respects both the % weights AND each
+          agent's allowed_products. Orders no eligible agent can take are skipped. */
+    const { byAgent, counts, unassigned } = assignProductAware(orders, targets);
 
-    /* 4. Assign sequential slices of the order list to each agent. */
-    let cursor = 0;
+    /* 4. Persist — one UPDATE per agent (re-assert 'جديد' so a status that changed
+          between SELECT and write can never be reassigned). */
     const breakdown = [];
-    for (let t = 0; t < targets.length; t++) {
-      const slice = orderIds.slice(cursor, cursor + counts[t]);
-      cursor += counts[t];
-      if (slice.length > 0) {
+    for (const t of targets) {
+      const ids = byAgent.get(t.email) || [];
+      if (ids.length) {
         await client.query(
-          /* Re-assert "Status" = 'جديد' on the UPDATE so a processed order
-             (confirmed / rejected / shipped …) can NEVER be reassigned, even if
-             its status changed between the SELECT above and this write. */
           `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
             WHERE id = ANY($2::int[]) AND business_id = $3 AND "Status" = 'جديد'`,
-          [targets[t].email, slice, businessId]
+          [t.email, ids, businessId]
         );
       }
-      breakdown.push({ email: targets[t].email, count: slice.length });
+      breakdown.push({ email: t.email, count: counts.get(t.email) || 0 });
     }
 
     await client.query('COMMIT');
-    console.log(`[Distribute] ✅ ${mode} — ${orderIds.length} orders → ${targets.length} agents`);
+    const distributed = orders.length - unassigned.length;
+    console.log(`[Distribute] ✅ ${mode} — ${distributed}/${orders.length} orders → ${targets.length} agents` +
+      (unassigned.length ? ` | ${unassigned.length} unassigned (no eligible agent for product)` : ''));
 
     res.json({
-      message:     `تم توزيع ${orderIds.length} طلب على ${targets.length} موظف`,
-      distributed: orderIds.length,
+      message: unassigned.length
+        ? `تم توزيع ${distributed} طلب على ${targets.length} موظف — و${unassigned.length} طلب بدون موظف مصرّح لمنتجها`
+        : `تم توزيع ${distributed} طلب على ${targets.length} موظف`,
+      distributed,
+      unassigned: unassigned.length,
       mode,
       breakdown,
     });
@@ -1213,20 +1279,25 @@ router.post('/transfer', authenticate, requireAdminOrPermission('reassign_orders
     }
     const targetEmail = agentResult.rows[0].email;
 
-    /* ── Snapshot the candidate orders FIRST (current owner + status) ──────────
-       so we can (a) skip committed/confirmed orders, and (b) log from→to. */
+    /* ── Snapshot the candidate orders FIRST (owner + status + product) ────────
+       so we can (a) skip committed orders, (b) skip products the target agent is
+       not allowed to handle, and (c) log from→to. */
     const { rows: candidates } = await pool.query(
-      `SELECT id, "AssignedTo" AS from_agent, "Status" AS status
+      `SELECT id, "AssignedTo" AS from_agent, "Status" AS status, "ProductName" AS product
          FROM orders WHERE id = ANY($1::int[]) AND business_id = $2`,
       [orderIds, req.user.business_id]
     );
 
-    /* CRITICAL GUARD: never reassign an order an agent has already committed
-       (confirmed / shipped / delivered / returned / rejected). This is what was
-       silently stealing agents' confirmed orders when a team-leader transferred
-       a stale multi-selection. Skipped orders are reported back to the UI. */
-    const movable = candidates.filter((o) => !isProtectedStatus(o.status));
+    /* Product-routing restriction of the TARGET agent (empty = all products). */
+    const targetAllowed = await agentAllowedProducts(targetEmail, req.user.business_id);
+
+    /* Split the selection:
+       • skipped  → committed status (confirmed/shipped/…) — never reassigned.
+       • blocked  → target agent not trained on the product — skipped, reported.
+       • movable  → everything else, safe to move. */
     const skipped = candidates.filter((o) =>  isProtectedStatus(o.status));
+    const blocked = candidates.filter((o) => !isProtectedStatus(o.status) && !agentAllowsProduct(targetAllowed, o.product));
+    const movable = candidates.filter((o) => !isProtectedStatus(o.status) &&  agentAllowsProduct(targetAllowed, o.product));
     const movableIds = movable.map((o) => o.id);
 
     let transferredIds = [];
@@ -1254,18 +1325,20 @@ router.post('/transfer', authenticate, requireAdminOrPermission('reassign_orders
 
     console.log(
       `[Transfer] ✅ ${transferredIds.length} orders → "${targetEmail}" by ${req.user.email}` +
-      (skipped.length ? ` | ⛔ skipped ${skipped.length} committed order(s)` : '')
+      (skipped.length ? ` | ⛔ skipped ${skipped.length} committed` : '') +
+      (blocked.length ? ` | 🚫 blocked ${blocked.length} (product restriction)` : '')
     );
 
-    const msg = skipped.length
-      ? `تم نقل ${transferredIds.length} طلب إلى ${targetEmail}. تم تجاهل ${skipped.length} طلب لأنها مؤكدة/قيد المعالجة بالفعل.`
-      : `تم نقل ${transferredIds.length} طلب إلى ${targetEmail}`;
+    const parts = [`تم نقل ${transferredIds.length} طلب إلى ${targetEmail}`];
+    if (skipped.length) parts.push(`تم تجاهل ${skipped.length} طلب مؤكد/قيد المعالجة`);
+    if (blocked.length) parts.push(`تم تجاهل ${blocked.length} طلب لأن الموظف غير مصرّح له بمنتجها`);
 
     res.json({
-      message:     msg,
+      message:     parts.join(' — '),
       transferred: transferredIds.length,
-      skipped:     skipped.length,
-      skippedIds:  skipped.map((o) => o.id),
+      skipped:     skipped.length + blocked.length,
+      skippedIds:  [...skipped, ...blocked].map((o) => o.id),
+      blockedByProduct: blocked.length,
       targetEmail,
     });
   } catch (err) {
@@ -1512,6 +1585,19 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     return res.status(403).json({
       error: 'لا يمكن إعادة تعيين طلب تم تأكيده أو معالجته بالفعل.',
     });
+  }
+
+  /* ── Product-routing guard ──────────────────────────────────────────────────
+     If this PATCH reassigns the order, the TARGET agent must be allowed to handle
+     the order's product. Enforced for admins too — a product restriction is a
+     hard routing rule, not a privilege gate. */
+  if (Object.prototype.hasOwnProperty.call(updates, 'AssignedTo') && updates.AssignedTo) {
+    const allowed = await agentAllowedProducts(updates.AssignedTo, businessId);
+    if (!agentAllowsProduct(allowed, currentProductName)) {
+      return res.status(400).json({
+        error: `هذا الموظف غير مصرّح له بمعالجة المنتج: ${currentProductName || 'غير محدد'}`,
+      });
+    }
   }
 
   /* ── Step 1b: Recalculate total price when quantity changes ─────────
