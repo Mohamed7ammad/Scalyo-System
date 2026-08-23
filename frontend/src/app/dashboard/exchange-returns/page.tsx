@@ -47,15 +47,44 @@ const ALL_STATUSES = 'كل الحالات';
 
 interface Toast { message: string; type: 'success' | 'error' }
 
-/* ── Modal wrapper (same pattern as after-sales) ─────────────────────────── */
-function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+/* ── Modal wrapper — natural-flow layout ───────────────────────────────────
+   The OVERLAY is the scroll container (fixed, fills the viewport, scrolls
+   vertically). Inside it the card is a plain block that grows to fit its
+   content — no max-height, no sticky/fixed footer, no flex height tricks.
+   The Save/Cancel row is simply the last thing in the card, so on a phone the
+   user scrolls the page down and the buttons are right there after the final
+   field. This is the one pattern every mobile browser (incl. iOS Safari)
+   handles reliably. The page behind is scroll-locked while the modal is open. */
+function Modal({ children, footer, onClose }: {
+  children: React.ReactNode;
+  footer?:  React.ReactNode;
+  onClose:  () => void;
+}) {
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
   return (
     <div
-      className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm overflow-y-auto overscroll-contain"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md p-6" dir="rtl">
-        {children}
+      {/* min-h-full keeps short modals vertically centred on desktop; tall
+          modals simply extend the overlay's scroll height. */}
+      <div
+        className="min-h-full flex items-start sm:items-center justify-center p-3 sm:p-4"
+        onClick={(e) => e.target === e.currentTarget && onClose()}
+      >
+        <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl p-5 sm:p-6" dir="rtl">
+          {children}
+          {footer && (
+            <div className="flex gap-3 mt-6 pt-4 border-t border-slate-200 dark:border-slate-800">
+              {footer}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -521,7 +550,21 @@ export default function ExchangeReturnsPage() {
 
       {/* ══ Create modal ═══════════════════════════════════════════════════ */}
       {showCreate && (
-        <Modal onClose={() => !createSaving && setShowCreate(false)}>
+        <Modal
+          onClose={() => !createSaving && setShowCreate(false)}
+          footer={
+            <>
+              <button onClick={handleCreate} disabled={createSaving}
+                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50">
+                {createSaving ? 'جارٍ الحفظ…' : 'تسجيل الطلب'}
+              </button>
+              <button onClick={() => setShowCreate(false)} disabled={createSaving}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 disabled:opacity-50">
+                إلغاء
+              </button>
+            </>
+          }
+        >
           <h2 className="text-base font-bold text-slate-800 dark:text-slate-100 mb-1">إضافة طلب جديد</h2>
           <p className="text-xs text-slate-400 dark:text-slate-500 mb-5">يُفتح الطلب بحالة «قيد المراجعة»</p>
 
@@ -583,22 +626,26 @@ export default function ExchangeReturnsPage() {
             </div>
           </div>
 
-          <div className="flex gap-3 mt-6">
-            <button onClick={handleCreate} disabled={createSaving}
-              className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50">
-              {createSaving ? 'جارٍ الحفظ…' : 'تسجيل الطلب'}
-            </button>
-            <button onClick={() => setShowCreate(false)} disabled={createSaving}
-              className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 disabled:opacity-50">
-              إلغاء
-            </button>
-          </div>
         </Modal>
       )}
 
       {/* ══ Review / status modal ══════════════════════════════════════════ */}
       {editTarget && (
-        <Modal onClose={() => !editSaving && setEditTarget(null)}>
+        <Modal
+          onClose={() => !editSaving && setEditTarget(null)}
+          footer={
+            <>
+              <button onClick={handleEdit} disabled={editSaving}
+                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50">
+                {editSaving ? 'جارٍ الحفظ…' : 'حفظ التحديث'}
+              </button>
+              <button onClick={() => setEditTarget(null)} disabled={editSaving}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 disabled:opacity-50">
+                إلغاء
+              </button>
+            </>
+          }
+        >
           <h2 className="text-base font-bold text-slate-800 dark:text-slate-100 mb-1">تحديث الطلب</h2>
           <p className="text-xs text-slate-400 dark:text-slate-500 mb-1">
             {editTarget.customer_name} (<span dir="ltr">{editTarget.customer_phone}</span>)
@@ -664,16 +711,6 @@ export default function ExchangeReturnsPage() {
             </div>
           </div>
 
-          <div className="flex gap-3 mt-6">
-            <button onClick={handleEdit} disabled={editSaving}
-              className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50">
-              {editSaving ? 'جارٍ الحفظ…' : 'حفظ التحديث'}
-            </button>
-            <button onClick={() => setEditTarget(null)} disabled={editSaving}
-              className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 disabled:opacity-50">
-              إلغاء
-            </button>
-          </div>
         </Modal>
       )}
     </div>
