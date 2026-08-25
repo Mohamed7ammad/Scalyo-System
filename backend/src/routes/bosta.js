@@ -186,17 +186,21 @@ async function refreshBostaToken({ email, password, businessId }) {
   }
 }
 
-/* ── Authenticated request with one auto-login retry on 401 ──────────────────
+/* ── Authenticated request with one auto-login retry on 401/403 ──────────────
    `doRequest(authHeader)` must perform the axios call using the supplied
-   Authorization header and return the axios response.  If it throws a 401 we
-   refresh the token once and retry; any other error propagates to the caller. */
+   Authorization header and return the axios response.  If it throws a 401 OR 403
+   (Bosta's dashboard API returns EITHER when the bearer session is expired /
+   invalidated — e.g. after a password change), we refresh the token ONCE using
+   the stored email/password and retry; any other error propagates to the caller.
+   The single retry means a genuine (non-auth) 403 just fails through, no loop. */
 async function withAuthRetry(creds, doRequest) {
-  let authHeader = creds.bearerToken;
+  const authHeader = creds.bearerToken;
   try {
     return await doRequest(authHeader);
   } catch (err) {
-    if (err.response?.status === 401) {
-      console.warn('[bosta] Request returned 401 — attempting token auto-refresh…');
+    const status = err.response?.status;
+    if (status === 401 || status === 403) {
+      console.warn(`[bosta] Request returned ${status} — attempting token auto-refresh…`);
       const fresh = await refreshBostaToken(creds);
       if (fresh) {
         creds.bearerToken = fresh; // so subsequent calls in this request reuse it
@@ -1212,3 +1216,4 @@ module.exports = router;
 module.exports.reconcileInTransitOrders = reconcileInTransitOrders;
 module.exports.fetchReturningParcels = fetchReturningParcels;
 module.exports.fetchInTransitParcels = fetchInTransitParcels;
+module.exports.refreshBostaToken = refreshBostaToken;

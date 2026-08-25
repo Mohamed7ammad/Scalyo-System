@@ -4,6 +4,9 @@ const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
 const { enqueueBosta } = require('../services/bostaQueue');
+/* Require the module (not a destructured fn) and read .refreshBostaToken at CALL
+   time — avoids any circular-require edge where the export isn't set yet at load. */
+const bostaModule = require('./bosta');
 
 const router = express.Router();
 
@@ -671,7 +674,43 @@ router.post('/settings', authenticate, requireAdmin, async (req, res) => {
     );
 
     console.log(`✅  Shipping settings saved for provider "${provider_name.trim()}"`);
-    res.json({ message: 'تم حفظ إعدادات الشحن بنجاح', ...rows[0] });
+
+    /* ── Proactive Bosta token refresh ──────────────────────────────────────────
+       When the Bosta email/password is (re)entered, the previously-saved
+       bearer_token is now STALE — a password change on Bosta invalidates it. So we
+       immediately log in with the fresh credentials and overwrite bearer_token,
+       instead of waiting for the next request to 401/403. Uses the EFFECTIVE
+       credentials read back from the row (COALESCE may have kept an existing
+       email). Never fails the save — the token status is surfaced to the UI.     */
+    let tokenRefreshed = null;   // null = not attempted, true/false = attempt result
+    if (provider_name.trim() === 'bosta' && (norm(password) || norm(email))) {
+      try {
+        const { rows: cr } = await pool.query(
+          `SELECT email, password FROM shipping_settings WHERE provider_name = 'bosta' AND business_id = $1`,
+          [req.user.business_id]
+        );
+        const creds = cr[0];
+        if (creds?.email && creds?.password && typeof bostaModule.refreshBostaToken === 'function') {
+          const fresh = await bostaModule.refreshBostaToken({ email: creds.email, password: creds.password, businessId: req.user.business_id });
+          tokenRefreshed = !!fresh;
+          console.log(`[shipping/settings] Bosta token refresh after credential change → ${tokenRefreshed ? '✅ new token saved' : '❌ login failed'}`);
+        }
+      } catch (refreshErr) {
+        tokenRefreshed = false;
+        console.warn('[shipping/settings] Bosta token refresh error:', refreshErr.message);
+      }
+    }
+
+    res.json({
+      message: 'تم حفظ إعدادات الشحن بنجاح',
+      ...rows[0],
+      ...(tokenRefreshed !== null && {
+        tokenRefreshed,
+        tokenMessage: tokenRefreshed
+          ? 'تم تجديد توكن Bosta تلقائياً بنجاح.'
+          : 'تم الحفظ، لكن تعذّر تسجيل الدخول إلى Bosta بالبيانات الجديدة — تحقّق من البريد وكلمة المرور.',
+      }),
+    });
 
   } catch (err) {
     console.error('[shipping/settings POST]', err.message);
