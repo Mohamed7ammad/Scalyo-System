@@ -403,6 +403,21 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
      row is shadowing a correct BOSTA_API_KEY env var (DB takes precedence).   */
   console.log(`[shipping/forward] Using Bosta api_key from "${keySource}" (length ${apiKey.length}) for business ${businessId}`);
 
+  /* ── Pre-flight sanity check ────────────────────────────────────────────────
+     Shipment creation authenticates with the api.bosta.co API KEY (a long token
+     from Bosta → Settings → API), which is a DIFFERENT credential from the
+     app.bosta.co bearer token (wallet) and is NOT derived from the email/password
+     — so it can't be auto-refreshed. A short value here is almost always a
+     PASSWORD or the bearer token pasted into the "API Key" field by mistake,
+     which makes EVERY shipment fail with "Authorization token or API key". Fail
+     fast with a clear, actionable message instead of hammering Bosta N times.   */
+  if (apiKey.length < 20) {
+    console.error(`[shipping/forward] ⛔ api_key is only ${apiKey.length} chars — almost certainly NOT a Bosta API key (password/bearer pasted by mistake).`);
+    return res.status(400).json({
+      error: 'مفتاح Bosta API غير صالح (قصير جداً). الصق «API Key» الصحيح من لوحة Bosta (Settings → API) في إعدادات الشحن — وهو غير كلمة المرور وغير التوكن (Bearer).',
+    });
+  }
+
   try {
     let orders;
 
@@ -532,11 +547,21 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
         if (done % 25 === 0) console.log(`[shipping/forward] progress ${done}/${orders.length}`);
 
       } catch (err) {
-        const bostaError =
+        const rawMsg =
           err.response?.data?.message ??
           err.response?.data?.error   ??
           err.message                 ??
           'خطأ غير معروف';
+
+        /* Translate Bosta's auth rejection into a clear, actionable message that
+           points at the RIGHT field (the api.bosta.co API Key — not the password
+           / bearer token), so this stops looking like the wallet-token problem. */
+        const status = err.response?.status;
+        const isAuth = status === 401 || status === 403 ||
+          /authorization\s+token\s+or\s+api\s+key/i.test(String(rawMsg));
+        const bostaError = isAuth
+          ? 'مفتاح Bosta API غير صالح — حدّث «API Key» في إعدادات الشحن (من لوحة Bosta → Settings → API). ليس كلمة المرور أو التوكن.'
+          : rawMsg;
 
         failed.push({
           orderId: order.id,
