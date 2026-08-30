@@ -635,13 +635,17 @@ router.post('/', authenticate, async (req, res) => {
   // Quantity: integer ≥ 1, defaults to 1 when omitted/invalid.
   const qty = Math.max(1, parseInt(quantity, 10) || 1);
   const chatSource = normChatSource(req.body.chat_source);   // channel the order was sourced from
+  /* Courier note printed on the Bosta AWB (toBosta maps ShippingNotes → notes).
+     Accept either casing so the field works from any caller. */
+  const rawShipNotes = req.body.ShippingNotes ?? req.body.shipping_notes;
+  const shippingNotes = rawShipNotes != null && String(rawShipNotes).trim() ? String(rawShipNotes).trim() : null;
 
   try {
     const result = await pool.query(
       `INSERT INTO orders
          ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "sku",
-          "quantity", "DeliveryRate", "Status", order_source, chat_source, business_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9, $10)
+          "quantity", "DeliveryRate", "Status", order_source, chat_source, "ShippingNotes", business_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9, $10, $11)
        RETURNING *`,
       [
         String(FullName).trim(),
@@ -653,6 +657,7 @@ router.post('/', authenticate, async (req, res) => {
         sku ? String(sku).trim() : null,
         qty,
         chatSource,
+        shippingNotes,
         req.user.business_id,
       ]
     );

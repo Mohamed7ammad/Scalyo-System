@@ -200,6 +200,7 @@ export interface CreateOrderPayload {
   ProductPrice?: string | number;        // Total / COD amount
   quantity?:     number;                  // number of units (default 1)
   chat_source?:  ChatSource | null;       // channel the moderator sourced it from
+  ShippingNotes?: string | null;          // courier note → printed on the Bosta AWB (Bosta `notes`)
 }
 
 /* ── Order source (chat channel) — for moderator commission tracking ────────── */

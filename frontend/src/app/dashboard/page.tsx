@@ -200,7 +200,7 @@ export default function DashboardPage() {
   const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
   const [distPercents,  setDistPercents]  = useState<Record<number, string>>({});
   /* Manual add-order modal */
-  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '', quantity: '1', chat_source: '' };
+  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '', quantity: '1', chat_source: '', ShippingNotes: '' };
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm,      setAddForm]      = useState({ ...EMPTY_ADD_FORM });
   const [addSaving,    setAddSaving]    = useState(false);
@@ -1052,6 +1052,7 @@ export default function DashboardPage() {
         ProductPrice: addForm.ProductPrice.trim() || undefined,
         quantity:     Math.max(1, parseInt(addForm.quantity, 10) || 1),
         chat_source:  (addForm.chat_source || null) as ChatSource | null,
+        ShippingNotes: addForm.ShippingNotes.trim() || null,
       });
       setOrders((prev) => [res.data, ...prev]);   // show instantly at the top
       showToast('تم إضافة الطلب بنجاح', 'success');
@@ -1893,6 +1894,22 @@ export default function DashboardPage() {
                     ))}
                   </select>
                   <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">القناة التي جاء منها الطلب — تُستخدم لحساب عمولات مشرفي الشات.</p>
+                </div>
+
+                {/* Shipping-company note — printed on the Bosta AWB (Bosta `notes`) */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">ملاحظة لشركة الشحن (اختياري)</label>
+                  <textarea
+                    rows={2}
+                    value={addForm.ShippingNotes}
+                    onChange={(e) => setAddForm((p) => ({ ...p, ShippingNotes: e.target.value }))}
+                    placeholder="تعليمات للمندوب — تُطبع على بوليصة الشحن (مثال: الاتصال قبل التوصيل)"
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none resize-y
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  />
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">تُرسَل إلى Bosta وتظهر للمندوب على البوليصة.</p>
                 </div>
               </div>
 
