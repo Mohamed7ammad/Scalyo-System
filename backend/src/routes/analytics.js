@@ -1336,6 +1336,49 @@ router.get('/dashboard', authenticate, async (req, res) => {
   /* Deposit parser — same defensive numeric extraction; net COD = price − deposit. */
   const DEP = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("depositAmount"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
 
+  /* ── "Actively on the road" pipeline predicate ──────────────────────────────
+     SHARED by the 'طلبات في الطريق' count and the 'مستحقات لدى شركة الشحن' cash
+     sum so the two can NEVER diverge. A parcel is genuinely forward-moving toward
+     the customer ONLY when ALL of these hold:
+       • Status = 'تم الشحن' — our SINGLE forward status. Returns
+         ('جاري الإعادة','تم الإرجاع'), rejects ('تم الرفض') and pre-ship
+         ('جديد','لا يرد','مؤجل','تم التأكيد') are ALL excluded by this equality,
+         so a return/failed/canceled parcel can never count as "on the way".
+       • Bosta hasn't zeroed its COD (expected_cod > 0). A return-leg parcel reads
+         بدون تحصيل = 0 and is dropped; NULL = not yet synced ⇒ still forward.
+       • NOT in Bosta's "في انتظار متابعتك" action-required bucket — exceptions
+         (failed-delivery / on-hold) are not moving forward.
+       • Shipped within the last FORWARD_MAX_DAYS days. A COD parcel cannot still
+         be traveling to the customer after that — such rows are GHOSTS (a
+         delivered/returned terminal webhook was MISSED, so the order is stuck at
+         'تم الشحن'). This is the exact leak that inflated the 178 count + dues:
+         old parcels that have really resolved but never left the forward status.
+         Clock = the true ship time (shipped_at), falling back to createdAt for
+         legacy rows shipped before that column existed.
+       • Placed within the selected dashboard date range (${CR} on "createdAt").
+         This makes the two cards answer "of the orders PLACED in this window, how
+         many are STILL on the road, and how much COD is still floating" — the same
+         placement-date cohort every other card buckets by, so daily pending cash
+         lines up with that day's revenue/returns for an accurate day-level P&L.
+         When NO date filter is set, ${CR} is the literal 'TRUE', so the cards fall
+         back to the whole-history live snapshot (unchanged behaviour).
+     FORWARD_MAX_DAYS matches the 10-day stale-ghost threshold used by the ops
+     overview, keeping the two consistent. The date range and the ghost cutoff
+     COMPOSE: for a day more than 10 days in the past every order has already
+     resolved (delivered/returned) or become a ghost, so the cards correctly trend
+     to ~0 for old single days rather than showing stale money. This reflects
+     CURRENT status for that day's cohort — the schema keeps only the live status,
+     not a point-in-time history, so it answers "still floating NOW", not "was in
+     transit at the close of that day". */
+  const FORWARD_MAX_DAYS = 10;
+  const FORWARD_PIPELINE = `
+    "Status" = 'تم الشحن'
+    AND COALESCE("expected_cod"::numeric, 1) > 0
+    AND NOT COALESCE("bosta_action_required", FALSE)
+    AND COALESCE("shipped_at", "createdAt") >= NOW() - INTERVAL '${FORWARD_MAX_DAYS} days'
+    AND ${CR}
+  `;
+
   /* ── 1. Overview: order counts + delivered revenue ── */
   const overviewSql = `
     SELECT
@@ -1349,41 +1392,18 @@ router.get('/dashboard', authenticate, async (req, res) => {
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جديد','لا يرد'))              AS total_pending,
       COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${CR} THEN ${P} ELSE 0 END), 0) AS total_revenue,
       /* ── Logistics pipeline (CURRENT snapshot — intentionally NOT date-bound) ──
-         Forward-moving orders physically in Bosta toward the customer. Our webhook
-         sets Status='تم الشحن' on shipment and keeps it through Bosta's forward
-         codes (10 created → 20/21 processing → 30 in-transit → 41 out-for-delivery),
-         only moving OFF it on delivered/returning/returned. Return-bound parcels are
-         split into 'جاري الإعادة' / 'تم الإرجاع' at ingestion (webhook isReturn) and
-         by the hourly bosta reconciliation (the :R return-leg buckets).
-         These two omit ${CR} on purpose: "on the road right now" is a live snapshot,
-         not a function of the selected date range (it still respects product/tenant
-         scope via ordFilter).
-
-         STRICT forecast — only money ACTIVELY moving toward the customer. A parcel
-         counts as forward ONLY when ALL hold:
-           • Status = 'تم الشحن'  (Ticket Created / Processing / Out-for-delivery —
-             our single forward status; returns are 'جاري الإعادة' / 'تم الإرجاع'),
-           • Bosta hasn't zeroed its COD — COALESCE(expected_cod,1) > 0 (a return-leg
-             "Processing" parcel reads بدون تحصيل = 0; NULL = not yet synced → forward),
-           • NOT in Bosta's "في انتظار متابعتك" action-required bucket
-             (bosta_action_required = FALSE) — exceptions are NOT moving forward, so
-             they are excluded even though they might eventually recover.
+         Forward-moving orders physically in Bosta toward the customer, plus the COD
+         the courier will collect for them. Both use the SHARED FORWARD_PIPELINE
+         predicate (defined above) so the count and the cash sum can never disagree,
+         and so ghosts / returns / failed-delivery parcels are excluded from BOTH.
          Cash = SUM of Bosta's LIVE expected_cod (the exact per-AWB collection,
          already quantity-inclusive), falling back to (ProductPrice − deposit) — which
          is itself the ORDER TOTAL (qty × unit baked in at creation; verified against
          Bosta COD) — for genuinely-forward orders Bosta hasn't reported yet.        */
-      COUNT(id) FILTER (
-        WHERE "Status" = 'تم الشحن'
-          AND COALESCE("expected_cod"::numeric, 1) > 0
-          AND NOT COALESCE("bosta_action_required", FALSE)
-      )                                                                               AS in_transit_count,
+      COUNT(id) FILTER (WHERE ${FORWARD_PIPELINE})                                    AS in_transit_count,
       COALESCE(SUM(
         COALESCE("expected_cod"::numeric, GREATEST(${P} - ${DEP}, 0))
-      ) FILTER (
-        WHERE "Status" = 'تم الشحن'
-          AND COALESCE("expected_cod"::numeric, 1) > 0
-          AND NOT COALESCE("bosta_action_required", FALSE)
-      ), 0)                                                                           AS outstanding_cash
+      ) FILTER (WHERE ${FORWARD_PIPELINE}), 0)                                        AS outstanding_cash
     FROM orders
     WHERE 1=1${ordFilter}
   `;
