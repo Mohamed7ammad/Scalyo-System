@@ -1043,6 +1043,30 @@ export const getDeliveredOrders = (startDate?: string, endDate?: string, product
 export const getMyPerformance = (startDate?: string, endDate?: string) =>
   api.get<AgentAnalytics>(`/api/analytics/my-performance${buildAnalyticsQS(startDate, endDate)}`);
 
+/* ── In-transit drill-down (behind the 'طلبات في الطريق' card) ───────────────── */
+export interface InTransitOrderDetail {
+  id:              number;
+  phone:           string;
+  customer_name:   string | null;
+  tracking_number: string | null;   // Bosta AWB — copy → cross-reference in Bosta portal
+  cod:             number | string;  // pg NUMERIC → parseFloat() before math
+  created_at:      string;
+  shipped_at:      string | null;
+}
+export interface InTransitOrdersResponse {
+  startDate: string | null;
+  endDate:   string | null;
+  count:     number;   // ALWAYS equals the dashboard's in_transit_count for the same filters
+  totalCod:  number;   // ALWAYS equals outstanding_cash for the same filters
+  orders:    InTransitOrderDetail[];
+}
+/** The exact orders behind the 'طلبات في الطريق' count — same FORWARD_PIPELINE +
+ *  date/product/campaign scope as the dashboard card, so count matches perfectly. */
+export const getInTransitOrders = (startDate?: string, endDate?: string, product?: string, mediaBuyer?: string) =>
+  api.get<InTransitOrdersResponse>(
+    `/api/analytics/in-transit-orders${buildAnalyticsQS(startDate, endDate, product, mediaBuyer)}`
+  );
+
 /* ── Accounting / Financial Overview ────────────────────────────── */
 export interface AccountingOverview {
   /** Sum of all collected deposit amounts across every order (cash in hand). */

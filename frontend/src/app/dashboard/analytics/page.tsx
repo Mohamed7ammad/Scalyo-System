@@ -16,8 +16,8 @@ import {
   Cell,
 } from 'recharts';
 
-import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders, getMediaBuyers } from '@/lib/api';
-import type { DeliveredOrdersResponse, MediaBuyer } from '@/lib/api';
+import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders, getMediaBuyers, getInTransitOrders } from '@/lib/api';
+import type { DeliveredOrdersResponse, MediaBuyer, InTransitOrdersResponse } from '@/lib/api';
 import type {
   Product,
   DashboardStats,
@@ -179,20 +179,38 @@ interface KPICardProps {
   trendGood?: boolean;
   accent?:    string;
   highlight?: boolean;
+  onClick?:   () => void;   // when set, the card becomes an interactive drill-down
 }
 
-function KPICard({ label, value, subValue, trend, trendGood = true, accent, highlight }: KPICardProps) {
+function KPICard({ label, value, subValue, trend, trendGood = true, accent, highlight, onClick }: KPICardProps) {
   const trendUp = trend !== undefined && trend > 0;
   const isGood  = trendGood ? trendUp : !trendUp;
+  const clickable = typeof onClick === 'function';
   return (
-    <div className={`rounded-2xl p-5 border shadow-sm transition-all duration-150 hover:shadow-md
+    <div
+      onClick={onClick}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick!(); } } : undefined}
+      className={`rounded-2xl p-5 border shadow-sm transition-all duration-150 hover:shadow-md
+      ${clickable ? 'cursor-pointer hover:-translate-y-0.5 hover:border-sky-400 dark:hover:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400/50' : ''}
       ${highlight
         ? 'bg-gradient-to-br from-indigo-600 to-indigo-800 dark:from-indigo-700 dark:to-indigo-950 border-indigo-500/50'
         : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'}`}>
-      <p className={`text-[11px] font-semibold uppercase tracking-widest mb-2 leading-none
-        ${highlight ? 'text-indigo-200' : 'text-slate-400 dark:text-slate-500'}`}>
-        {label}
-      </p>
+      <div className="flex items-center justify-between mb-2">
+        <p className={`text-[11px] font-semibold uppercase tracking-widest leading-none
+          ${highlight ? 'text-indigo-200' : 'text-slate-400 dark:text-slate-500'}`}>
+          {label}
+        </p>
+        {clickable && (
+          <span className="shrink-0 inline-flex items-center gap-0.5 text-[10px] font-bold text-sky-600 dark:text-sky-400">
+            عرض
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" />
+            </svg>
+          </span>
+        )}
+      </div>
       <div className={`text-2xl font-bold leading-none tracking-tight
         ${highlight ? 'text-white' : (accent ?? 'text-slate-800 dark:text-white')}`}>
         {value}
@@ -579,6 +597,12 @@ export default function AnalyticsDashboard() {
   const [deliveredData,    setDeliveredData]    = useState<DeliveredOrdersResponse | null>(null);
   const [deliveredLoading, setDeliveredLoading] = useState(false);
 
+  /* In-transit drill-down modal (behind the 'طلبات في الطريق' card). */
+  const [inTransitOpen,    setInTransitOpen]    = useState(false);
+  const [inTransitData,    setInTransitData]    = useState<InTransitOrdersResponse | null>(null);
+  const [inTransitLoading, setInTransitLoading] = useState(false);
+  const [copiedAwb,        setCopiedAwb]        = useState<string | null>(null);
+
   /* ── White-label branding (business name + logo) ────────────────── */
   useEffect(() => {
     let alive = true;
@@ -713,6 +737,19 @@ export default function AnalyticsDashboard() {
       .finally(() => { if (alive) setDeliveredLoading(false); });
     return () => { alive = false; };
   }, [deliveredOpen, effectiveDates, product, mediaBuyer]);
+
+  /* In-transit drill-down: fetch the exact orders behind the card while the modal
+     is open, using the SAME filters — so the row count matches the card number. */
+  useEffect(() => {
+    if (!inTransitOpen) return;
+    let alive = true;
+    setInTransitLoading(true);
+    getInTransitOrders(effectiveDates.startDate, effectiveDates.endDate, product, mediaBuyer)
+      .then((res) => { if (alive) setInTransitData(res.data); })
+      .catch(() => { if (alive) setInTransitData({ startDate: null, endDate: null, count: 0, totalCod: 0, orders: [] }); })
+      .finally(() => { if (alive) setInTransitLoading(false); });
+    return () => { alive = false; };
+  }, [inTransitOpen, effectiveDates, product, mediaBuyer]);
 
   /* ── Date picker handlers ─────────────────────────────────────── */
   const handleFromDate = (v: string) => { setFromDate(v); setActiveRange(''); };
@@ -1388,6 +1425,7 @@ export default function AnalyticsDashboard() {
               subValue="قيد التوصيل لدى بوسطة الآن"
               trend={4}
               accent="text-sky-600 dark:text-sky-400"
+              onClick={() => setInTransitOpen(true)}
             />
             <KPICard
               label="مستحقات لدى الشحن"
@@ -2589,6 +2627,104 @@ export default function AnalyticsDashboard() {
         </div>
 
       </div>
+
+      {/* ═══════ In-transit drill-down modal (behind 'طلبات في الطريق') ═══════ */}
+      {inTransitOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          dir="rtl"
+          onClick={(e) => e.target === e.currentTarget && setInTransitOpen(false)}
+        >
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700/60
+            w-full max-w-3xl flex flex-col max-h-[88dvh]">
+            {/* Header */}
+            <div className="flex items-start justify-between px-6 pt-6 pb-4 border-b border-slate-100 dark:border-slate-800">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 dark:text-white leading-tight">طلبات في الطريق</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  {inTransitLoading
+                    ? 'جارٍ التحميل…'
+                    : <>
+                        {fmt(inTransitData?.count ?? 0)} طلب قيد التوصيل
+                        {' · '}مستحقات {fmtEGP(Math.round(inTransitData?.totalCod ?? 0))}
+                        {effectiveDates.startDate && (
+                          <span className="text-slate-400"> · {effectiveDates.startDate}
+                            {effectiveDates.endDate && effectiveDates.endDate !== effectiveDates.startDate ? ` → ${effectiveDates.endDate}` : ''}
+                          </span>
+                        )}
+                      </>}
+                </p>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">انسخ رقم الشحنة (AWB) وتتبّعه في بوابة بوسطة.</p>
+              </div>
+              <button onClick={() => setInTransitOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200
+                  hover:bg-slate-100 dark:hover:bg-slate-800 transition" aria-label="إغلاق">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-auto">
+              {inTransitLoading ? (
+                <div className="text-center py-16 text-slate-400 text-sm">جارٍ تحميل الطلبات…</div>
+              ) : !inTransitData || inTransitData.orders.length === 0 ? (
+                <div className="text-center py-16 px-6">
+                  <p className="text-slate-700 dark:text-slate-300 font-semibold">لا توجد طلبات في الطريق</p>
+                  <p className="text-slate-400 dark:text-slate-500 text-sm mt-1">لا شيء قيد التوصيل ضمن هذا النطاق حالياً.</p>
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide sticky top-0">
+                    <tr>
+                      <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">رقم الطلب</th>
+                      <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">هاتف العميل</th>
+                      <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">رقم الشحنة (AWB)</th>
+                      <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">قيمة التحصيل (COD)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {inTransitData.orders.map((o) => (
+                      <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap tabular-nums text-xs" dir="ltr">#{o.id}</td>
+                        <td className="px-4 py-3 text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{o.phone || '—'}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          {o.tracking_number ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(o.tracking_number || '').then(() => {
+                                  setCopiedAwb(o.tracking_number);
+                                  setTimeout(() => setCopiedAwb((c) => (c === o.tracking_number ? null : c)), 1500);
+                                });
+                              }}
+                              className="inline-flex items-center gap-1.5 font-mono text-xs text-sky-700 dark:text-sky-300
+                                bg-sky-50 dark:bg-sky-900/30 hover:bg-sky-100 dark:hover:bg-sky-900/50
+                                px-2 py-1 rounded-lg transition" dir="ltr" title="انسخ رقم الشحنة"
+                            >
+                              {copiedAwb === o.tracking_number ? (
+                                <><svg className="w-3 h-3 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>تم النسخ</>
+                              ) : (
+                                <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>{o.tracking_number}</>
+                              )}
+                            </button>
+                          ) : (
+                            <span className="text-slate-400 text-xs">لا يوجد</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-slate-800 dark:text-slate-100 font-semibold whitespace-nowrap tabular-nums" dir="ltr">
+                          {fmtEGP(Math.round(Number(o.cod) || 0))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

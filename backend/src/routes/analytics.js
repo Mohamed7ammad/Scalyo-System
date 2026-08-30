@@ -177,6 +177,33 @@ const scopeOrders   = (s) => (s.all ? null : (s.referralCodes || []));
 const scopeAdAcc    = (s) => (s.all ? null : (s.adAccountIds  || []));
 
 /* ════════════════════════════════════════════════════════════════════
+   FORWARD PIPELINE — the SINGLE source of truth for "actively on the road"
+   ─────────────────────────────────────────────────────────────────────
+   Used by the dashboard 'طلبات في الطريق' count + 'مستحقات لدى شركة الشحن'
+   cash sum (GET /dashboard) AND by the drill-down list (GET /in-transit-orders),
+   so the number on the card and the rows behind it can NEVER disagree. A parcel
+   is genuinely forward-moving toward the customer ONLY when ALL of these hold:
+     • Status = 'تم الشحن'  — our SINGLE forward status. Returns
+       ('جاري الإعادة','تم الإرجاع'), rejects ('تم الرفض') and pre-ship states
+       ('جديد','لا يرد','مؤجل','تم التأكيد') are ALL excluded by this equality.
+     • Bosta hasn't zeroed its COD (expected_cod > 0) — a return leg reads
+       بدون تحصيل = 0; NULL = not yet synced ⇒ still treated as forward.
+     • NOT in Bosta's "في انتظار متابعتك" action-required bucket (exceptions).
+     • Shipped within the last FORWARD_MAX_DAYS days — older parcels still at
+       'تم الشحن' are GHOSTS (a delivered/returned webhook was missed), not money
+       on the road. Clock = true ship time (shipped_at), falling back to createdAt.
+   Callers AND their own date-range predicate (CR on "createdAt") + tenant/
+   product/campaign scope; this constant carries only the status/COD/freshness
+   half so those pieces are guaranteed identical across the count and the list. */
+const FORWARD_MAX_DAYS = 10;
+const FORWARD_STATIC = `
+  "Status" = 'تم الشحن'
+  AND COALESCE("expected_cod"::numeric, 1) > 0
+  AND NOT COALESCE("bosta_action_required", FALSE)
+  AND COALESCE("shipped_at", "createdAt") >= NOW() - INTERVAL '${FORWARD_MAX_DAYS} days'
+`;
+
+/* ════════════════════════════════════════════════════════════════════
    buildJoinOn(params, startDate, endDate)
    ─────────────────────────────────────────────────────────────────────
    Builds the LEFT JOIN … ON (…) string.  All date logic lives here —
@@ -646,6 +673,118 @@ router.get('/order-sources', authenticate, requireAdminOrPermission('analytics')
   } catch (err) {
     console.error('[analytics/order-sources]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── GET /api/analytics/in-transit-orders ────────────────────────────────────
+   Drill-down for the 'طلبات في الطريق' / 'مستحقات لدى شركة الشحن' cards. Returns
+   the EXACT order rows that make up the card's count, so the user can copy each
+   Bosta AWB and track it in their portal. Consistency is guaranteed BY CONSTRUCTION:
+   it applies the SAME module-level FORWARD_STATIC predicate and rebuilds the SAME
+   tenant / date-range (CR) / product / campaign / agency scope as GET /dashboard's
+   in_transit_count — so COUNT(rows) here always equals the number on the card for
+   the same filters. Projection is minimal (id, phone, AWB, COD, dates) — no
+   profit/cost fields. Gated by the 'analytics' permission (admins bypass).       */
+router.get('/in-transit-orders', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
+  const { startDate, endDate } = req.query;
+
+  /* Numeric parsers — identical to the overview so COD matches to the piaster. */
+  const P   = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
+  const DEP = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("depositAmount"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
+  const COD = `COALESCE("expected_cod"::numeric, GREATEST(${P} - ${DEP}, 0))`;
+
+  /* Date range → CR (Egypt-TZ bounds), built EXACTLY like GET /dashboard. */
+  const params = [req.user.business_id];                    // $1 = tenant
+  let startIdx = null, endIdx = null;
+  if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+    params.push(`${startDate}T00:00:00${getEgyptOffset(startDate)}`); startIdx = params.length;
+  }
+  if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    params.push(`${endDate}T23:59:59${getEgyptOffset(endDate)}`); endIdx = params.length;
+  }
+  const rangePred = (col) => {
+    const parts = [];
+    if (startIdx) parts.push(`${col} >= $${startIdx}::timestamptz`);
+    if (endIdx)   parts.push(`${col} <= $${endIdx}::timestamptz`);
+    return parts.length ? `(${parts.join(' AND ')})` : 'TRUE';
+  };
+  const CR = rangePred('"createdAt"');
+
+  let ordFilter = ` AND business_id = $1::integer`;
+
+  try {
+    /* Agency scope (media_buyer / admin-impersonation) → referral_code fence,
+       identical to the overview. Admin (scope.all) adds nothing. */
+    const scope = await resolveAnalyticsScope(req);
+    if (!scope.all) {
+      const hasOrderScope = scope.referralCodes && scope.referralCodes.length > 0;
+      if (hasOrderScope) {
+        params.push(scope.referralCodes);
+        ordFilter += ` AND referral_code = ANY($${params.length}::text[])`;
+      } else {
+        ordFilter += ` AND 1=0`;
+      }
+    }
+
+    /* Product filter (alias-aware) — same resolution as the overview. */
+    const productSel = typeof req.query.product === 'string' ? req.query.product.trim() : '';
+    if (productSel && productSel !== 'كل المنتجات') {
+      const pr = await pool.query(
+        `SELECT sku, name, COALESCE(aliases, '{}'::text[]) AS aliases
+           FROM products
+          WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) AND business_id = $2::integer LIMIT 1`,
+        [productSel, req.user.business_id]);
+      const prow = pr.rows[0];
+      const prodTokens = [prow?.sku, prow?.name, ...(prow?.aliases || []), productSel]
+        .map((t) => String(t ?? '').trim().toUpperCase()).filter((t) => t !== '');
+      if (prodTokens.length > 0) {
+        params.push(prodTokens);
+        ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))          = ANY($${params.length}::text[])
+                          OR UPPER(TRIM(COALESCE("ProductName",''))) = ANY($${params.length}::text[]) )`;
+      }
+    }
+
+    /* Campaign filter — same token resolution as the overview. */
+    const campaignSel = typeof req.query.campaign === 'string' ? req.query.campaign.trim() : '';
+    if (campaignSel && campaignSel !== 'كل الحملات') {
+      const campTokens = await resolveCampaignTokens(req.user.business_id, campaignSel);
+      if (campTokens.length === 0) {
+        ordFilter += ` AND 1=0`;
+      } else {
+        params.push(campTokens);
+        ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))          = ANY($${params.length}::text[])
+                          OR UPPER(TRIM(COALESCE("ProductName",''))) = ANY($${params.length}::text[]) )`;
+      }
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id,
+              "Phone"             AS phone,
+              "FullName"          AS customer_name,
+              "BostaTrackingCode" AS tracking_number,
+              ROUND(${COD}, 2)    AS cod,
+              "createdAt"         AS created_at,
+              "shipped_at"        AS shipped_at
+         FROM orders
+        WHERE 1=1${ordFilter}
+          AND ${FORWARD_STATIC}
+          AND ${CR}
+        ORDER BY "shipped_at" DESC NULLS LAST, "createdAt" DESC
+        LIMIT 1000`,
+      params
+    );
+
+    const totalCod = rows.reduce((s, r) => s + Number(r.cod || 0), 0);
+    res.json({
+      startDate: (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,
+      endDate:   (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,
+      count:     rows.length,
+      totalCod:  Math.round(totalCod * 100) / 100,
+      orders:    rows,
+    });
+  } catch (err) {
+    console.error('[analytics/in-transit-orders]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء جلب طلبات الطريق' });
   }
 });
 
@@ -1338,46 +1477,19 @@ router.get('/dashboard', authenticate, async (req, res) => {
 
   /* ── "Actively on the road" pipeline predicate ──────────────────────────────
      SHARED by the 'طلبات في الطريق' count and the 'مستحقات لدى شركة الشحن' cash
-     sum so the two can NEVER diverge. A parcel is genuinely forward-moving toward
-     the customer ONLY when ALL of these hold:
-       • Status = 'تم الشحن' — our SINGLE forward status. Returns
-         ('جاري الإعادة','تم الإرجاع'), rejects ('تم الرفض') and pre-ship
-         ('جديد','لا يرد','مؤجل','تم التأكيد') are ALL excluded by this equality,
-         so a return/failed/canceled parcel can never count as "on the way".
-       • Bosta hasn't zeroed its COD (expected_cod > 0). A return-leg parcel reads
-         بدون تحصيل = 0 and is dropped; NULL = not yet synced ⇒ still forward.
-       • NOT in Bosta's "في انتظار متابعتك" action-required bucket — exceptions
-         (failed-delivery / on-hold) are not moving forward.
-       • Shipped within the last FORWARD_MAX_DAYS days. A COD parcel cannot still
-         be traveling to the customer after that — such rows are GHOSTS (a
-         delivered/returned terminal webhook was MISSED, so the order is stuck at
-         'تم الشحن'). This is the exact leak that inflated the 178 count + dues:
-         old parcels that have really resolved but never left the forward status.
-         Clock = the true ship time (shipped_at), falling back to createdAt for
-         legacy rows shipped before that column existed.
-       • Placed within the selected dashboard date range (${CR} on "createdAt").
-         This makes the two cards answer "of the orders PLACED in this window, how
-         many are STILL on the road, and how much COD is still floating" — the same
-         placement-date cohort every other card buckets by, so daily pending cash
-         lines up with that day's revenue/returns for an accurate day-level P&L.
-         When NO date filter is set, ${CR} is the literal 'TRUE', so the cards fall
-         back to the whole-history live snapshot (unchanged behaviour).
-     FORWARD_MAX_DAYS matches the 10-day stale-ghost threshold used by the ops
-     overview, keeping the two consistent. The date range and the ghost cutoff
-     COMPOSE: for a day more than 10 days in the past every order has already
-     resolved (delivered/returned) or become a ghost, so the cards correctly trend
-     to ~0 for old single days rather than showing stale money. This reflects
-     CURRENT status for that day's cohort — the schema keeps only the live status,
-     not a point-in-time history, so it answers "still floating NOW", not "was in
-     transit at the close of that day". */
-  const FORWARD_MAX_DAYS = 10;
-  const FORWARD_PIPELINE = `
-    "Status" = 'تم الشحن'
-    AND COALESCE("expected_cod"::numeric, 1) > 0
-    AND NOT COALESCE("bosta_action_required", FALSE)
-    AND COALESCE("shipped_at", "createdAt") >= NOW() - INTERVAL '${FORWARD_MAX_DAYS} days'
-    AND ${CR}
-  `;
+     sum so the two can NEVER diverge — the status/COD/freshness half comes from
+     the module-level FORWARD_STATIC (also used by the drill-down list endpoint),
+     and we AND on this request's date range (${CR} on "createdAt") so the cards
+     answer "of the orders PLACED in this window, how many are STILL on the road,
+     and how much COD is floating" — the same placement-date cohort every other
+     card buckets by, for accurate day-level pending cash / P&L. With NO date
+     filter, ${CR} is the literal 'TRUE' ⇒ whole-history live snapshot (unchanged).
+     The date range and the ghost cutoff inside FORWARD_STATIC COMPOSE: for a day
+     >10 days in the past every order has already resolved or become a ghost, so
+     the cards correctly trend to ~0 rather than showing stale money. This is
+     CURRENT status for that cohort (the schema keeps only the live status), i.e.
+     "still floating NOW", not "was in transit at the close of that day". */
+  const FORWARD_PIPELINE = `${FORWARD_STATIC} AND ${CR}`;
 
   /* ── 1. Overview: order counts + delivered revenue ── */
   const overviewSql = `
