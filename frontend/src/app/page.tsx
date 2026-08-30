@@ -25,7 +25,11 @@ export default function LoginPage() {
     const perms: string[] = user.permissions ?? ['orders'];
     /* After-Sales customer-service lands on their returns/replacements page — they
        have no access to the orders confirmation system. */
-    if (user.role === 'after_sales') {
+    if (user.role === 'moderator') {
+      /* Chat moderators (data-entry) land on their own orders/commission page —
+         they have no access to the confirmation system or company analytics. */
+      router.push('/dashboard/my-orders');
+    } else if (user.role === 'after_sales') {
       router.push('/dashboard/exchange-returns');
     } else if (user.role !== 'supervisor' && (user.role === 'admin' || perms.includes('analytics'))) {
       /* Team-leaders (supervisors) land on the orders system — never the financial

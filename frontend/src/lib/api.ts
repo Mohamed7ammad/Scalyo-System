@@ -70,7 +70,7 @@ export type PlanType = 'affiliate' | 'ecommerce';
 
 /** Every role the system recognises. 'supervisor' (تيم ليدر) is the middle
     tier between agent and admin — authorised entirely through `permissions`. */
-export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor' | 'after_sales';
+export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor' | 'after_sales' | 'moderator';
 
 export interface User {
   id:          number;

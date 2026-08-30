@@ -57,7 +57,7 @@ interface FormState {
   name:            string;
   email:           string;
   password:        string;
-  role:            'agent'|'admin'|'media_buyer'|'supervisor'|'after_sales';
+  role:            'agent'|'admin'|'media_buyer'|'supervisor'|'after_sales'|'moderator';
   is_active:       boolean;
   permissions:     string[];
   comm_confirmed:  number;
@@ -182,6 +182,10 @@ export default function StaffPage() {
      replacements needs no permission (open to every employee); the sidebar
      allowlist + role checks fence everything else. */
   const AFTER_SALES_PERMISSIONS = ['order_lookup'];
+  /* Chat moderator (data-entry) bundle: order lookup only — scoped server-side to
+     their OWN created orders. Add-order + their commission view need no extra
+     permission; the sidebar allowlist + role checks fence everything else. */
+  const MODERATOR_PERMISSIONS = ['order_lookup'];
   /* The only access permissions a supervisor may grant an agent. */
   const SUPERVISOR_GRANTABLE   = ['orders', 'shipping_followups'];
   /* A supervisor may act on plain agents only; admins act on everyone. */
@@ -350,6 +354,7 @@ export default function StaffPage() {
       const resolvedPermissions =
         form.role === 'supervisor'   ? SUPERVISOR_PERMISSIONS
         : form.role === 'after_sales' ? AFTER_SALES_PERMISSIONS
+        : form.role === 'moderator'   ? MODERATOR_PERMISSIONS
         : form.permissions;
       if (editTarget) {
         const payload: UpdateStaffPayload = {
@@ -695,9 +700,10 @@ export default function StaffPage() {
                             ${m.role==='admin'?'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'
                               :m.role==='supervisor'?'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300'
                               :m.role==='after_sales'?'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300'
+                              :m.role==='moderator'?'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300'
                               :m.role==='media_buyer'?'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
                               :'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
-                            {m.role==='admin'?'مدير':m.role==='supervisor'?'تيم ليدر':m.role==='after_sales'?'خدمة ما بعد البيع':m.role==='media_buyer'?'ميديا باير':'وكيل'}
+                            {m.role==='admin'?'مدير':m.role==='supervisor'?'تيم ليدر':m.role==='after_sales'?'خدمة ما بعد البيع':m.role==='moderator'?'تسجيل أوردرات':m.role==='media_buyer'?'ميديا باير':'وكيل'}
                           </span>
                         </td>
                         <td className="px-5 py-4">
@@ -1703,6 +1709,7 @@ export default function StaffPage() {
                       <option value="agent">وكيل تأكيد</option>
                       <option value="supervisor">تيم ليدر</option>
                       <option value="after_sales">خدمة ما بعد البيع</option>
+                      <option value="moderator">تسجيل أوردرات (Moderator)</option>
                       <option value="media_buyer">ميديا باير</option>
                       <option value="admin">مدير النظام</option>
                     </select>
@@ -1787,6 +1794,18 @@ export default function StaffPage() {
                   <p className="text-[11px] text-teal-700/80 dark:text-teal-300/70 leading-relaxed">
                     يرى كل الطلبات ويعيد توزيعها بين الوكلاء، ويطّلع على التحليلات، ويضيف/يوقف الوكلاء —
                     دون الوصول إلى الخزينة أو الإعدادات المالية والحساسة.
+                  </p>
+                </div>
+              )}
+
+              {/* Moderator (chat data-entry) role — fixed, hard-locked bundle */}
+              {form.role === 'moderator' && (
+                <div className="rounded-xl border border-cyan-200 dark:border-cyan-900/40 bg-cyan-50/60 dark:bg-cyan-900/10 p-3.5">
+                  <p className="text-xs font-bold text-cyan-700 dark:text-cyan-400 mb-1">صلاحيات مسجّل الأوردرات</p>
+                  <p className="text-[11px] text-cyan-700/80 dark:text-cyan-300/70 leading-relaxed">
+                    يضيف الطلبات ويبحث عنها (بالهاتف أو رقم الطلب)، ويتابع طلباته وعمولته على التوصيلات الناجحة —
+                    <span className="font-semibold"> يرى فقط الطلبات التي أنشأها هو</span>. ممنوع تمامًا من التحليلات
+                    العامة والخزينة والمخزون وإعدادات الشحن وطلبات باقي الموظفين.
                   </p>
                 </div>
               )}

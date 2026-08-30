@@ -228,6 +228,9 @@ export default function DashboardPage() {
     /* The after-sales role has no access to the orders confirmation system —
        bounce them to their returns page even on a direct URL hit. */
     if (parsed?.role === 'after_sales') { router.replace('/dashboard/exchange-returns'); return; }
+    /* Chat moderators (data-entry) never see the full confirmation dashboard —
+       bounce them to their own orders/commission page on any direct URL hit. */
+    if (parsed?.role === 'moderator') { router.replace('/dashboard/my-orders'); return; }
     setUser(parsed);
   }, [router]);
 

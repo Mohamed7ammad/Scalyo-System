@@ -12,7 +12,7 @@ const router = express.Router();
    and sees a data-scoped analytics dashboard. 'supervisor' (تيم ليدر / team-leader)
    is a middle tier: manages front-line agents + reassigns orders + views
    analytics, but is NOT a super-admin (see the guard rails below). */
-const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor', 'after_sales'];
+const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor', 'after_sales', 'moderator'];
 
 /* ── Team-leader (supervisor) guard rails — deny-by-default ──────────────────
    A supervisor is authorised via the 'manage_staff' permission but must never
@@ -220,8 +220,13 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
     if (violation) return res.status(403).json({ error: violation });
   }
 
-  const perms = Array.isArray(permissions) && permissions.length > 0
-    ? permissions : ['orders'];
+  /* Chat moderators (data-entry) are a hard-locked role: regardless of what the
+     client sends, they get EXACTLY 'order_lookup' (needed to search their own
+     orders) and nothing else — no analytics/treasury/inventory/staff keys can
+     ever be smuggled onto a moderator. */
+  const perms = role === 'moderator'
+    ? ['order_lookup']
+    : (Array.isArray(permissions) && permissions.length > 0 ? permissions : ['orders']);
 
   const cleanEmail = email.trim().toLowerCase();
   /* Agency fields apply ONLY to media buyers — ignored/cleared for other roles. */
@@ -322,7 +327,12 @@ router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), asy
     sets.push(`role = $${idx++}`); vals.push(role);
   }
   if (is_active      !== undefined) { sets.push(`is_active      = $${idx++}`); vals.push(Boolean(is_active)); }
-  if (permissions    !== undefined && Array.isArray(permissions)) {
+  if (role === 'moderator') {
+    /* Locking a user to the moderator role also hard-resets their permissions to
+       exactly 'order_lookup' — no privileged key can survive the transition. */
+    sets.push(`permissions = $${idx++}`);
+    vals.push(['order_lookup']);
+  } else if (permissions !== undefined && Array.isArray(permissions)) {
     sets.push(`permissions = $${idx++}`);
     vals.push(permissions.length > 0 ? permissions : ['orders']);
   }

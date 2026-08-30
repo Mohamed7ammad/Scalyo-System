@@ -124,6 +124,15 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS chat_source VARCHAR(30)`
   .then(() => console.log('✅  Orders: chat_source column + index ready'))
   .catch((err) => console.warn('⚠️   Orders chat_source migration skipped:', err.message));
 
+/* ── created_by — the user who ENTERED the order (moderator/data-entry) ───────
+   Distinct from AssignedTo (the agent who confirms it). Lets a restricted
+   'moderator' role see + be commissioned on ONLY the orders they created. VARCHAR
+   because users.id is a UUID/text in this DB. NULL for legacy / webhook orders. */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_by VARCHAR(255)`)
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS orders_created_by_idx ON orders (business_id, created_by)`))
+  .then(() => console.log('✅  Orders: created_by column + index ready'))
+  .catch((err) => console.warn('⚠️   Orders created_by migration skipped:', err.message));
+
 /* Canonical chat sources — the UI dropdown mirrors these. */
 const CHAT_SOURCES = ['messenger', 'whatsapp', 'instagram', 'tiktok', 'phone', 'other'];
 function normChatSource(v) {
@@ -277,7 +286,12 @@ function buildOrderScope(req, include = {}) {
   // the match scope (Postgres' default LIKE escape char is backslash).
   const escLike = (s) => s.replace(/[\\%_]/g, '\\$&');
 
-  if (!canSeeAllOrders(req.user)) {
+  if (req.user.role === 'moderator') {
+    /* Chat moderators (data-entry) see ONLY the orders THEY created — never
+       anyone else's, and never by agent assignment. */
+    params.push(String(req.user.id));
+    where.push(`created_by = $${params.length}`);
+  } else if (!canSeeAllOrders(req.user)) {
     params.push(req.user.email);
     where.push(`"AssignedTo" = $${params.length}`);
   } else if (incAgent && typeof req.query.agent === 'string' && req.query.agent.trim()) {
@@ -513,6 +527,13 @@ router.get('/lookup', authenticate, requireAdminOrPermission('order_lookup'), as
     whereClause = `AND regexp_replace(COALESCE("Phone", ''), '\\D', '', 'g') LIKE '%' || $2 || '%'`;
   }
 
+  /* Moderators may only search WITHIN their own created orders — never the whole
+     tenant. Everyone else (admin / after-sales) searches the full tenant. */
+  if (req.user.role === 'moderator') {
+    params.push(String(req.user.id));
+    whereClause += ` AND created_by = $${params.length}`;
+  }
+
   try {
     const { rows } = await pool.query(
       `${SELECT} ${whereClause} ORDER BY "createdAt" DESC LIMIT 50`,
@@ -644,8 +665,8 @@ router.post('/', authenticate, async (req, res) => {
     const result = await pool.query(
       `INSERT INTO orders
          ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "sku",
-          "quantity", "DeliveryRate", "Status", order_source, chat_source, "ShippingNotes", business_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9, $10, $11)
+          "quantity", "DeliveryRate", "Status", order_source, chat_source, "ShippingNotes", created_by, business_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9, $10, $11, $12)
        RETURNING *`,
       [
         String(FullName).trim(),
@@ -658,6 +679,7 @@ router.post('/', authenticate, async (req, res) => {
         qty,
         chatSource,
         shippingNotes,
+        String(req.user.id),      // creator (moderator / whoever entered it)
         req.user.business_id,
       ]
     );

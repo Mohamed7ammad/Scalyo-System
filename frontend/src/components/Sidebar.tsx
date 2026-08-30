@@ -34,6 +34,15 @@ const AFTER_SALES_ALLOWED = new Set<string>([
   '/dashboard/order-lookup',
 ]);
 
+/* A 'moderator' (chat data-entry) is the most locked-down role: they may ONLY
+   reach their own performance/commission page (which carries the Add-Order
+   action) and the read-only order lookup scoped to their own orders. Company
+   analytics, treasury, inventory, staff and Bosta settings are all hidden. */
+const MODERATOR_ALLOWED = new Set<string>([
+  '/dashboard/my-orders',
+  '/dashboard/order-lookup',
+]);
+
 /* hrefs an 'affiliate' plan tenant is allowed to see */
 const AFFILIATE_ALLOWED = new Set<string>([
   '/dashboard/analytics',
@@ -194,6 +203,18 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    /* Moderator home: their own orders + commission tracking. Gated to the
+       moderator allowlist in canSee() — hidden for every other role. */
+    href: '/dashboard/my-orders', label: 'طلباتي والعمولة',
+    subLabel: 'My Orders & Commission',
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M9 17v-2m3 2v-4m3 4v-6m2 10H5a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2v14a2 2 0 01-2 2z" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/staff', label: 'إدارة الموظفين',
     subLabel: 'Team', requiredPermission: 'manage_staff',
     icon: (
@@ -313,6 +334,9 @@ export default function Sidebar({
 
   /** Returns true if the current user may see this nav item */
   const canSee = (item: NavItem): boolean => {
+    // Moderator (chat data-entry): the most locked-down role — ONLY their own
+    // orders/commission page + the (self-scoped) order lookup.
+    if (user?.role === 'moderator') return MODERATOR_ALLOWED.has(item.href);
     // After-Sales role: strict allowlist — ONLY returns/replacements + order lookup.
     if (user?.role === 'after_sales') return AFTER_SALES_ALLOWED.has(item.href);
     // Affiliate-plan tenants only ever see a restricted set of links.
@@ -562,7 +586,9 @@ export default function Sidebar({
                       ? 'ميديا باير'
                       : user?.role === 'after_sales'
                         ? 'خدمة ما بعد البيع'
-                        : 'موظف تأكيد'}
+                        : user?.role === 'moderator'
+                          ? 'تسجيل أوردرات'
+                          : 'موظف تأكيد'}
               </p>
             </div>
             {/* Theme toggle */}
