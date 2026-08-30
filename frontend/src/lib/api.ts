@@ -199,7 +199,38 @@ export interface CreateOrderPayload {
   sku?:          string;                 // SKU of the selected product
   ProductPrice?: string | number;        // Total / COD amount
   quantity?:     number;                  // number of units (default 1)
+  chat_source?:  ChatSource | null;       // channel the moderator sourced it from
 }
+
+/* ── Order source (chat channel) — for moderator commission tracking ────────── */
+export type ChatSource = 'messenger' | 'whatsapp' | 'instagram' | 'tiktok' | 'phone' | 'other';
+export const CHAT_SOURCES: ChatSource[] = ['messenger', 'whatsapp', 'instagram', 'tiktok', 'phone', 'other'];
+export const CHAT_SOURCE_LABELS: Record<ChatSource, string> = {
+  messenger: 'ماسنجر',
+  whatsapp:  'واتساب',
+  instagram: 'إنستجرام',
+  tiktok:    'تيك توك',
+  phone:     'هاتف',
+  other:     'أخرى',
+};
+
+export interface OrderSourceRow {
+  source:    string;   // ChatSource value (or 'unset')
+  total:     number;   // orders received
+  confirmed: number;   // reached confirmed or beyond
+  delivered: number;   // تم التوصيل — the commission driver
+}
+export interface OrderSourceAnalytics {
+  startDate: string | null;
+  endDate:   string | null;
+  totals:    { total: number; confirmed: number; delivered: number };
+  sources:   OrderSourceRow[];
+}
+/** Per-source funnel (total → confirmed → delivered), date-filtered. Admin/analytics. */
+export const getOrderSourceAnalytics = (startDate?: string, endDate?: string) =>
+  api.get<OrderSourceAnalytics>('/api/analytics/order-sources', {
+    params: { ...(startDate ? { startDate } : {}), ...(endDate ? { endDate } : {}) },
+  });
 
 /** Create a manual order (status 'جديد', tenant-scoped). Admins + agents. */
 export const createOrder = (data: CreateOrderPayload) =>

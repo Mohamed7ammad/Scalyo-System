@@ -59,6 +59,17 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: '/dashboard/order-sources', label: 'مصادر الطلبات',
+    subLabel: 'Order Sources', requiredPermission: 'analytics',
+    hideForRoles: ['supervisor'],
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M7 8h10M7 12h6m-6 8l-4-4V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2H9l-2 4z" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/my-performance', label: 'أدائي',
     subLabel: 'My Performance', agentOnly: true,
     icon: (

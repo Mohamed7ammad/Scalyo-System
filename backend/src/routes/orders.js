@@ -115,6 +115,22 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipped_at TIMESTAMPTZ`)
   .then(() => console.log('✅  Orders: shipped_at column + index ready'))
   .catch((err) => console.warn('⚠️   Orders shipped_at migration skipped:', err.message));
 
+/* ── chat_source — the channel a moderator sourced a MANUAL order from ────────
+   (Messenger / WhatsApp / …). Distinct from order_source (the ingestion pipeline:
+   easyorder / taager / manual). Powers per-source funnel analytics for computing
+   chat-moderator commissions on DELIVERED orders. NULL for non-manual / legacy. */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS chat_source VARCHAR(30)`)
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS orders_chat_source_idx ON orders (business_id, chat_source)`))
+  .then(() => console.log('✅  Orders: chat_source column + index ready'))
+  .catch((err) => console.warn('⚠️   Orders chat_source migration skipped:', err.message));
+
+/* Canonical chat sources — the UI dropdown mirrors these. */
+const CHAT_SOURCES = ['messenger', 'whatsapp', 'instagram', 'tiktok', 'phone', 'other'];
+function normChatSource(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  return CHAT_SOURCES.includes(s) ? s : null;
+}
+
 /* ── Order quantity ─────────────────────────────────────────────────────────
    Number of units in the order. Defaults to 1 for all legacy/imported rows.
    Used by the Bosta return webhook to restock the EXACT number of units, and
@@ -618,13 +634,14 @@ router.post('/', authenticate, async (req, res) => {
 
   // Quantity: integer ≥ 1, defaults to 1 when omitted/invalid.
   const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  const chatSource = normChatSource(req.body.chat_source);   // channel the order was sourced from
 
   try {
     const result = await pool.query(
       `INSERT INTO orders
          ("FullName", "Phone", "City", "Address", "ProductName", "ProductPrice", "sku",
-          "quantity", "DeliveryRate", "Status", order_source, business_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9)
+          "quantity", "DeliveryRate", "Status", order_source, chat_source, business_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'بدون', 'جديد', 'manual', $9, $10)
        RETURNING *`,
       [
         String(FullName).trim(),
@@ -635,6 +652,7 @@ router.post('/', authenticate, async (req, res) => {
         ProductPrice != null && String(ProductPrice).trim() !== '' ? String(ProductPrice).trim() : null,
         sku ? String(sku).trim() : null,
         qty,
+        chatSource,
         req.user.business_id,
       ]
     );

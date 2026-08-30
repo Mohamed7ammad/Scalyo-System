@@ -12,6 +12,7 @@ import {
   bulkImportOrders, BulkImportResult,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
   BostaFollowUps, BostaFollowUpOrder, OrderStats,
+  ChatSource, CHAT_SOURCES, CHAT_SOURCE_LABELS,
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
 /* NOTE: `xlsx` (SheetJS) is intentionally NOT imported at module level — it is
@@ -199,7 +200,7 @@ export default function DashboardPage() {
   const [distMode,      setDistMode]      = useState<'equal' | 'custom'>('equal');
   const [distPercents,  setDistPercents]  = useState<Record<number, string>>({});
   /* Manual add-order modal */
-  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '', quantity: '1' };
+  const EMPTY_ADD_FORM = { FullName: '', Phone: '', City: '', Address: '', productId: '', ProductName: '', sku: '', ProductPrice: '', quantity: '1', chat_source: '' };
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm,      setAddForm]      = useState({ ...EMPTY_ADD_FORM });
   const [addSaving,    setAddSaving]    = useState(false);
@@ -1050,6 +1051,7 @@ export default function DashboardPage() {
         sku:          addForm.sku.trim() || undefined,
         ProductPrice: addForm.ProductPrice.trim() || undefined,
         quantity:     Math.max(1, parseInt(addForm.quantity, 10) || 1),
+        chat_source:  (addForm.chat_source || null) as ChatSource | null,
       });
       setOrders((prev) => [res.data, ...prev]);   // show instantly at the top
       showToast('تم إضافة الطلب بنجاح', 'success');
@@ -1872,6 +1874,25 @@ export default function DashboardPage() {
                         focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
                     />
                   </div>
+                </div>
+
+                {/* Order source (chat channel) — for moderator commission tracking */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-1">مصدر الطلب</label>
+                  <select
+                    value={addForm.chat_source}
+                    onChange={(e) => setAddForm((p) => ({ ...p, chat_source: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                      bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700
+                      text-slate-900 dark:text-slate-100
+                      focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                  >
+                    <option value="">— اختر مصدر الطلب —</option>
+                    {CHAT_SOURCES.map((s) => (
+                      <option key={s} value={s}>{CHAT_SOURCE_LABELS[s]}</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">القناة التي جاء منها الطلب — تُستخدم لحساب عمولات مشرفي الشات.</p>
                 </div>
               </div>
 

@@ -605,6 +605,50 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
   }
 });
 
+/* ── GET /api/analytics/order-sources?startDate&endDate ──────────────────────
+   Per chat-source funnel for chat-moderator commissions: for orders whose
+   chat_source is set (manual orders where the moderator picked Messenger /
+   WhatsApp / …), grouped by source: total received, confirmed (reached confirmed
+   or beyond), and delivered (تم التوصيل — the commission driver). Date range is
+   Egypt-local on the RECEIVED date (createdAt), so month-end filtering is exact.
+   Admin / analytics-permission only.                                            */
+router.get('/order-sources', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
+  const businessId = req.user.business_id;
+  const { startDate, endDate } = req.query;
+  const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+  const params = [businessId];
+  let dateClause = '';
+  if (isDate(startDate)) { params.push(startDate); dateClause += ` AND ("createdAt" AT TIME ZONE 'Africa/Cairo')::date >= $${params.length}::date`; }
+  if (isDate(endDate))   { params.push(endDate);   dateClause += ` AND ("createdAt" AT TIME ZONE 'Africa/Cairo')::date <= $${params.length}::date`; }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(NULLIF(TRIM(chat_source), ''), 'unset') AS source,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE "Status" IN
+                ('تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'))::int AS confirmed,
+              COUNT(*) FILTER (WHERE "Status" = 'تم التوصيل')::int AS delivered
+         FROM orders
+        WHERE business_id = $1
+          AND COALESCE(is_lost_order, FALSE) = FALSE
+          AND chat_source IS NOT NULL
+          ${dateClause}
+        GROUP BY 1
+        ORDER BY delivered DESC, total DESC`,
+      params
+    );
+    const totals = rows.reduce(
+      (a, r) => ({ total: a.total + r.total, confirmed: a.confirmed + r.confirmed, delivered: a.delivered + r.delivered }),
+      { total: 0, confirmed: 0, delivered: 0 }
+    );
+    res.json({ startDate: isDate(startDate) ? startDate : null, endDate: isDate(endDate) ? endDate : null, totals, sources: rows });
+  } catch (err) {
+    console.error('[analytics/order-sources]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
 /* ── GET /api/analytics/my-performance — Any authenticated user ───── */
 router.get('/my-performance', authenticate, async (req, res) => {
   const { startDate, endDate } = req.query;
