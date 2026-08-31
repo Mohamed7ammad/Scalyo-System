@@ -3,6 +3,7 @@ const pool          = require('../config/db');
 const authenticate  = require('../middleware/auth');
 const { requireAdmin, filterAgentFields, requireAdminOrPermission } = require('../middleware/roleGuard');
 const { agentAllowsProduct } = require('../utils/productRouting');
+const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
 
 /* Look up ONE agent's product-routing restriction (allowed_products) by email,
    tenant-scoped. Returns [] when unrestricted / unknown → handles all products. */
@@ -1520,14 +1521,15 @@ function canonicalizeStatusKey(req, _res, next) {
   next();
 }
 
-/* ── PATCH /api/orders/:id/price — ADMIN-ONLY inline total-price edit ─────────
-   Lets an admin correct an order's total price (the "الدفع" column) directly from
-   the orders table. Strictly requireAdmin — agents / after-sales / supervisors
-   can neither see the control nor reach this route. Validates a finite, positive
+/* ── PATCH /api/orders/:id/price — inline total-price edit (admin + team-leader)
+   Lets an admin OR a team-leader (supervisor, who holds 'reassign_orders')
+   correct an order's total price (the "الدفع" column) directly from the orders
+   table. Plain agents and after-sales hold no such permission, so they can
+   neither see the control nor reach this route. Validates a finite, positive
    number, stores it as a plain numeric string (matching ProductPrice), and logs
    who changed what from→to. Deliberately narrow: touches ONLY ProductPrice, so it
    can't be used to mutate status/assignment/etc.                                */
-router.patch('/:id/price', authenticate, requireAdmin, async (req, res) => {
+router.patch('/:id/price', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
   const { id }     = req.params;
   const businessId = req.user.business_id;
 
@@ -1594,12 +1596,15 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
   let currentQty          = 1;
   let currentStockDeducted = false;
   let currentAssignedTo   = null;   // for the inline-reassignment guard + audit log
+  let currentCity         = '';     // for lost-order governorate repricing
+  let currentIsLost       = false;  // dynamic shipping pricing applies to lost orders ONLY
 
   try {
     const row = await pool.query(
-      `SELECT "Status", "ProductName", "sku", "ProductPrice", "AssignedTo",
+      `SELECT "Status", "ProductName", "sku", "ProductPrice", "AssignedTo", "City",
               COALESCE("quantity", 1) AS quantity,
-              COALESCE("stock_deducted", false) AS stock_deducted
+              COALESCE("stock_deducted", false) AS stock_deducted,
+              COALESCE(is_lost_order, false) AS is_lost_order
          FROM orders WHERE id = $1 AND business_id = $2`,
       [id, businessId]
     );
@@ -1614,6 +1619,8 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     currentQty          = Math.max(1, parseInt(row.rows[0].quantity, 10) || 1);
     currentStockDeducted = row.rows[0].stock_deducted === true;
     currentAssignedTo   = row.rows[0].AssignedTo ?? null;
+    currentCity         = row.rows[0].City ?? '';
+    currentIsLost       = row.rows[0].is_lost_order === true;
   } catch (err) {
     console.error('Step 1 – fetch order failed:', err.message);
     return res.status(500).json({ error: 'خطأ في الخادم' });
@@ -1683,6 +1690,59 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
       const newTotal = Math.round(unitPrice * newQty * 100) / 100;
       updates.ProductPrice = String(newTotal);
       console.log(`[PATCH] qty ${currentQty}→${newQty} on order ${id}: unit=${unitPrice} → ProductPrice=${newTotal}`);
+    }
+  }
+
+  /* ── Step 1c: Dynamic governorate shipping — MISSING/lost orders ONLY ─────────
+     Total = (base unit price × quantity) + flat governorate shipping. This is the
+     AUTHORITATIVE repricing so an agent (who can't send ProductPrice) still gets a
+     correct total when they pick a governorate. It fires when the governorate is
+     changed (Rule B) OR when a lost order is confirmed (Rule C — "save on confirm"),
+     and covers Rule A (no governorate ⇒ base only, 0 shipping). Normal store orders
+     are never touched — their price already includes shipping.
+       • base price unresolvable (no matching catalogue product) → LEAVE price as-is.
+       • City non-empty but UNRECOGNISED                          → LEAVE price as-is
+         (never guess a shipping rate for an unknown place).
+       • City empty                                                → base × qty only.
+       • City recognised                                           → base × qty + rate. */
+  const cityIsChanging   = Object.prototype.hasOwnProperty.call(updates, 'City');
+  const confirmingLost   = updates.Status && String(updates.Status).trim() === 'تم التأكيد'
+                                          && currentStatus !== 'تم التأكيد';
+  if (currentIsLost && (cityIsChanging || confirmingLost)) {
+    const effectiveCity = cityIsChanging ? String(updates.City ?? '').trim() : String(currentCity ?? '').trim();
+    const qty = updates.quantity !== undefined
+      ? Math.max(1, parseInt(updates.quantity, 10) || 1)
+      : currentQty;
+
+    // Base UNIT price from the catalogue (SKU first, then name). No fallback to the
+    // order's own price here — without a real base we must not guess (decision: leave).
+    let baseUnit = null;
+    try {
+      const prod = await pool.query(
+        `SELECT selling_price FROM products
+          WHERE business_id = $1 AND (sku = $2 OR TRIM(name) = TRIM($3))
+          ORDER BY (sku = $2) DESC
+          LIMIT 1`,
+        [businessId, currentSku, currentProductName]
+      );
+      if (prod.rows.length) baseUnit = parseFloat(prod.rows[0].selling_price) || null;
+    } catch (e) {
+      console.warn('[PATCH] lost-order base-price lookup failed:', e.message);
+    }
+
+    if (baseUnit != null && baseUnit > 0) {
+      const canonical = resolveGovernorate(effectiveCity);   // null when empty/unknown
+      let newTotal = null;
+      if (!effectiveCity) {
+        newTotal = baseUnit * qty;                            // Rule A: no governorate
+      } else if (canonical) {
+        newTotal = baseUnit * qty + shippingRateFor(effectiveCity);   // Rules B / C
+      } // else: recognised-but-unknown string → leave price unchanged (newTotal stays null)
+
+      if (newTotal != null) {
+        updates.ProductPrice = String(Math.round(newTotal * 100) / 100);
+        console.log(`[PATCH] lost order ${id} reprice: base=${baseUnit}×${qty} + ship(${canonical ?? 'none'}) → ProductPrice=${updates.ProductPrice}`);
+      }
     }
   }
 

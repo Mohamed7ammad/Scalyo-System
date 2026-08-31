@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, memo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
+import { GOVERNORATES, resolveGovernorate, computeLostOrderTotal } from '@/lib/shipping';
 
 /* ── Virtualization (@tanstack/react-virtual) ────────────────────────────────
    The parent page appends keyset pages to `orders` as the user scrolls, so the
@@ -165,10 +166,23 @@ interface Props {
        • canDelete   → the full edit modal + hard-delete row action (admin only). */
   canReassign?:     boolean;
   canDelete?:       boolean;
+  /* Inline total-price edit (admin + team-leader). Defaults to role==='admin' so
+     existing call-sites are unchanged; pass true to also grant a supervisor. */
+  canEditPrice?:    boolean;
+  /* The full "تعديل الطلب" edit modal (product/price/status override). Admin-only
+     by default; granted to team-leaders via this flag. */
+  canEditFullOrder?: boolean;
+  /* MISSING/lost-orders mode: turns the City cell into a strict governorate
+     <select> and enables dynamic base+shipping repricing (the backend recompute
+     on save is authoritative). Never set for the normal live queue. */
+  lostMode?:        boolean;
+  /* Catalogue UNIT selling price for an order (by SKU/name), or null when the
+     order isn't linked to a stocked product. Used only in lostMode to preview the
+     recomputed total; when null the price is left unchanged. */
+  resolveBasePrice?: (order: Order) => number | null;
   onUpdate:         (id: number, data: Partial<Order>) => Promise<void>;
   onDelete:         (id: number) => Promise<void>;
-  /* ADMIN-ONLY inline total-price edit. Optional — only wired on the admin table;
-     the edit control renders only for role==='admin'. */
+  /* Inline total-price edit callback. Optional — wired when canEditPrice. */
   onPriceChange?:   (id: number, price: number) => Promise<void>;
   /* Bulk-selection props — enabled for reassign-capable users ───────── */
   selectedIds?:     number[];                     // controlled from parent
@@ -189,6 +203,10 @@ function OrdersTable({
   orders, role,
   canReassign = role === 'admin',
   canDelete   = role === 'admin',
+  canEditPrice     = role === 'admin',
+  canEditFullOrder = role === 'admin',
+  lostMode = false,
+  resolveBasePrice,
   onUpdate, onDelete, onPriceChange,
   selectedIds = [], onToggleSelect, onSelectAll,
   agents = [],
@@ -355,6 +373,18 @@ function OrdersTable({
     setSavingId(null);
   };
 
+  /* ─── Governorate inline select (lost mode) — all roles ─────────────────────
+     Agents/team-leaders/admins pick a governorate from the strict dropdown; we
+     persist ONLY { City } and let the backend authoritatively recompute the
+     total (base × qty + shipping) — Rules A/B/C. The value sent is the canonical
+     governorate name (or '' for "no governorate" → base-only price). */
+  const handleCityChange = async (order: Order, City: string) => {
+    if ((City ?? '') === (order.City ?? '')) return;
+    setSavingId(order.id);
+    try { await onUpdate(order.id, { City }); }
+    finally { setSavingId(null); }
+  };
+
   /* ─── Shipping-notes inline edit (save on blur) — all roles ── */
   const handleShippingNotesBlur = async (order: Order, ShippingNotes: string) => {
     if (ShippingNotes === (order.ShippingNotes ?? '')) return;
@@ -373,8 +403,19 @@ function OrdersTable({
 
   const saveEditModal = async () => {
     if (!editModal) return;
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { id, createdAt, ...fields } = editForm as Order;
+    /* Send ONLY the fields this modal can actually edit — never the whole order.
+       Read-only columns (tracking code, cost, is_lost_order, frequency counters…)
+       must not be echoed back: the backend agent-field guard rejects the WHOLE
+       request if a non-admin (team-leader) includes any non-editable field. */
+    const EDITABLE_KEYS: (keyof Order)[] = [
+      'FullName', 'Phone', 'City', 'Address', 'ProductName', 'ProductPrice',
+      'quantity', 'DeliveryRate', 'Status', 'PostponedDate', 'rejectionReason',
+      'hasDeposit', 'depositAmount',
+    ];
+    const fields: Partial<Order> = {};
+    for (const k of EDITABLE_KEYS) {
+      if (editForm[k] !== undefined) (fields as Record<string, unknown>)[k] = editForm[k];
+    }
     setSavingId(editModal.id);
     await onUpdate(editModal.id, fields);
     setEditModal(null);
@@ -525,6 +566,9 @@ function OrdersTable({
                     role={role}
                     canReassign={canReassign}
                     canDelete={canDelete}
+                    canEditPrice={canEditPrice}
+                    canEditFullOrder={canEditFullOrder}
+                    lostMode={lostMode}
                     now={now}
                     selected={selectedIds.includes(order.id)}
                     saving={savingId === order.id}
@@ -537,6 +581,7 @@ function OrdersTable({
                     onAssignedToChange={handleAssignedToChange}
                     onNoteBlur={handleNoteBlur}
                     onAddressBlur={handleAddressBlur}
+                    onCityChange={handleCityChange}
                     onShippingNotesBlur={handleShippingNotesBlur}
                     onInlineAttempt={handleInlineAttempt}
                     onQuickEdit={openQuickEdit}
@@ -603,14 +648,30 @@ function OrdersTable({
             </div>
             <div>
               <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">المدينة / المحافظة</label>
-              <input
-                type="text"
-                value={quickForm.City}
-                onChange={(e) => setQuickForm((p) => ({ ...p, City: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm
-                  bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none
-                  focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
-              />
+              {lostMode ? (
+                <select
+                  value={resolveGovernorate(quickForm.City) ?? (quickForm.City ? '__raw__' : '')}
+                  onChange={(e) => { if (e.target.value !== '__raw__') setQuickForm((p) => ({ ...p, City: e.target.value })); }}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm cursor-pointer
+                    bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none
+                    focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                >
+                  <option value="">— بدون محافظة —</option>
+                  {quickForm.City && !resolveGovernorate(quickForm.City) && (
+                    <option value="__raw__" disabled>{quickForm.City} (غير معروفة)</option>
+                  )}
+                  {GOVERNORATES.map((g) => (<option key={g} value={g}>{g}</option>))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={quickForm.City}
+                  onChange={(e) => setQuickForm((p) => ({ ...p, City: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm
+                    bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 outline-none
+                    focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
+                />
+              )}
             </div>
             <div>
               <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">العنوان التفصيلي</label>
@@ -792,17 +853,49 @@ function OrdersTable({
             ).map(({ key, label, dir }) => (
               <div key={key}>
                 <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">{label}</label>
-                <input
-                  type="text"
-                  value={String(editForm[key] ?? '')}
-                  onChange={(e) => setEditForm((p) => ({ ...p, [key]: e.target.value }))}
-                  dir={dir}
-                  className="w-full px-3 py-2 rounded-xl text-sm outline-none
-                    border border-gray-300 dark:border-slate-700
-                    bg-white dark:bg-slate-800
-                    text-gray-900 dark:text-slate-200
-                    focus:ring-2 focus:ring-indigo-400"
-                />
+                {key === 'City' && lostMode ? (
+                  /* Strict governorate dropdown. Changing it live-previews the new
+                     total (base × qty + shipping) into the price field below; the
+                     backend recomputes authoritatively on save. */
+                  <select
+                    value={resolveGovernorate(String(editForm.City ?? '')) ?? (editForm.City ? '__raw__' : '')}
+                    onChange={(e) => {
+                      if (e.target.value === '__raw__') return;
+                      const City = e.target.value;
+                      setEditForm((p) => {
+                        const next: Partial<Order> = { ...p, City };
+                        const base = editModal ? (resolveBasePrice?.(editModal) ?? null) : null;
+                        const qty = Math.max(1, Number(p.quantity ?? editModal?.quantity ?? 1) || 1);
+                        const total = computeLostOrderTotal(base, qty, City);
+                        if (total != null) next.ProductPrice = String(total);
+                        return next;
+                      });
+                    }}
+                    dir={dir}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none cursor-pointer
+                      border border-gray-300 dark:border-slate-700
+                      bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-200
+                      focus:ring-2 focus:ring-indigo-400"
+                  >
+                    <option value="">— بدون محافظة —</option>
+                    {editForm.City && !resolveGovernorate(String(editForm.City)) && (
+                      <option value="__raw__" disabled>{String(editForm.City)} (غير معروفة)</option>
+                    )}
+                    {GOVERNORATES.map((g) => (<option key={g} value={g}>{g}</option>))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={String(editForm[key] ?? '')}
+                    onChange={(e) => setEditForm((p) => ({ ...p, [key]: e.target.value }))}
+                    dir={dir}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                      border border-gray-300 dark:border-slate-700
+                      bg-white dark:bg-slate-800
+                      text-gray-900 dark:text-slate-200
+                      focus:ring-2 focus:ring-indigo-400"
+                  />
+                )}
               </div>
             ))}
 
@@ -811,12 +904,12 @@ function OrdersTable({
                 merge in the UI); LOCKED read-only for agents. ProductName is in
                 the backend PATCH whitelist, and agents are separately restricted
                 to Status + Note, so this is safe both ways. */}
-            {(editForm.ProductName || role === 'admin') && (
+            {(editForm.ProductName || canEditFullOrder) && (
               <div>
                 <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">
                   المنتج
                 </label>
-                {role === 'admin' ? (
+                {canEditFullOrder ? (
                   <div className="flex items-center gap-2">
                     <input
                       type="text"
@@ -1386,6 +1479,9 @@ interface OrderRowProps {
   role:                 'admin' | 'agent';
   canReassign:          boolean;   // row checkbox + inline reassignment dropdown
   canDelete:            boolean;   // full edit modal + hard-delete action (admin)
+  canEditPrice:         boolean;   // inline total-price editor (admin + team-leader)
+  canEditFullOrder:     boolean;   // "تعديل الطلب" full edit modal (admin + team-leader)
+  lostMode:             boolean;   // City → strict governorate <select> + repricing
   now:                  number;    // ticking clock (ms) for elapsed-time + cooldown
   selected:             boolean;
   saving:               boolean;
@@ -1398,6 +1494,7 @@ interface OrderRowProps {
   onAssignedToChange:   (id: number, email: string) => void;
   onNoteBlur:           (order: Order, note: string) => void;
   onAddressBlur:        (order: Order, addr: string) => void;
+  onCityChange:         (order: Order, city: string) => void;
   onShippingNotesBlur:  (order: Order, notes: string) => void;
   onInlineAttempt:      (id: number) => void;
   onQuickEdit:          (order: Order) => void;
@@ -1418,6 +1515,9 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
     prev.role === next.role &&
     prev.canReassign === next.canReassign &&
     prev.canDelete === next.canDelete &&
+    prev.canEditPrice === next.canEditPrice &&
+    prev.canEditFullOrder === next.canEditFullOrder &&
+    prev.lostMode === next.lostMode &&
     prev.selected === next.selected &&
     prev.saving === next.saving &&
     prev.inlineLogging === next.inlineLogging &&
@@ -1428,9 +1528,9 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
 }
 
 const OrderRow = memo(function OrderRow({
-  order, index, rowRef, role, canReassign, canDelete, now, selected, saving, agents, attemptLogs, inlineLogging,
+  order, index, rowRef, role, canReassign, canDelete, canEditPrice, canEditFullOrder, lostMode, now, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
-  onNoteBlur, onAddressBlur, onShippingNotesBlur, onInlineAttempt,
+  onNoteBlur, onAddressBlur, onCityChange, onShippingNotesBlur, onInlineAttempt,
   onQuickEdit, onEditModal, onDelete, onPriceChange,
 }: OrderRowProps) {
   /* ── Admin inline price edit (local row state) ────────────────────────────── */
@@ -1584,7 +1684,34 @@ const OrderRow = memo(function OrderRow({
       </td>
 
       <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap">
-        {order.City}
+        {lostMode ? (() => {
+          /* Strict governorate dropdown (all roles). The stored value is matched
+             to a canonical governorate so import spelling variants still select
+             correctly; an unrecognised non-empty value keeps a one-off option so
+             it isn't silently wiped. Changing it reprices server-side. */
+          const canonical = resolveGovernorate(order.City);
+          const selectVal = canonical ?? (order.City ? '__raw__' : '');
+          return (
+            <select
+              value={selectVal}
+              onChange={(e) => { if (e.target.value !== '__raw__') onCityChange(order, e.target.value); }}
+              className="min-w-[130px] px-2 py-1 text-sm rounded-lg cursor-pointer
+                border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800
+                text-gray-700 dark:text-slate-200 outline-none
+                focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition"
+            >
+              <option value="">— بدون محافظة —</option>
+              {order.City && !canonical && (
+                <option value="__raw__" disabled>{order.City} (غير معروفة)</option>
+              )}
+              {GOVERNORATES.map((g) => (
+                <option key={g} value={g}>{g}</option>
+              ))}
+            </select>
+          );
+        })() : (
+          order.City
+        )}
       </td>
 
       {/* Address — inline editable (all roles) */}
@@ -1794,8 +1921,9 @@ const OrderRow = memo(function OrderRow({
               ) : (
                 <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
               )}
-              {/* Admin-only edit affordance — edits the TOTAL price (ProductPrice) */}
-              {role === 'admin' && onPriceChange && (
+              {/* Edit affordance — edits the TOTAL price (ProductPrice). Admin +
+                  team-leader (canEditPrice); agents never see it. */}
+              {canEditPrice && onPriceChange && (
                 <button onClick={startEditPrice} title="تعديل السعر"
                   className="inline-flex items-center gap-1 text-[10px] font-medium
                     text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
@@ -1848,11 +1976,12 @@ const OrderRow = memo(function OrderRow({
         />
       </td>
 
-      {/* Actions — full edit + hard-delete are ADMIN-only (canDelete); everyone
-          else (agents AND reassigning team-leaders) gets the safe quick-edit. */}
+      {/* Actions — the full "تعديل الطلب" modal is admin + team-leader
+          (canEditFullOrder); hard-delete stays admin-only (canDelete). Plain
+          agents get the safe quick-edit (customer details, address, governorate). */}
       <td className="px-4 py-3">
         <div className="flex flex-wrap gap-1.5">
-          {canDelete ? (
+          {canEditFullOrder ? (
             <>
               <button
                 onClick={() => onEditModal(order)}
@@ -1862,14 +1991,16 @@ const OrderRow = memo(function OrderRow({
               >
                 تعديل
               </button>
-              <button
-                onClick={() => onDelete(order.id)}
-                className="px-2.5 py-1 text-xs rounded-lg font-medium transition
-                  bg-red-50 text-red-700 hover:bg-red-100
-                  dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
-              >
-                حذف
-              </button>
+              {canDelete && (
+                <button
+                  onClick={() => onDelete(order.id)}
+                  className="px-2.5 py-1 text-xs rounded-lg font-medium transition
+                    bg-red-50 text-red-700 hover:bg-red-100
+                    dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
+                >
+                  حذف
+                </button>
+              )}
             </>
           ) : (
             <button

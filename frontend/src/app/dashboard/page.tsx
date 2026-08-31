@@ -530,7 +530,18 @@ export default function DashboardPage() {
     }));
 
     try {
-      await updateOrder(id, data);
+      const res = await updateOrder(id, data);
+      /* Reconcile server-computed fields the client couldn't know — notably the
+         lost-order governorate REPRICE (base × qty + shipping), which the backend
+         derives when City changes. Merge them back so the new total shows at once
+         (Rule B) without waiting for a refetch. */
+      const saved = res?.data as Partial<Order> | undefined;
+      if (saved && (saved.ProductPrice !== undefined || saved.quantity !== undefined)) {
+        setOrders((prev) => prev.map((o) => (o.id === id
+          ? { ...o, ...(saved.ProductPrice !== undefined ? { ProductPrice: saved.ProductPrice } : {}),
+                     ...(saved.quantity !== undefined ? { quantity: saved.quantity } : {}) }
+          : o)));
+      }
       // Success: non-blocking toast + background stock-badge refresh (deferred,
       // never awaited; OrdersTable is memoised against products so it won't
       // re-render the table).
@@ -1334,6 +1345,10 @@ export default function DashboardPage() {
   // Team-leaders (supervisors) may reassign/distribute the whole order pool, but
   // NOT the admin-only destructive/financial actions (bulk delete, shipping, AWB).
   const canReassign = isAdmin || !!user?.permissions?.includes('reassign_orders');
+  // Team-leader (supervisor) — granted the price edit + full "تعديل الطلب" modal.
+  const isSupervisor = user?.role === 'supervisor';
+  const canEditPrice     = isAdmin || isSupervisor;
+  const canEditFullOrder = isAdmin || isSupervisor;
 
   // Returns real stock_quantity from the /api/products table ONLY.
   // Returns null while products are loading so stale numbers from the
@@ -1423,6 +1438,17 @@ export default function DashboardPage() {
     if (!found) return null;
     const sp = parseFloat(String(found.selling_price));
     return Number.isFinite(sp) ? String(sp) : null;
+  };
+
+  /* Catalogue UNIT selling price for a lost order (matched by product short-name),
+     or null when it isn't linked to a stocked product. Feeds OrdersTable's live
+     base+shipping preview in lost mode; the backend recompute on save is
+     authoritative. Non-memoised — OrdersTable re-renders with the page anyway and
+     OrderRow's comparator ignores function props. */
+  const resolveBasePrice = (o: Order): number | null => {
+    const p = getCatalogPrice(getShortName(o.ProductName));
+    const n = p != null ? parseFloat(p) : NaN;
+    return Number.isFinite(n) ? n : null;
   };
 
   /* ── Render ──────────────────────────────────────────────────── */
@@ -3396,9 +3422,13 @@ export default function DashboardPage() {
             role={user?.role === 'admin' ? 'admin' : 'agent'}
             canReassign={canReassign}
             canDelete={isAdmin}
+            canEditPrice={canEditPrice}
+            canEditFullOrder={canEditFullOrder}
+            lostMode={lostMode}
+            resolveBasePrice={resolveBasePrice}
             onUpdate={handleUpdate}
             onDelete={handleDelete}
-            onPriceChange={isAdmin ? handlePriceChange : undefined}
+            onPriceChange={canEditPrice ? handlePriceChange : undefined}
             selectedIds={selectedIds}
             onToggleSelect={canReassign ? toggleSelection : undefined}
             onSelectAll={canReassign ? toggleSelectAll : undefined}

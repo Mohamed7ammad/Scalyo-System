@@ -71,6 +71,10 @@ function filterAgentFields(req, res, next) {
     const allowed = new Set(AGENT_ALLOWED_FIELDS);
     if (Array.isArray(req.user.permissions) && req.user.permissions.includes('reassign_orders')) {
       allowed.add('AssignedTo');
+      // Team-leaders (supervisors) may also correct the total price — the same
+      // capability granted by the dedicated PATCH /:id/price route and the full
+      // "تعديل الطلب" modal. Plain agents (no reassign_orders) still cannot.
+      allowed.add('ProductPrice');
     }
     const forbidden = Object.keys(req.body).filter(f => !allowed.has(f));
     if (forbidden.length > 0) {
