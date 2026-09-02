@@ -1067,6 +1067,30 @@ export const getInTransitOrders = (startDate?: string, endDate?: string, product
     `/api/analytics/in-transit-orders${buildAnalyticsQS(startDate, endDate, product, mediaBuyer)}`
   );
 
+/* ── Delayed shipments (الشحنات المتأخرة) — Bosta compensation-claim tracker ─── */
+export interface DelayedOrderRow {
+  id:              number;
+  phone:           string;
+  customer_name:   string | null;
+  tracking_number: string | null;   // Bosta AWB — copy → file a claim in Bosta
+  city:            string | null;
+  status:          string;
+  shipped_at:      string | null;
+  created_at:      string;
+  bosta_flagged:   boolean;          // Bosta's "في انتظار متابعتك" exception flag (condition a)
+  overdue_by_time: boolean;          // shipped > minDays ago, still in transit (condition b)
+  days_elapsed:    number;           // days since it shipped
+}
+export interface DelayedOrdersResponse {
+  count:   number;
+  minDays: number;    // the time-based threshold used (server-configured)
+  orders:  DelayedOrderRow[];
+}
+/** In-transit parcels flagged by Bosta OR shipped > minDays ago with no final
+ *  resolution — tenant/role-scoped exactly like GET /api/orders. */
+export const getDelayedShipments = () =>
+  api.get<DelayedOrdersResponse>('/api/orders/delayed');
+
 /* ── Accounting / Financial Overview ────────────────────────────── */
 export interface AccountingOverview {
   /** Sum of all collected deposit amounts across every order (cash in hand). */

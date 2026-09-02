@@ -547,6 +547,59 @@ router.get('/lookup', authenticate, requireAdminOrPermission('order_lookup'), as
   }
 });
 
+/* ── Delayed-shipment detection ──────────────────────────────────────────────
+   An in-transit parcel ('تم الشحن' — never yet delivered/returned/rejected) is
+   DELAYED when EITHER:
+     (a) Bosta has flagged it as an exception the merchant must act on
+         (bosta_action_required = TRUE — the "في انتظار متابعتك" bucket, set by
+         the Bosta reconciliation from Bosta's own state codes), OR
+     (b) more than DELAYED_MIN_DAYS days have passed since it shipped
+         (shipped_at) with no final resolution.
+   Both legs require Status='تم الشحن', so a delivered/returned order can never
+   appear here. Surfaced so ops can grab the AWB and file a Bosta compensation
+   claim before the claim window closes. */
+const DELAYED_MIN_DAYS = 4;
+const DELAYED_PREDICATE = `
+  "Status" = 'تم الشحن'
+  AND (
+    COALESCE("bosta_action_required", FALSE) = TRUE
+    OR ("shipped_at" IS NOT NULL AND "shipped_at" < NOW() - INTERVAL '${DELAYED_MIN_DAYS} days')
+  )`;
+
+/* ── GET /api/orders/delayed — the actionable "الشحنات المتأخرة" list ─────────
+   Tenant/role-scoped exactly like GET /api/orders (admins + team-leaders see the
+   whole queue; agents see their own assigned orders; moderators their own). Live
+   queue only (is_lost_order = false). Minimal projection for filing claims.     */
+router.get('/delayed', authenticate, async (req, res) => {
+  try {
+    const scope = buildOrderScope(req, {
+      agent: false, status: false, search: false, product: false, dates: false, reconfirm: false,
+    });
+    const { rows } = await pool.query(
+      `SELECT id,
+              "Phone"             AS phone,
+              "FullName"          AS customer_name,
+              "BostaTrackingCode" AS tracking_number,
+              "City"              AS city,
+              "Status"            AS status,
+              "shipped_at"        AS shipped_at,
+              "createdAt"         AS created_at,
+              COALESCE("bosta_action_required", FALSE)                             AS bosta_flagged,
+              ("shipped_at" IS NOT NULL AND "shipped_at" < NOW() - INTERVAL '${DELAYED_MIN_DAYS} days') AS overdue_by_time,
+              FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE("shipped_at", "createdAt"))) / 86400)::int      AS days_elapsed
+         FROM orders
+        WHERE ${scope.where} AND ${DELAYED_PREDICATE}
+        ORDER BY days_elapsed DESC NULLS LAST, "shipped_at" ASC NULLS LAST
+        LIMIT 1000`,
+      scope.params
+    );
+    res.json({ count: rows.length, minDays: DELAYED_MIN_DAYS, orders: rows });
+  } catch (err) {
+    console.error('[orders/delayed]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء جلب الشحنات المتأخرة' });
+  }
+});
+
 /* ── GET /api/orders/stats — lightweight aggregate counters ──────────────────
    Powers the stat cards (Total/New/Confirmed/Rejected/...) on the Order
    Confirmation page WITHOUT waiting for the (paginated, possibly huge) order
