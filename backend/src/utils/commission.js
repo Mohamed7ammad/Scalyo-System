@@ -13,24 +13,21 @@
      • o  → the joined orders row (o."Status", o."no_answer_logs")
    and that the query GROUPs BY the user.
 
-   Rule (MUST mirror the treasury hooks in orders.js / treasury.js):
-     confirmed×cc + delivered×cd + rejected×cr + noAnswer×cn
-     where 'لا يرد' earns comm_no_answer ONLY after ≥5 logged call attempts
-     (anti-abuse) and 'مؤجل' earns nothing automatically.                       */
-const EARNED_COMMISSION_SQL = `
-  ROUND(
-      COUNT(o.id) FILTER (WHERE o."Status" IN (
-        'تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'
-      )) * COALESCE(u.comm_confirmed, 0)
-    + COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')
-        * COALESCE(u.comm_delivered, 0)
-    + COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')
-        * COALESCE(u.comm_rejected, 0)
-    + COUNT(o.id) FILTER (WHERE
-        o."Status" = 'لا يرد'
-        AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5
-      ) * COALESCE(u.comm_no_answer, 0),
-    2
-  )`;
+   ─────────────────────────────────────────────────────────────────────────────
+   FROZEN-RATE MODEL (fixes the retroactive-repricing bug):
+   Earned commission is NO LONGER  COUNT(status) × the agent's CURRENT rate — that
+   re-priced an agent's ENTIRE history the instant their profile rate changed
+   (e.g. raising Dina 5→7 EGP retroactively inflated all 390 past confirmations to
+   2 730 instead of the 2 030 actually earned). Instead each order carries its own
+   frozen `earned_commission`, stamped at the exact rate in force when its status
+   changed (maintained from the treasury commission ledger by the status-change
+   hooks in orders.js). Total earnings = SUM of those frozen per-order amounts, so
+   changing an agent's rate in the future NEVER moves past earnings.
+
+   The expression still assumes the surrounding query joins the agent's orders as
+   `o` and GROUPs BY the user, so SUM aggregates that agent's frozen commissions
+   (date-filtered by the join for the period view; unfiltered for the lifetime
+   sum) — same shape as before, so every call-site keeps working unchanged.       */
+const EARNED_COMMISSION_SQL = `ROUND(COALESCE(SUM(o.earned_commission), 0), 2)`;
 
 module.exports = { EARNED_COMMISSION_SQL };

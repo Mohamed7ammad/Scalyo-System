@@ -1107,11 +1107,15 @@ export default function StaffPage() {
                           {/* ── Commission earned (matrix math) ── */}
                           <td className="px-4 py-2.5">
                             {(() => {
+                              /* Activity counts only — NOT count×rate. The payable
+                                 total below is the SUM of each order's commission
+                                 frozen at its own rate, so a single "×rate" here
+                                 would no longer reconcile with it. */
                               const parts: string[] = [];
-                              if (cc > 0) parts.push(`(${confirmed} تأكيد × ${cc})`);
-                              if (cd > 0) parts.push(`(${delivered} توصيل × ${cd})`);
-                              if (cr > 0) parts.push(`(${cancelled} رفض × ${cr})`);
-                              if (cn > 0) parts.push(`(${noAns + postponed} لا يرد/مؤجل × ${cn})`);
+                              if (confirmed > 0) parts.push(`${confirmed} تأكيد`);
+                              if (delivered > 0) parts.push(`${delivered} توصيل`);
+                              if (cancelled > 0) parts.push(`${cancelled} رفض`);
+                              if (noAns + postponed > 0) parts.push(`${noAns + postponed} لا يرد/مؤجل`);
                               return commission > 0 ? (
                                 <div className="flex flex-col gap-0.5">
                                   <span className="text-xs font-bold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700/50 px-2.5 py-1 rounded-xl whitespace-nowrap">
@@ -1353,7 +1357,7 @@ export default function StaffPage() {
                                       <span className="text-sm">💰</span>
                                       <div>
                                         <p className="text-xs font-bold text-amber-800 dark:text-amber-300">الفاتورة</p>
-                                        <p className="text-[10px] text-amber-600/80 dark:text-amber-500/60">تفصيل العمولة المستحقة</p>
+                                        <p className="text-[10px] text-amber-600/80 dark:text-amber-500/60">تقدير بالأسعار الحالية — المستحق مجمّد بسعر كل طلب</p>
                                       </div>
                                     </div>
                                     <div className="flex-1 space-y-1.5">
@@ -1395,11 +1399,14 @@ export default function StaffPage() {
                                       )}
                                     </div>
                                     <div className="flex justify-between items-center pt-3 mt-2 border-t-2 border-amber-300/60 dark:border-amber-600/40">
-                                      <span className="text-xs font-bold text-amber-900 dark:text-amber-300">الإجمالي المستحق</span>
+                                      <span className="text-xs font-bold text-amber-900 dark:text-amber-300">الإجمالي المستحق <span className="text-[9px] font-medium text-amber-600/70">(مجمّد)</span></span>
                                       <span className="text-lg font-black text-amber-700 dark:text-amber-300 tabular-nums">
                                         {commission.toFixed(0)} <span className="text-xs font-semibold">ج.م</span>
                                       </span>
                                     </div>
+                                    <p className="text-[9px] text-amber-600/70 dark:text-amber-500/50 leading-snug mt-1.5">
+                                      المستحق أعلاه هو مجموع عمولة كل طلب بالسعر الذي كان سارياً وقت تنفيذه، وقد يختلف عن حاصل ضرب الأعداد في السعر الحالي.
+                                    </p>
                                   </div>
                                 ) : (
                                   <div className="bg-slate-100/80 dark:bg-slate-800/50 border border-slate-200/70 dark:border-slate-700/50 rounded-xl p-4 flex flex-col items-center justify-center gap-2 text-center">

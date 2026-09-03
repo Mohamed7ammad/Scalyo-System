@@ -5,6 +5,29 @@ const { requireAdmin, filterAgentFields, requireAdminOrPermission } = require('.
 const { agentAllowsProduct } = require('../utils/productRouting');
 const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
 
+/* Treasury ledger sources that make up an agent's earned commission for an order.
+   (bosta_cod / deposit are revenue/cash, NOT commission — excluded.) */
+const COMMISSION_SOURCES = ['comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer'];
+
+/* Re-freeze one order's earned_commission = the SUM of its CURRENT valid frozen
+   commission ledger rows. Called after any hook that adds/voids a commission txn,
+   so the denormalised column always mirrors the (already rate-frozen, funnel-aware)
+   treasury ledger. Best-effort: never throws into the request path. */
+async function syncEarnedCommission(orderId, businessId) {
+  try {
+    await pool.query(
+      `UPDATE orders SET earned_commission = COALESCE((
+          SELECT SUM(amount::numeric) FROM treasury_transactions
+           WHERE order_id = $1 AND business_id = $2 AND source = ANY($3::text[])
+        ), 0)
+        WHERE id = $1 AND business_id = $2`,
+      [orderId, businessId, COMMISSION_SOURCES]
+    );
+  } catch (e) {
+    console.error('[earned_commission] sync failed for order', orderId, '—', e.message);
+  }
+}
+
 /* Look up ONE agent's product-routing restriction (allowed_products) by email,
    tenant-scoped. Returns [] when unrestricted / unknown → handles all products. */
 async function agentAllowedProducts(email, businessId) {
@@ -191,6 +214,27 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "ShippingNotes" TEXT`)
 pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "no_answer_logs" JSONB NOT NULL DEFAULT '[]'::jsonb`)
   .then(() => console.log('✅  Orders: "no_answer_logs" column ready'))
   .catch((err) => console.warn('⚠️   Orders no_answer_logs column check:', err.message));
+
+/* ── earned_commission — FROZEN per-order commission (fixes retroactive repricing)
+   The agent's commission for THIS order, stamped at the rate in force when its
+   status changed — never re-derived from the profile's CURRENT rate. Kept in sync
+   with the treasury commission ledger by the status-change hooks (COMMISSION_SOURCES
+   below). Analytics/payout totals SUM this column, so raising an agent's rate never
+   moves their past earnings. Backfilled ONCE from the existing frozen ledger, so
+   history stays historically accurate (old confirmations keep their old rate). The
+   guarded UPDATE only touches rows out of sync with the ledger → effectively one-time. */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS earned_commission NUMERIC(10,2) NOT NULL DEFAULT 0`)
+  .then(() => pool.query(
+    `UPDATE orders o
+        SET earned_commission = COALESCE(t.s, 0)
+       FROM (SELECT order_id, SUM(amount::numeric) AS s
+               FROM treasury_transactions
+              WHERE source IN ('comm_confirmed','comm_delivered','comm_rejected','comm_no_answer')
+              GROUP BY order_id) t
+      WHERE o.id = t.order_id
+        AND o.earned_commission IS DISTINCT FROM COALESCE(t.s, 0)`))
+  .then((r) => console.log(`✅  Orders: earned_commission column ready (reconciled ${r?.rowCount ?? 0} rows from ledger)`))
+  .catch((err) => console.warn('⚠️   earned_commission migration skipped:', err.message));
 
 /* ── "updatedAt" column — critical for analytics date filtering ─────────────
    This column MUST exist so the analytics LEFT JOIN ON clause can compare
@@ -2028,7 +2072,10 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
            DO NOTHING`,
           [id, rate.toFixed(2), commInfo.source, commDesc, businessId]
         );
-      }).catch((e) => console.error('[Treasury] Commission hook failed:', e.message));
+      })
+        /* Re-freeze the order's earned_commission from the ledger AFTER the insert. */
+        .then(() => syncEarnedCommission(id, businessId))
+        .catch((e) => console.error('[Treasury] Commission hook failed:', e.message));
     }
   }
 
@@ -2077,7 +2124,11 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
         if (r.rowCount > 0) {
           console.log(`[Treasury] 🧹 Voided ${r.rowCount} stale txn(s) for order ${id} → "${updates.Status}" (removed sources: ${toVoid.join(', ')})`);
         }
-      }).catch((e) => console.error('[Treasury] Void-on-revert failed:', e.message));
+      })
+        /* Re-freeze earned_commission AFTER the void so a reverted order drops the
+           commission it no longer qualifies for. */
+        .then(() => syncEarnedCommission(id, businessId))
+        .catch((e) => console.error('[Treasury] Void-on-revert failed:', e.message));
     }
   }
 
@@ -2137,6 +2188,7 @@ router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
         );
         commissionAwarded = ins.rows.length > 0;
         if (commissionAwarded) {
+          await syncEarnedCommission(id, businessId);   // freeze the no-answer commission onto the order
           console.log(`[NoAnswer] 💰 order ${id} reached ${count} attempts → comm_no_answer ${rate} EGP awarded to ${order.AssignedTo}`);
         }
       }
