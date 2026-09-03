@@ -1077,17 +1077,15 @@ export interface DelayedOrderRow {
   status:          string;
   shipped_at:      string | null;
   created_at:      string;
-  bosta_flagged:   boolean;          // Bosta's "في انتظار متابعتك" exception flag (condition a)
-  overdue_by_time: boolean;          // shipped > minDays ago, still in transit (condition b)
-  days_elapsed:    number;           // days since it shipped
+  bosta_flagged:   boolean;          // Bosta's "في انتظار متابعتك" exception flag — the sole signal
+  days_elapsed:    number;           // days since it shipped (informational, not a filter)
 }
 export interface DelayedOrdersResponse {
   count:   number;
-  minDays: number;    // the time-based threshold used (server-configured)
   orders:  DelayedOrderRow[];
 }
-/** In-transit parcels flagged by Bosta OR shipped > minDays ago with no final
- *  resolution — tenant/role-scoped exactly like GET /api/orders. */
+/** In-transit parcels Bosta itself flagged as needing action ("في انتظار متابعتك")
+ *  — 100% Bosta-driven, no time-based guessing. Tenant/role-scoped like GET /api/orders. */
 export const getDelayedShipments = () =>
   api.get<DelayedOrdersResponse>('/api/orders/delayed');
 

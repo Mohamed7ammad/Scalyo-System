@@ -67,8 +67,6 @@ export default function DelayedShipmentsPage() {
 
   if (!allowed) return null;
 
-  const minDays = data?.minDays ?? 4;
-
   return (
     <div className="min-h-full" dir="rtl">
       <div className="max-w-screen-xl mx-auto px-6 pt-8 pb-10 space-y-6">
@@ -84,7 +82,7 @@ export default function DelayedShipmentsPage() {
             </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
               شحنات عالقة قيد التوصيل — انسخ رقم الشحنة (AWB) وقدّم مطالبة تعويض لدى بوسطة قبل انتهاء المهلة.
-              يُعتبر الطلب متأخراً إذا صنّفته بوسطة كـ«في انتظار متابعتك» أو مرّ على شحنه أكثر من {minDays} أيام دون تسليم.
+              القائمة تعتمد 100% على تصنيف بوسطة: يظهر الطلب هنا فقط إذا صنّفته بوسطة كـ«في انتظار متابعتك».
             </p>
           </div>
           <button
@@ -151,7 +149,7 @@ export default function DelayedShipmentsPage() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
                               d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                           </svg>
-                          {o.bosta_flagged ? 'بوسطة: متابعة' : 'متأخر'}
+                          بوسطة: متابعة
                         </span>
                       </td>
                       <td className="px-4 py-3 text-slate-400 dark:text-slate-500 whitespace-nowrap tabular-nums text-xs" dir="ltr">#{o.id}</td>
