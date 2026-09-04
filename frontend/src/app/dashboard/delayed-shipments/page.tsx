@@ -44,6 +44,7 @@ export default function DelayedShipmentsPage() {
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState('');
   const [copiedAwb, setCopiedAwb] = useState<string | null>(null);
+  const [tab,      setTab]      = useState<'bosta' | 'overdue'>('bosta');
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -67,6 +68,14 @@ export default function DelayedShipmentsPage() {
 
   if (!allowed) return null;
 
+  /* Split into the two tabs. Type A = Bosta's strict «متأخر»; Type B = shipped
+     more than minDays days ago (an order can legitimately be in both). */
+  const bostaRows    = data?.orders.filter((o) => o.is_bosta_delayed) ?? [];
+  const overdueRows  = data?.orders.filter((o) => o.overdue_by_time) ?? [];
+  const bostaCount   = data?.counts?.bosta   ?? bostaRows.length;
+  const overdueCount = data?.counts?.overdue ?? overdueRows.length;
+  const visible      = tab === 'bosta' ? bostaRows : overdueRows;
+
   return (
     <div className="min-h-full" dir="rtl">
       <div className="max-w-screen-xl mx-auto px-6 pt-8 pb-10 space-y-6">
@@ -82,7 +91,7 @@ export default function DelayedShipmentsPage() {
             </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
               شحنات عالقة قيد التوصيل — انسخ رقم الشحنة (AWB) وقدّم مطالبة تعويض لدى بوسطة قبل انتهاء المهلة.
-              القائمة تعتمد 100% على تصنيف بوسطة: يظهر الطلب هنا فقط إذا صنّفته بوسطة كـ«في انتظار متابعتك».
+              التبويب الأول يعرض ما صنّفته بوسطة نفسها كـ«متأخر» (جاهز للمطالبة)، والثاني يعرض ما تجاوز 4 أيام على شحنه للمراجعة العامة.
             </p>
           </div>
           <button
@@ -99,20 +108,33 @@ export default function DelayedShipmentsPage() {
           </button>
         </div>
 
-        {/* Count card */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-amber-200 dark:border-amber-900/40 p-5 shadow-sm inline-flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-amber-100 dark:bg-amber-900/40 flex items-center justify-center shrink-0">
-            <svg className="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </div>
-          <div>
-            <p className="text-xs font-semibold text-amber-500 dark:text-amber-400 uppercase tracking-wide">شحنات متأخرة تحتاج مطالبة</p>
-            <p className="text-3xl font-extrabold text-slate-900 dark:text-white mt-1 tabular-nums">
-              {loading ? '…' : (data?.count ?? 0)}
-            </p>
-          </div>
+        {/* Tabs */}
+        <div className="flex flex-wrap gap-2">
+          {([
+            { key: 'bosta'   as const, label: 'بوسطة: متأخر',            count: bostaCount,   sub: 'مُصنّفة «متأخر» لدى بوسطة — جاهزة للمطالبة' },
+            { key: 'overdue' as const, label: 'تجاوزت المهلة (4+ أيام)', count: overdueCount, sub: 'مرّ على شحنها أكثر من 4 أيام دون تسليم' },
+          ]).map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2 border
+                ${tab === t.key
+                  ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-800'}`}
+            >
+              {t.label}
+              <span className={`inline-flex items-center justify-center min-w-[1.4rem] px-1.5 py-0.5 rounded-full text-[11px] font-extrabold tabular-nums
+                ${tab === t.key ? 'bg-white/25 text-white' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                {loading ? '…' : t.count}
+              </span>
+            </button>
+          ))}
         </div>
+        <p className="text-xs text-slate-400 dark:text-slate-500 -mt-3">
+          {tab === 'bosta'
+            ? 'مُصنّفة «متأخر» لدى بوسطة (isDelayed) — هذه هي الشحنات الجاهزة لتقديم مطالبة تعويض.'
+            : 'مرّ على شحنها أكثر من 4 أيام دون تسليم — مراجعة عامة (قد تشمل شحنات لم تصنّفها بوسطة بعد).'}
+        </p>
 
         {error && <p className="text-sm text-red-500 dark:text-red-400">{error}</p>}
 
@@ -120,10 +142,14 @@ export default function DelayedShipmentsPage() {
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
           {loading ? (
             <div className="text-center py-16 px-6 text-slate-400 text-sm">جارٍ التحميل…</div>
-          ) : !data || data.orders.length === 0 ? (
+          ) : visible.length === 0 ? (
             <div className="text-center py-16 px-6">
-              <p className="text-slate-700 dark:text-slate-300 font-semibold">لا توجد شحنات متأخرة 🎉</p>
-              <p className="text-slate-400 dark:text-slate-500 text-sm mt-1">كل الشحنات ضمن المهلة المتوقعة.</p>
+              <p className="text-slate-700 dark:text-slate-300 font-semibold">
+                {tab === 'bosta' ? 'لا توجد شحنات مُصنّفة «متأخر» لدى بوسطة 🎉' : 'لا توجد شحنات تجاوزت المهلة 🎉'}
+              </p>
+              <p className="text-slate-400 dark:text-slate-500 text-sm mt-1">
+                {tab === 'bosta' ? 'لا شيء ينتظر مطالبة تعويض حالياً.' : 'كل الشحنات ضمن مهلة الأربعة أيام.'}
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -141,15 +167,18 @@ export default function DelayedShipmentsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {data.orders.map((o) => (
+                  {visible.map((o) => (
                     <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                       <td className="px-4 py-3 whitespace-nowrap">
-                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-bold ${sev(o.days_elapsed)}`}>
+                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-bold
+                          ${o.is_bosta_delayed
+                            ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                            : sev(o.days_elapsed)}`}>
                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
                               d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                           </svg>
-                          بوسطة: متابعة
+                          {o.is_bosta_delayed ? 'متأخر (بوسطة)' : 'تجاوز المهلة'}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-slate-400 dark:text-slate-500 whitespace-nowrap tabular-nums text-xs" dir="ltr">#{o.id}</td>

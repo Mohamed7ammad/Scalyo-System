@@ -1072,20 +1072,24 @@ export interface DelayedOrderRow {
   id:              number;
   phone:           string;
   customer_name:   string | null;
-  tracking_number: string | null;   // Bosta AWB — copy → file a claim in Bosta
-  city:            string | null;
-  status:          string;
-  shipped_at:      string | null;
-  created_at:      string;
-  bosta_flagged:   boolean;          // Bosta's "في انتظار متابعتك" exception flag — the sole signal
-  days_elapsed:    number;           // days since it shipped (informational, not a filter)
+  tracking_number:  string | null;   // Bosta AWB — copy → file a claim in Bosta
+  city:             string | null;
+  status:           string;
+  shipped_at:       string | null;
+  created_at:       string;
+  is_bosta_delayed: boolean;         // Type A — Bosta's strict «متأخر» flag (delivery.isDelayed)
+  overdue_by_time:  boolean;         // Type B — shipped_at more than `minDays` days ago
+  days_elapsed:     number;          // days since it shipped
 }
 export interface DelayedOrdersResponse {
   count:   number;
+  minDays: number;                                  // the time-overdue threshold (days)
+  counts:  { bosta: number; overdue: number };      // per-tab totals
   orders:  DelayedOrderRow[];
 }
-/** In-transit parcels Bosta itself flagged as needing action ("في انتظار متابعتك")
- *  — 100% Bosta-driven, no time-based guessing. Tenant/role-scoped like GET /api/orders. */
+/** In-transit parcels that are EITHER Bosta-flagged «متأخر» (Type A) OR shipped
+ *  more than minDays days ago (Type B). Each row carries both booleans so the UI
+ *  can split them into two tabs. Tenant/role-scoped like GET /api/orders. */
 export const getDelayedShipments = () =>
   api.get<DelayedOrdersResponse>('/api/orders/delayed');
 

@@ -1129,9 +1129,44 @@ async function reconcileInTransitOrders(businessId) {
     return map;
   };
 
+  /* Bosta's "متأخر" (Delayed) has no dedicated state code — it is the STRICT
+     per-delivery flag delivery.isDelayed === true (the portal's visual «متأخر»
+     badge). We deliberately do NOT fall back to sla.orderSla.isExceededOrderSla:
+     that merely means "promised date passed" and matches ~8× more parcels (mostly
+     "Received at warehouse" items Bosta has NOT flagged), which is not what the
+     portal shows. The looser "shipped > N days" view is handled separately by the
+     endpoint's time-overdue leg. We scan the FORWARD in-transit bucket and collect
+     the tracking numbers Bosta reports as delayed. Returns a Set of trackingNumbers. */
+  const fetchDelayedSet = async () => {
+    const set = new Set();
+    for (let page = 1; page <= 20; page++) {
+      let body;
+      try {
+        const r = await withAuthRetry(creds, (auth) =>
+          axios.post(`${BOSTA_APP_BASE}/deliveries/search`,
+            { limit: 50, page, sortBy: '-updatedAt', stateCodes: IN_TRANSIT_STATE_CODES },
+            { headers: headersFor(auth), timeout: 15_000 }));
+        body = r.data;
+      } catch (e) {
+        console.warn(`[bosta/reconcile] delayed scan stopped at page ${page}: ${e.response?.status ?? 'ERR'} ${e.message}`);
+        break;
+      }
+      const list = body?.data?.deliveries ?? body?.deliveries ?? body?.data ?? [];
+      if (!Array.isArray(list) || !list.length) break;
+      for (const d of list) {
+        if (d.isDelayed !== true) continue;   // STRICT — matches the portal's «متأخر»
+        const tn = String(d.trackingNumber ?? d._id ?? '').trim();
+        if (tn) set.add(tn);
+      }
+      if (list.length < 50) break;
+    }
+    return set;
+  };
+
   const returning = await fetchBucket(RETURNING_STATE_CODES);
   const actionReq = await fetchBucket(ACTION_REQUIRED_STATE_CODES);
   const delivered = await fetchBucket(DELIVERED_STATE_CODES);
+  const delayedSet = await fetchDelayedSet();
   /* Paranoia guard: a parcel on the return leg can surface a "Delivered" state
      that means delivered BACK to the merchant — never let it flip forward. */
   for (const tn of returning.keys()) delivered.delete(tn);
@@ -1199,16 +1234,38 @@ async function reconcileInTransitOrders(businessId) {
     if (r.rowCount) { codUpdated += r.rowCount; flagged += r.rowCount; }
   }
 
+  /* 3 — "متأخر" (Delayed) SLA flag: a fresh live mirror of Bosta's isDelayed. Clear
+         it on every forward order first, then set it for the still-'تم الشحن' orders
+         Bosta currently reports as delayed. Powers the الشحنات المتأخرة claims list.
+         Independent of bosta_action_required (a parcel can be delayed but NOT
+         action-required, and vice-versa). */
+  let delayFlagged = 0;
+  await pool.query(
+    `UPDATE orders SET is_bosta_delayed = FALSE
+      WHERE business_id = $1 AND "Status" = 'تم الشحن' AND is_bosta_delayed = TRUE`,
+    [businessId]
+  );
+  if (delayedSet.size) {
+    const r = await pool.query(
+      `UPDATE orders SET is_bosta_delayed = TRUE
+        WHERE business_id = $1 AND "Status" = 'تم الشحن' AND "BostaTrackingCode" = ANY($2)`,
+      [businessId, [...delayedSet]]
+    );
+    delayFlagged = r.rowCount || 0;
+  }
+
   console.log(
     `[bosta/reconcile] tenant ${businessId}: ${reclassified} → 'جاري الإعادة', ` +
     `${deliveredHealed} healed → 'تم التوصيل', ` +
     `${flagged} flagged action-required (excluded), ${unflagged} re-included, ` +
-    `${codUpdated} expected_cod synced (buckets: returning ${returning.size}, ` +
-    `delivered ${delivered.size}, action ${actionReq.size})`
+    `${delayFlagged} flagged delayed (متأخر), ${codUpdated} expected_cod synced ` +
+    `(buckets: returning ${returning.size}, delivered ${delivered.size}, ` +
+    `action ${actionReq.size}, delayed ${delayedSet.size})`
   );
   return {
-    reclassified, deliveredHealed, codUpdated, flagged, unflagged,
-    returningBucket: returning.size, deliveredBucket: delivered.size, actionBucket: actionReq.size,
+    reclassified, deliveredHealed, codUpdated, flagged, unflagged, delayFlagged,
+    returningBucket: returning.size, deliveredBucket: delivered.size,
+    actionBucket: actionReq.size, delayedBucket: delayedSet.size,
   };
 }
 

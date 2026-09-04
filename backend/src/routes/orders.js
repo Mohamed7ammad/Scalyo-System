@@ -592,18 +592,22 @@ router.get('/lookup', authenticate, requireAdminOrPermission('order_lookup'), as
 });
 
 /* ── Delayed-shipment detection ──────────────────────────────────────────────
-   100% BOSTA-DRIVEN: a parcel is DELAYED only when Bosta itself has flagged it as
-   an exception the merchant must act on (bosta_action_required = TRUE — the
-   "في انتظار متابعتك" bucket, set by the Bosta reconciliation from Bosta's own
-   state codes) AND it is still 'تم الشحن'. The earlier time-based fallback
-   (shipped_at older than N days) was REMOVED: it produced false positives — ghost
-   orders and parcels canceled/deleted in Bosta after we marked them shipped — so
-   we no longer guess from our internal shipped_at date. Delivered/returned orders
-   can never appear (Status must be 'تم الشحن'). Surfaced so ops can grab the AWB
-   and file a Bosta compensation claim before the claim window closes. */
+   DUAL-VIEW. A still-'تم الشحن' parcel appears when it is EITHER:
+     • Type A — Bosta Delayed: is_bosta_delayed = TRUE, a live mirror of Bosta's
+       STRICT per-delivery flag (delivery.isDelayed === true — the portal's visual
+       «متأخر»), set by the hourly reconciliation. Deliberately NOT
+       bosta_action_required (that is "في انتظار متابعتك", usually a customer
+       refusal), and NOT the looser SLA-exceeded flag.
+     • Type B — Time Overdue: shipped_at is more than DELAYED_MIN_DAYS days ago.
+   Each row is tagged with both booleans so the frontend can split them into two
+   tabs. Delivered/returned orders can never appear (Status must be 'تم الشحن'). */
+const DELAYED_MIN_DAYS = 4;
 const DELAYED_PREDICATE = `
   "Status" = 'تم الشحن'
-  AND COALESCE("bosta_action_required", FALSE) = TRUE`;
+  AND (
+    COALESCE("is_bosta_delayed", FALSE) = TRUE
+    OR ("shipped_at" IS NOT NULL AND "shipped_at" < NOW() - INTERVAL '${DELAYED_MIN_DAYS} days')
+  )`;
 
 /* ── GET /api/orders/delayed — the actionable "الشحنات المتأخرة" list ─────────
    Tenant/role-scoped exactly like GET /api/orders (admins + team-leaders see the
@@ -623,7 +627,8 @@ router.get('/delayed', authenticate, async (req, res) => {
               "Status"            AS status,
               "shipped_at"        AS shipped_at,
               "createdAt"         AS created_at,
-              COALESCE("bosta_action_required", FALSE)                             AS bosta_flagged,
+              COALESCE("is_bosta_delayed", FALSE)                                  AS is_bosta_delayed,
+              ("shipped_at" IS NOT NULL AND "shipped_at" < NOW() - INTERVAL '${DELAYED_MIN_DAYS} days')  AS overdue_by_time,
               FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE("shipped_at", "createdAt"))) / 86400)::int      AS days_elapsed
          FROM orders
         WHERE ${scope.where} AND ${DELAYED_PREDICATE}
@@ -631,7 +636,14 @@ router.get('/delayed', authenticate, async (req, res) => {
         LIMIT 1000`,
       scope.params
     );
-    res.json({ count: rows.length, orders: rows });
+    const bostaCount   = rows.filter((r) => r.is_bosta_delayed).length;
+    const overdueCount = rows.filter((r) => r.overdue_by_time).length;
+    res.json({
+      count:    rows.length,
+      minDays:  DELAYED_MIN_DAYS,
+      counts:   { bosta: bostaCount, overdue: overdueCount },
+      orders:   rows,
+    });
   } catch (err) {
     console.error('[orders/delayed]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم أثناء جلب الشحنات المتأخرة' });

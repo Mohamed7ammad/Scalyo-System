@@ -352,6 +352,18 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bosta_action_required BO
   .then(() => console.log('✅  Orders: bosta_action_required column ready'))
   .catch((err) => console.warn('⚠️   bosta_action_required migration skipped:', err.message));
 
+/* ── is_bosta_delayed — parcel Bosta itself marks as "متأخر" (Delayed) ─────────
+   Bosta exposes this as a per-delivery SLA flag (delivery.isDelayed === true, i.e.
+   sla.orderSla.isExceededOrderSla — the promised delivery date has passed) rather
+   than as a discrete state code; it spans several in-transit master states. This
+   is the ONLY signal the 'الشحنات المتأخرة' claims list uses. Maintained as a live
+   mirror by the hourly Bosta reconciliation (set for still-'تم الشحن' parcels whose
+   Bosta delivery is delayed, cleared for the rest). Distinct from
+   bosta_action_required, which usually just means the customer refused the order. */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_bosta_delayed BOOLEAN NOT NULL DEFAULT FALSE`)
+  .then(() => console.log('✅  Orders: is_bosta_delayed column ready'))
+  .catch((err) => console.warn('⚠️   is_bosta_delayed migration skipped:', err.message));
+
 /* ── product_returns table ─────────────────────────────────────────────── */
 pool.query(`
   CREATE TABLE IF NOT EXISTS product_returns (
