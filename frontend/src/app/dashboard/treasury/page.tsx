@@ -464,7 +464,14 @@ interface AddEntryForm {
   category:    string;   // category code from MANUAL_CATEGORIES, or '' = unset
   amount:      string;
   description: string;
+  date:        string;   // YYYY-MM-DD — the ACTUAL expense date (defaults to today)
 }
+
+/* Local (not UTC) YYYY-MM-DD, so a late-night entry keeps the operator's own day. */
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 function AddEntryModal({
   onClose,
@@ -479,6 +486,7 @@ function AddEntryModal({
     category:    editing?.source ?? '',
     amount:      editing ? String(editing.amount) : '',
     description: editing?.description ?? '',
+    date:        editing?.transaction_date?.slice(0, 10) ?? todayStr(),
   });
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState('');
@@ -507,13 +515,17 @@ function AddEntryModal({
     if (!form.amount || isNaN(amount) || amount <= 0) {
       return setErr('المبلغ مطلوب ويجب أن يكون رقماً موجباً');
     }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(form.date)) {
+      return setErr('يرجى اختيار تاريخ صالح للمصروف');
+    }
     setSaving(true);
     try {
       const known = MANUAL_CATEGORIES[form.category];
       const payload: AddTreasuryEntryPayload = {
         amount,
-        source:      form.category,   // server derives revenue/expense from a known category
-        description: form.description.trim() || undefined,
+        source:           form.category,   // server derives revenue/expense from a known category
+        description:      form.description.trim() || undefined,
+        transaction_date: form.date,       // ACTUAL expense date → drives ledger + analytics grouping
         /* Custom (non-preset) source has no implicit sign → carry the explicit type
            (preserve the existing one when editing, else default to expense). */
         ...(known ? {} : { type: (editing?.type === 'revenue' ? 'revenue' : 'expense') as 'revenue' | 'expense' }),
@@ -602,21 +614,39 @@ function AddEntryModal({
             )}
           </div>
 
-          {/* Amount */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
-              المبلغ (ج.م) <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="number"
-              placeholder="0.00"
-              min="0.01"
-              step="0.01"
-              value={form.amount}
-              onChange={handle('amount')}
-              className={inputCls}
-            />
+          {/* Amount + actual expense date */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                المبلغ (ج.م) <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="number"
+                placeholder="0.00"
+                min="0.01"
+                step="0.01"
+                value={form.amount}
+                onChange={handle('amount')}
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                تاريخ المصروف <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="date"
+                value={form.date}
+                max={todayStr()}
+                onChange={handle('date')}
+                className={inputCls}
+                dir="ltr"
+              />
+            </div>
           </div>
+          <p className="-mt-2 text-[11px] text-slate-400 dark:text-slate-500 leading-snug">
+            التاريخ الفعلي للمصروف — تُجمّع التقارير عليه، وليس على تاريخ الإدخال.
+          </p>
 
           {/* Description */}
           <div>
