@@ -1453,9 +1453,34 @@ export const updateTreasuryEntry = (id: number, data: AddTreasuryEntryPayload) =
 export const deleteTreasuryEntry = (id: number) =>
   api.delete<{ success: boolean; id: number }>(`/api/treasury/${id}`);
 
-/** Fetch all treasury transactions + pre-computed summary. Admin only. */
-export const getTreasury = () =>
-  api.get<{ summary: TreasurySummary; transactions: TreasuryTransaction[] }>('/api/treasury');
+/** Fetch a PAGE of treasury transactions + (on the first page) the SQL-computed
+ *  summary. Admin only. Keyset-paginated (createdAt DESC, id DESC) and filtered
+ *  server-side, so the browser never loads the whole ledger.
+ *    • summary — present ONLY when no cursor (first page); reused thereafter.
+ *    • nextCursor — pass back as `cursor` for the next page; null = no more. */
+export interface TreasuryQuery {
+  limit?:  number;
+  cursor?: string | null;
+  search?: string;
+  type?:   'all' | 'revenue' | 'expense';
+  source?: string;   // 'all' | 'commission' | a specific source code
+}
+export interface TreasuryPage {
+  summary?:    TreasurySummary;
+  transactions: TreasuryTransaction[];
+  nextCursor:  string | null;
+  hasMore:     boolean;
+}
+export const getTreasury = (q: TreasuryQuery = {}) =>
+  api.get<TreasuryPage>('/api/treasury', {
+    params: {
+      limit: q.limit ?? 50,
+      ...(q.cursor              ? { cursor: q.cursor } : {}),
+      ...(q.search?.trim()      ? { search: q.search.trim() } : {}),
+      ...(q.type && q.type !== 'all'     ? { type: q.type }   : {}),
+      ...(q.source && q.source !== 'all' ? { source: q.source } : {}),
+    },
+  });
 
 /** Download bulk Air Waybill PDF for a list of order IDs. Admin only.
  *  Returns a Blob (application/pdf) or, if Bosta returns a URL, a JSON blob. */

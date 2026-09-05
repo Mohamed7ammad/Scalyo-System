@@ -20,6 +20,10 @@ const PRICE_EXPR = `
   )
 `;
 
+/* The four commission expense sources — mirrors the old JS startsWith('comm_')
+   so total_commissions is byte-for-byte identical after moving to SQL. */
+const COMMISSION_SOURCES = ['comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer'];
+
 /* ── Manual transaction categories (the "corporate vault" ledger) ───────────
    Each manual entry the admin adds is tagged with one of these category codes
    in treasury_transactions.source.  The category is the single source of truth
@@ -302,108 +306,128 @@ async function backfillTreasury() {
    ══════════════════════════════════════════════════════════════════════════ */
 router.get('/', authenticate, requireAdmin, async (req, res) => {
   const businessId = req.user.business_id;
+
+  /* ── Pagination + server-side filters ───────────────────────────────────────
+     The transaction LIST is keyset-paginated (createdAt DESC, id DESC) and
+     filtered server-side, so the browser never receives the whole ledger. The
+     SUMMARY cards are separate SQL aggregates over the WHOLE tenant (never
+     filtered/paged — they headline the vault, same as before), computed ONLY on
+     the first page so scrolling doesn't recompute them. */
+  const limit    = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+  const cursor   = typeof req.query.cursor === 'string' && req.query.cursor ? req.query.cursor : null;
+  const wantSummary = !cursor;   // first page only
+
+  const typeFilter   = ['revenue', 'expense'].includes(String(req.query.type)) ? String(req.query.type) : null;
+  const sourceFilter = typeof req.query.source === 'string' && req.query.source && req.query.source !== 'all'
+    ? String(req.query.source) : null;
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+
+  /* Build the filtered, keyset WHERE for the LIST query. */
+  const params = [businessId];
+  const where  = ['business_id = $1'];
+  if (typeFilter) { params.push(typeFilter); where.push(`type = $${params.length}`); }
+  if (sourceFilter === 'commission') {
+    params.push(COMMISSION_SOURCES); where.push(`source = ANY($${params.length}::text[])`);
+  } else if (sourceFilter) {
+    params.push(sourceFilter); where.push(`source = $${params.length}`);
+  }
+  if (search) {
+    const esc = search.replace(/[\\%_]/g, '\\$&');   // neutralise LIKE wildcards
+    params.push(`%${esc}%`);
+    const p = params.length;
+    where.push(`(
+      CAST(id AS text) LIKE $${p}
+      OR CAST(order_id AS text) LIKE $${p}
+      OR description ILIKE $${p}
+      OR source ILIKE $${p}
+      OR TO_CHAR(transaction_date, 'YYYY-MM-DD') LIKE $${p}
+    )`);
+  }
+  if (cursor) {
+    const [cts, cid] = cursor.split('|');
+    params.push(cts); const tsi = params.length;
+    params.push(cid); const idi = params.length;
+    // keyset: rows strictly "after" the cursor in (createdAt DESC, id DESC) order
+    where.push(`(created_at, id) < ($${tsi}::timestamptz, $${idi}::int)`);
+  }
+  params.push(limit + 1);   // +1 sentinel row → tells us if another page exists
+  const limIdx = params.length;
+
   try {
-    const [txResult, depositResult, pendingResult] = await Promise.all([
+    const listQ = pool.query(`
+      SELECT id, order_id, amount::float AS amount, type, source, description, purchase_order_id,
+             TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, created_at
+        FROM treasury_transactions
+       WHERE ${where.join(' AND ')}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${limIdx}
+    `, params);
 
-      /* ── 1. All logged transactions (tenant-scoped) ─────────────────── */
+    /* Summary aggregates (whole tenant) — one grouped scan instead of shipping
+       every row and looping in JS. Byte-for-byte identical to the old totals. */
+    const summaryQ = wantSummary ? Promise.all([
       pool.query(`
         SELECT
-          id,
-          order_id,
-          amount::float                            AS amount,
-          type,
-          source,
-          description,
-          purchase_order_id,
-          TO_CHAR(transaction_date, 'YYYY-MM-DD')  AS transaction_date,
-          created_at
-        FROM   treasury_transactions
-        WHERE  business_id = $1
-        ORDER  BY created_at DESC
-      `, [businessId]),
-
-      /* ── 2. Live deposit aggregate from orders table (tenant-scoped) ── */
+          COUNT(*)::int                                                                                   AS count,
+          COALESCE(SUM(amount) FILTER (WHERE type='revenue'), 0)::float                                   AS total_revenue,
+          COALESCE(SUM(amount) FILTER (WHERE type='expense'), 0)::float                                   AS total_expenses,
+          COALESCE(SUM(amount) FILTER (WHERE type='revenue' AND source='bosta_cod'), 0)::float            AS bosta_cod_revenue,
+          COALESCE(SUM(amount) FILTER (WHERE type='revenue' AND source='deposit'), 0)::float              AS deposits_revenue,
+          COALESCE(SUM(amount) FILTER (WHERE type='revenue' AND source='OPENING_BALANCE'), 0)::float      AS opening_balance,
+          COALESCE(SUM(amount) FILTER (WHERE type='expense' AND source = ANY($2::text[])), 0)::float      AS total_commissions
+        FROM treasury_transactions WHERE business_id = $1
+      `, [businessId, COMMISSION_SOURCES]),
       pool.query(`
-        SELECT
-          COALESCE(SUM(COALESCE("depositAmount"::numeric, 0)), 0)
-            AS total_deposits_live,
-          COUNT(*) FILTER (WHERE COALESCE("depositAmount"::numeric, 0) > 0)
-            AS count_with_deposit
-        FROM orders
-        WHERE business_id = $1
+        SELECT COALESCE(SUM(COALESCE("depositAmount"::numeric, 0)), 0) AS total_deposits_live,
+               COUNT(*) FILTER (WHERE COALESCE("depositAmount"::numeric, 0) > 0) AS count_with_deposit
+        FROM orders WHERE business_id = $1
       `, [businessId]),
-
-      /* ── 3. Cash-in-transit: expected COD still pending collection at the
-         courier.  STRICT rules:
-           • In-transit statuses ONLY — 'تم الشحن' (shipped / out-for-delivery),
-             'مؤجل' (delayed), 'لا يرد' (no-answer).  Finalized statuses are
-             excluded: 'تم التوصيل' (delivered — already collected/settled),
-             'تم الإرجاع' / 'جاري الإعادة' (returned), 'ملغي' (cancelled).
-           • Expected COD = ProductPrice − depositAmount; the per-row filter
-             keeps ONLY rows where that is > 0 (no money to collect otherwise,
-             and it can't drag the total negative).
-           • Raw expected COD — shipping fees are NOT subtracted.
-         Deliberately NOT included in net_balance (unrealised).             */
+      /* Cash-in-transit: expected COD still pending at the courier (in-transit
+         statuses only; > 0 rows; unrealised, NOT part of net_balance). */
       pool.query(`
-        SELECT COALESCE(SUM(
-          ${PRICE_EXPR} - COALESCE("depositAmount"::numeric, 0)
-        ), 0)::float AS pending_bosta_cash
+        SELECT COALESCE(SUM(${PRICE_EXPR} - COALESCE("depositAmount"::numeric, 0)), 0)::float AS pending_bosta_cash
         FROM orders
         WHERE "Status" IN ('تم الشحن', 'مؤجل', 'لا يرد')
           AND business_id = $1
           AND (${PRICE_EXPR} - COALESCE("depositAmount"::numeric, 0)) > 0
       `, [businessId]),
-    ]);
+    ]) : null;
 
-    const rows = txResult.rows;
-    const { total_deposits_live, count_with_deposit } = depositResult.rows[0];
-    const { pending_bosta_cash }                      = pendingResult.rows[0];
+    const [listResult, summaryParts] = await Promise.all([listQ, summaryQ]);
 
-    /* One-pass aggregation */
-    let totalRevenue     = 0;
-    let totalExpenses    = 0;
-    let bostaCodRevenue  = 0;
-    let depositsRevenue  = 0;
-    let totalCommissions = 0;
-    let openingBalance   = 0;   // seed capital injected via OPENING_BALANCE entries
+    const fetched  = listResult.rows;
+    const hasMore  = fetched.length > limit;
+    const rows     = hasMore ? fetched.slice(0, limit) : fetched;
+    const last     = rows[rows.length - 1];
+    const nextCursor = hasMore && last
+      ? `${last.created_at instanceof Date ? last.created_at.toISOString() : last.created_at}|${last.id}`
+      : null;
 
-    for (const row of rows) {
-      const amt = parseFloat(row.amount) || 0;
-      if (row.type === 'revenue') {
-        totalRevenue += amt;
-        if (row.source === 'bosta_cod')       bostaCodRevenue += amt;
-        if (row.source === 'deposit')         depositsRevenue += amt;
-        if (row.source === 'OPENING_BALANCE') openingBalance  += amt;
-      } else {
-        totalExpenses += amt;
-        if (row.source.startsWith('comm_')) totalCommissions += amt;
-      }
+    let summary;
+    if (summaryParts) {
+      const s   = summaryParts[0].rows[0];
+      const dep = summaryParts[1].rows[0];
+      const pen = summaryParts[2].rows[0];
+      const rev = Number(s.total_revenue)  || 0;
+      const exp = Number(s.total_expenses) || 0;
+      const r2  = (n) => parseFloat((Number(n) || 0).toFixed(2));
+      summary = {
+        total_revenue:         r2(rev),
+        total_expenses:        r2(exp),
+        net_balance:           r2(rev - exp),
+        current_total_balance: r2(rev - exp),
+        opening_balance:       r2(s.opening_balance),
+        count:                 parseInt(s.count, 10) || 0,
+        bosta_cod_revenue:     r2(s.bosta_cod_revenue),
+        deposits_revenue:      r2(s.deposits_revenue),
+        total_commissions:     r2(s.total_commissions),
+        deposits_live:         r2(dep.total_deposits_live),
+        count_with_deposit:    parseInt(dep.count_with_deposit, 10) || 0,
+        pending_bosta_cash:    r2(pen.pending_bosta_cash),
+      };
     }
 
-    /* Current Total Balance (النقد الفعلي / net cash in the corporate vault):
-         Σ opening balances + all incomes − all expenses & payouts.
-       Opening balances are already counted inside totalRevenue, so the real
-       cash on hand is simply total revenue − total expenses. We surface it as
-       a dedicated, unambiguous metric so the dashboard can headline it.        */
-    const currentTotalBalance = totalRevenue - totalExpenses;
-
-    res.json({
-      summary: {
-        total_revenue:         parseFloat(totalRevenue.toFixed(2)),
-        total_expenses:        parseFloat(totalExpenses.toFixed(2)),
-        net_balance:           parseFloat((totalRevenue - totalExpenses).toFixed(2)),
-        current_total_balance: parseFloat(currentTotalBalance.toFixed(2)),
-        opening_balance:       parseFloat(openingBalance.toFixed(2)),
-        count:                 rows.length,
-        bosta_cod_revenue:     parseFloat(bostaCodRevenue.toFixed(2)),
-        deposits_revenue:      parseFloat(depositsRevenue.toFixed(2)),
-        total_commissions:     parseFloat(totalCommissions.toFixed(2)),
-        deposits_live:         parseFloat(parseFloat(total_deposits_live).toFixed(2)),
-        count_with_deposit:    parseInt(count_with_deposit, 10) || 0,
-        pending_bosta_cash:    parseFloat(parseFloat(pending_bosta_cash || 0).toFixed(2)),
-      },
-      transactions: rows,
-    });
+    res.json({ summary, transactions: rows, nextCursor, hasMore });
 
   } catch (err) {
     console.error('[treasury GET] Error:', err.message, err.stack);

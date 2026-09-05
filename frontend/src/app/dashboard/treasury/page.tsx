@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useRouter } from 'next/navigation';
 import {
@@ -895,16 +895,26 @@ interface Toast { message: string; type: 'success' | 'error' }
 export default function TreasuryPage() {
   const router = useRouter();
 
-  /* ── Data ─────────────────────────────────────────────────────── */
-  const [loading,      setLoading]      = useState(true);
+  /* ── Data (keyset-paginated, server-filtered) ─────────────────── */
+  const [loading,      setLoading]      = useState(true);   // first-page load
+  const [loadingMore,  setLoadingMore]  = useState(false);  // infinite-scroll append
   const [error,        setError]        = useState('');
   const [summary,      setSummary]      = useState<TreasurySummary | null>(null);
   const [transactions, setTransactions] = useState<TreasuryTransaction[]>([]);
+  const [cursor,       setCursor]       = useState<string | null>(null);
+  const [hasMore,      setHasMore]      = useState(false);
 
-  /* ── Filters ──────────────────────────────────────────────────── */
+  /* ── Filters (drive server-side query; search is debounced) ───── */
   const [search,       setSearch]       = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [typeFilter,   setTypeFilter]   = useState<'all' | 'revenue' | 'expense'>('all');
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+
+  /* Debounce the search box so each keystroke doesn't hit the server. */
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(h);
+  }, [search]);
 
   /* ── Toast ────────────────────────────────────────────────────── */
   const [toast, setToast] = useState<Toast | null>(null);
@@ -938,22 +948,41 @@ export default function TreasuryPage() {
     if (u.role !== 'admin') router.push('/dashboard');
   }, [router]);
 
-  /* ── Load treasury data ───────────────────────────────────────── */
-  const loadTreasury = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
+  /* ── Load FIRST page (resets the list) — runs on mount and whenever a filter
+     changes. Brings back the SQL summary (instant header cards) + page 1 rows. */
+  const loadTreasury = useCallback(async () => {
+    setLoading(true);
     setError('');
     try {
-      const res = await getTreasury();
-      setSummary(res.data.summary);
+      const res = await getTreasury({ search: debouncedSearch, type: typeFilter, source: sourceFilter });
+      if (res.data.summary) setSummary(res.data.summary);
       setTransactions(res.data.transactions);
+      setCursor(res.data.nextCursor);
+      setHasMore(res.data.hasMore);
     } catch {
       setError('فشل في تحميل بيانات الخزينة — تحقق من الاتصال بالخادم');
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
-  }, []);
+  }, [debouncedSearch, typeFilter, sourceFilter]);
 
   useEffect(() => { loadTreasury(); }, [loadTreasury]);
+
+  /* ── Append the NEXT page (infinite scroll) — never touches the summary. */
+  const loadMore = useCallback(async () => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await getTreasury({ cursor, search: debouncedSearch, type: typeFilter, source: sourceFilter });
+      setTransactions((prev) => [...prev, ...res.data.transactions]);
+      setCursor(res.data.nextCursor);
+      setHasMore(res.data.hasMore);
+    } catch {
+      /* transient — the scroll trigger will retry on the next scroll */
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [cursor, loadingMore, debouncedSearch, typeFilter, sourceFilter]);
 
   /* ── Load live Bosta wallet (independent of treasury ledger) ──── */
   const loadWallet = useCallback(async () => {
@@ -998,7 +1027,7 @@ export default function TreasuryPage() {
       `${wasEditing ? 'تم تعديل المعاملة' : 'تم حفظ المعاملة'}: ${entry.source} — ${fmt(entry.amount)} ج`,
       'success',
     );
-    loadTreasury(true);
+    loadTreasury();
   };
 
   /* ── Delete callback — throws on failure so the modal can surface it ── */
@@ -1007,45 +1036,40 @@ export default function TreasuryPage() {
     await deleteTreasuryEntry(deletingTxn.id);
     showToast('تم حذف المعاملة بنجاح', 'success');
     setDeletingTxn(null);
-    loadTreasury(true);
+    loadTreasury();
   };
 
   /* ── Filtered rows ────────────────────────────────────────────── */
-  /* Memoised so typing in the search box (or any unrelated re-render) doesn't
-     re-scan all ~7k transactions every keystroke — only when the inputs change. */
-  const displayed = useMemo(() => transactions.filter((t) => {
-    if (typeFilter !== 'all' && t.type !== typeFilter) return false;
-    if (sourceFilter === 'commission' && !t.source.startsWith('comm_')) return false;
-    if (sourceFilter !== 'all' && sourceFilter !== 'commission' && t.source !== sourceFilter) return false;
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
-    return (
-      String(t.id).includes(q) ||
-      String(t.order_id ?? '').includes(q) ||
-      (t.description ?? '').toLowerCase().includes(q) ||
-      t.source.toLowerCase().includes(q) ||
-      t.transaction_date.includes(q)
-    );
-  }), [transactions, typeFilter, sourceFilter, search]);
+  /* Filtering + search now run SERVER-SIDE (keyset pagination), so the table
+     renders `transactions` directly — the accumulated pages for the current
+     filter set. No client-side re-scan of the whole ledger. */
 
   /* Row virtualization — render only the visible ~20 rows instead of committing
-     thousands of <tr> to the DOM at once (the actual cause of the page freeze;
-     the DB/query is ~10ms). Mirrors the Orders table's @tanstack/react-virtual
+     thousands of <tr> at once. Mirrors the Orders table's @tanstack/react-virtual
      setup: a fixed-height scrollport + top/bottom spacer rows keep native table
      layout intact so columns stay aligned with the sticky header. */
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rowVirtualizer = useVirtualizer({
-    count: displayed.length,
+    count: transactions.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 57,
     overscan: 12,
-    getItemKey: (i) => displayed[i].id,
+    getItemKey: (i) => transactions[i].id,
   });
   const vItems = rowVirtualizer.getVirtualItems();
   const padTop = vItems.length ? vItems[0].start : 0;
   const padBottom = vItems.length
     ? rowVirtualizer.getTotalSize() - vItems[vItems.length - 1].end
     : 0;
+
+  /* Infinite scroll: when the render window nears the end of the loaded rows,
+     pull the next keyset page. loadMore no-ops while a page is in flight. */
+  const lastVirtualIndex = vItems.length ? vItems[vItems.length - 1].index : -1;
+  useEffect(() => {
+    if (lastVirtualIndex >= 0 && lastVirtualIndex >= transactions.length - 15 && hasMore && !loadingMore) {
+      loadMore();
+    }
+  }, [lastVirtualIndex, transactions.length, hasMore, loadingMore, loadMore]);
 
   const unloggedDeposits = summary
     ? Math.max(0, summary.deposits_live - summary.deposits_revenue)
@@ -1207,15 +1231,17 @@ export default function TreasuryPage() {
       {/* ── Error banner ────────────────────────────────────────── */}
       {error && <div className="mb-6"><Alert msg={error} type="error" /></div>}
 
-      {/* ── Full-page loading ────────────────────────────────────── */}
-      {loading && (
+      {/* ── Full-page loading — ONLY on the very first load. Filter/search
+           refetches keep the summary + table visible (update in place) so the
+           page never flashes back to a spinner. ─────────────────────────────── */}
+      {loading && !summary && (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <Spin />
           <p className="text-sm text-slate-400 dark:text-slate-500">جارٍ تحميل الخزينة…</p>
         </div>
       )}
 
-      {!loading && summary && (
+      {summary && (
         <>
           {/* ════════════════════════════════════════════════════════
               HERO — Current Company Balance (رصيد الشركة الفعلي)
@@ -1474,7 +1500,7 @@ export default function TreasuryPage() {
             })}
 
             <span className="text-xs text-slate-400 dark:text-slate-500">
-              {displayed.length} معاملة
+              {transactions.length}{hasMore ? '+' : ''} معاملة
             </span>
 
             {/* ── "إضافة معاملة" button — opens AddEntryModal ─────── */}
@@ -1495,7 +1521,7 @@ export default function TreasuryPage() {
               Transactions table
           ════════════════════════════════════════════════════════ */}
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-            {displayed.length === 0 ? (
+            {transactions.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 gap-3">
                 <svg className="w-10 h-10 text-slate-300 dark:text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
@@ -1527,7 +1553,7 @@ export default function TreasuryPage() {
                         virtual window — native table layout & column alignment stay intact. */}
                     {padTop > 0 && <tr aria-hidden style={{ height: padTop }} />}
                     {vItems.map((vi) => {
-                      const t = displayed[vi.index];
+                      const t = transactions[vi.index];
                       return (
                       <tr
                         key={t.id}
@@ -1609,6 +1635,12 @@ export default function TreasuryPage() {
                     {padBottom > 0 && <tr aria-hidden style={{ height: padBottom }} />}
                   </tbody>
                 </table>
+                {loadingMore && (
+                  <div className="flex items-center justify-center gap-2 py-4 text-xs text-slate-400 dark:text-slate-500">
+                    <Spin />
+                    جارٍ تحميل المزيد…
+                  </div>
+                )}
               </div>
             )}
           </div>
