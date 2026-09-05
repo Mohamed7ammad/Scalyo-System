@@ -853,6 +853,76 @@ router.get('/orders-by-status', authenticate, requireAdminOrPermission('analytic
   }
 });
 
+/* ── GET /api/analytics/source-orders?source=&statuses=&startDate=&endDate= ───
+   Drill-down for the 'تحليل مصادر الطلبات' funnel (received → confirmed → delivered).
+   Replicates the EXACT scope of GET /order-sources — is_lost_order = FALSE,
+   chat_source IS NOT NULL, and the SAME `AT TIME ZONE 'Africa/Cairo'::date` bounds
+   — so a modal count always equals its funnel cell/card. Optional narrowing:
+     • statuses  — omit for the "received" total; the confirmed-or-beyond set for
+       'المؤكدة'; ['تم التوصيل'] for 'المسلّمة'.
+     • source    — omit for ALL sources (the summary cards); a source key
+       (messenger / … / unset) for a specific table row.                         */
+router.get('/source-orders', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
+  const { startDate, endDate } = req.query;
+  const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+  const requested = String(req.query.statuses || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const statuses = requested.filter((s) => DRILLDOWN_STATUSES.has(s));
+  if (requested.length > 0 && statuses.length === 0) {
+    return res.status(400).json({ error: 'حالة غير صالحة' });
+  }
+  const source = typeof req.query.source === 'string' && req.query.source.trim()
+    ? req.query.source.trim() : null;
+
+  /* SAME scope as GET /order-sources — this is what guarantees the counts match. */
+  const params = [req.user.business_id];
+  const where = [
+    'business_id = $1',
+    'COALESCE(is_lost_order, FALSE) = FALSE',
+    'chat_source IS NOT NULL',
+  ];
+  if (isDate(startDate)) { params.push(startDate); where.push(`("createdAt" AT TIME ZONE 'Africa/Cairo')::date >= $${params.length}::date`); }
+  if (isDate(endDate))   { params.push(endDate);   where.push(`("createdAt" AT TIME ZONE 'Africa/Cairo')::date <= $${params.length}::date`); }
+  if (source) {
+    params.push(source);
+    where.push(`COALESCE(NULLIF(TRIM(chat_source), ''), 'unset') = $${params.length}`);
+  }
+  if (statuses.length > 0) {
+    params.push(statuses);
+    where.push(`"Status" = ANY($${params.length}::text[])`);
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT id,
+              "Phone"             AS phone,
+              "FullName"          AS customer_name,
+              "BostaTrackingCode" AS tracking_number,
+              "Status"            AS status,
+              chat_source         AS source,
+              ROUND(${DRILLDOWN_COD_EXPR}, 2) AS cod,
+              "createdAt"         AS created_at
+         FROM orders
+        WHERE ${where.join(' AND ')}
+        ORDER BY "createdAt" DESC
+        LIMIT 1000`,
+      params
+    );
+    const totalCod = rows.reduce((s, r) => s + Number(r.cod || 0), 0);
+    res.json({
+      startDate: isDate(startDate) ? startDate : null,
+      endDate:   isDate(endDate)   ? endDate   : null,
+      count:     rows.length,
+      totalCod:  Math.round(totalCod * 100) / 100,
+      orders:    rows,
+    });
+  } catch (err) {
+    console.error('[analytics/source-orders]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء جلب طلبات المصدر' });
+  }
+});
+
 /* ── GET /api/analytics/my-performance — Any authenticated user ───── */
 router.get('/my-performance', authenticate, async (req, res) => {
   const { startDate, endDate } = req.query;

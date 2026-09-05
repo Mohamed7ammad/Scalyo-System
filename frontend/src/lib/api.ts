@@ -1089,6 +1089,22 @@ export const getOrdersByStatus = (
   return api.get<OrdersByStatusResponse>(`/api/analytics/orders-by-status${base}${sep}${qs}`);
 };
 
+/** Drill-down for the 'تحليل مصادر الطلبات' funnel. Replicates GET /order-sources'
+ *  scope exactly (chat_source set, not lost, Egypt-local date), so a modal count
+ *  equals its funnel cell. `source` omitted → all sources; `statuses` omitted →
+ *  the "received" total. */
+export const getSourceOrders = (
+  source?: string, statuses?: string[], startDate?: string, endDate?: string,
+) => {
+  const qs = new URLSearchParams();
+  if (startDate)          qs.set('startDate', startDate);
+  if (endDate)            qs.set('endDate',   endDate);
+  if (source)             qs.set('source',    source);
+  if (statuses?.length)   qs.set('statuses',  statuses.join(','));
+  const s = qs.toString();
+  return api.get<OrdersByStatusResponse>(`/api/analytics/source-orders${s ? `?${s}` : ''}`);
+};
+
 /* ── Delayed shipments (الشحنات المتأخرة) — Bosta compensation-claim tracker ─── */
 export interface DelayedOrderRow {
   id:              number;
