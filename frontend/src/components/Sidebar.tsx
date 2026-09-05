@@ -213,10 +213,14 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
-    /* Moderator home: their own orders + commission tracking. Gated to the
-       moderator allowlist in canSee() — hidden for every other role. */
+    /* Data-entry (moderator) home: THEIR OWN created orders + commission tracking.
+       The page is scoped to created_by = current user, so it's only meaningful to
+       the role that actually creates orders. Moderators get it via MODERATOR_ALLOWED
+       in canSee(); the denylist hides it from every other role — notably the ADMIN,
+       who already has the global orders/analytics views and doesn't need it. */
     href: '/dashboard/my-orders', label: 'طلباتي والعمولة',
     subLabel: 'My Orders & Commission',
+    hideForRoles: ['admin', 'agent', 'media_buyer', 'supervisor'],
     icon: (
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
