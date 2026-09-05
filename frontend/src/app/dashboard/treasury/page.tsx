@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useRouter } from 'next/navigation';
 import {
   getTreasury,
@@ -1010,7 +1011,9 @@ export default function TreasuryPage() {
   };
 
   /* ── Filtered rows ────────────────────────────────────────────── */
-  const displayed = transactions.filter((t) => {
+  /* Memoised so typing in the search box (or any unrelated re-render) doesn't
+     re-scan all ~7k transactions every keystroke — only when the inputs change. */
+  const displayed = useMemo(() => transactions.filter((t) => {
     if (typeFilter !== 'all' && t.type !== typeFilter) return false;
     if (sourceFilter === 'commission' && !t.source.startsWith('comm_')) return false;
     if (sourceFilter !== 'all' && sourceFilter !== 'commission' && t.source !== sourceFilter) return false;
@@ -1023,7 +1026,26 @@ export default function TreasuryPage() {
       t.source.toLowerCase().includes(q) ||
       t.transaction_date.includes(q)
     );
+  }), [transactions, typeFilter, sourceFilter, search]);
+
+  /* Row virtualization — render only the visible ~20 rows instead of committing
+     thousands of <tr> to the DOM at once (the actual cause of the page freeze;
+     the DB/query is ~10ms). Mirrors the Orders table's @tanstack/react-virtual
+     setup: a fixed-height scrollport + top/bottom spacer rows keep native table
+     layout intact so columns stay aligned with the sticky header. */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: displayed.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 57,
+    overscan: 12,
+    getItemKey: (i) => displayed[i].id,
   });
+  const vItems = rowVirtualizer.getVirtualItems();
+  const padTop = vItems.length ? vItems[0].start : 0;
+  const padBottom = vItems.length
+    ? rowVirtualizer.getTotalSize() - vItems[vItems.length - 1].end
+    : 0;
 
   const unloggedDeposits = summary
     ? Math.max(0, summary.deposits_live - summary.deposits_revenue)
@@ -1482,9 +1504,13 @@ export default function TreasuryPage() {
                 <p className="text-sm text-slate-400 dark:text-slate-500">لا توجد معاملات تطابق الفلتر</p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
+              <div
+                ref={scrollRef}
+                className="overflow-auto overscroll-x-contain"
+                style={{ height: 'calc(100dvh - 320px)', minHeight: '400px' }}
+              >
                 <table className="w-full text-sm">
-                  <thead>
+                  <thead className="sticky top-0 z-10 bg-white dark:bg-slate-900">
                     <tr className="border-b border-slate-100 dark:border-slate-800">
                       {['#', 'طلب', 'المبلغ', 'النوع', 'المصدر', 'الوصف', 'التاريخ', 'إجراءات'].map((h) => (
                         <th
@@ -1497,8 +1523,18 @@ export default function TreasuryPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {displayed.map((t) => (
-                      <tr key={t.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
+                    {/* Spacer rows stand in for everything scrolled out of the
+                        virtual window — native table layout & column alignment stay intact. */}
+                    {padTop > 0 && <tr aria-hidden style={{ height: padTop }} />}
+                    {vItems.map((vi) => {
+                      const t = displayed[vi.index];
+                      return (
+                      <tr
+                        key={t.id}
+                        data-index={vi.index}
+                        ref={rowVirtualizer.measureElement}
+                        className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
+                      >
                         <td className="px-4 py-3 text-xs text-slate-400 dark:text-slate-500 tabular-nums">
                           {t.id}
                         </td>
@@ -1568,7 +1604,9 @@ export default function TreasuryPage() {
                           )}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
+                    {padBottom > 0 && <tr aria-hidden style={{ height: padBottom }} />}
                   </tbody>
                 </table>
               </div>

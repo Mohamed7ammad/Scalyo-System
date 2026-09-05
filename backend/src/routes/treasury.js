@@ -118,6 +118,13 @@ pool.query(`
     ON treasury_transactions (return_collection_id)
     WHERE return_collection_id IS NOT NULL
 `))
+/* Backs the treasury list query (WHERE business_id ORDER BY created_at DESC):
+   turns the seq-scan + in-memory sort into an index range scan as the ledger
+   grows — cheap insurance, no behavioural change. */
+.then(() => pool.query(`
+  CREATE INDEX IF NOT EXISTS treasury_tenant_created_idx
+    ON treasury_transactions (business_id, created_at DESC)
+`))
 .then(() => console.log('✅  Treasury: table + all partial indexes ready'))
 .then(() => backfillTreasury())
 .catch((err) => console.warn('⚠️   Treasury schema migration:', err.message));
