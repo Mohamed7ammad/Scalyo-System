@@ -1067,6 +1067,28 @@ export const getInTransitOrders = (startDate?: string, endDate?: string, product
     `/api/analytics/in-transit-orders${buildAnalyticsQS(startDate, endDate, product, mediaBuyer)}`
   );
 
+/* ── Generic status drill-down (Confirmed / Delivered / Returned cards) ──────── */
+export interface OrdersByStatusRow extends InTransitOrderDetail {
+  status?: string;   // the order's current status (shipped_at is absent here)
+}
+export interface OrdersByStatusResponse {
+  startDate: string | null;
+  endDate:   string | null;
+  count:     number;   // matches the card's overview count for the same statuses + filters
+  totalCod:  number;
+  orders:    OrdersByStatusRow[];
+}
+/** Orders matching a set of statuses, with the SAME date/product/campaign/agency
+ *  scope as the overview cards — so the modal count equals the card. */
+export const getOrdersByStatus = (
+  statuses: string[], startDate?: string, endDate?: string, product?: string, mediaBuyer?: string,
+) => {
+  const base = buildAnalyticsQS(startDate, endDate, product, mediaBuyer);
+  const sep  = base ? '&' : '?';
+  const qs   = `statuses=${encodeURIComponent(statuses.join(','))}`;
+  return api.get<OrdersByStatusResponse>(`/api/analytics/orders-by-status${base}${sep}${qs}`);
+};
+
 /* ── Delayed shipments (الشحنات المتأخرة) — Bosta compensation-claim tracker ─── */
 export interface DelayedOrderRow {
   id:              number;

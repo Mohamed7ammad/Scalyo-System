@@ -676,24 +676,27 @@ router.get('/order-sources', authenticate, requireAdminOrPermission('analytics')
   }
 });
 
-/* ── GET /api/analytics/in-transit-orders ────────────────────────────────────
-   Drill-down for the 'طلبات في الطريق' / 'مستحقات لدى شركة الشحن' cards. Returns
-   the EXACT order rows that make up the card's count, so the user can copy each
-   Bosta AWB and track it in their portal. Consistency is guaranteed BY CONSTRUCTION:
-   it applies the SAME module-level FORWARD_STATIC predicate and rebuilds the SAME
-   tenant / date-range (CR) / product / campaign / agency scope as GET /dashboard's
-   in_transit_count — so COUNT(rows) here always equals the number on the card for
-   the same filters. Projection is minimal (id, phone, AWB, COD, dates) — no
-   profit/cost fields. Gated by the 'analytics' permission (admins bypass).       */
-router.get('/in-transit-orders', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
-  const { startDate, endDate } = req.query;
-
-  /* Numeric parsers — identical to the overview so COD matches to the piaster. */
+/* Per-order COD used by every drill-down list (Bosta live COD, else price−deposit).
+   Kept identical to the overview so the modal totals match the cards to the piaster. */
+const DRILLDOWN_COD_EXPR = (() => {
   const P   = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
   const DEP = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("depositAmount"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
-  const COD = `COALESCE("expected_cod"::numeric, GREATEST(${P} - ${DEP}, 0))`;
+  return `COALESCE("expected_cod"::numeric, GREATEST(${P} - ${DEP}, 0))`;
+})();
 
-  /* Date range → CR (Egypt-TZ bounds), built EXACTLY like GET /dashboard. */
+/* The order statuses a drill-down may request. Whitelisting keeps an arbitrary
+   status string from ever reaching the query (the values are also parameterised). */
+const DRILLDOWN_STATUSES = new Set([
+  'جديد', 'تم التأكيد', 'تم الشحن', 'تم التوصيل', 'تم الرفض',
+  'لا يرد', 'مؤجل', 'جاري الإعادة', 'تم الإرجاع', 'معلق حتي الدفع',
+]);
+
+/* Build the SAME tenant / date-range (CR) / product / campaign / agency scope
+   every dashboard card uses, so any drill-down list matches its card's count by
+   construction. Returns { params, ordFilter, CR } — the caller AND's its own
+   predicate (FORWARD_STATIC, a status set, …) and appends its SELECT.            */
+async function buildAnalyticsOrderScope(req) {
+  const { startDate, endDate } = req.query;
   const params = [req.user.business_id];                    // $1 = tenant
   let startIdx = null, endIdx = null;
   if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
@@ -712,57 +715,70 @@ router.get('/in-transit-orders', authenticate, requireAdminOrPermission('analyti
 
   let ordFilter = ` AND business_id = $1::integer`;
 
+  /* Agency scope (media_buyer / admin-impersonation) → referral_code fence. */
+  const scope = await resolveAnalyticsScope(req);
+  if (!scope.all) {
+    const hasOrderScope = scope.referralCodes && scope.referralCodes.length > 0;
+    if (hasOrderScope) {
+      params.push(scope.referralCodes);
+      ordFilter += ` AND referral_code = ANY($${params.length}::text[])`;
+    } else {
+      ordFilter += ` AND 1=0`;
+    }
+  }
+
+  /* Product filter (alias-aware) — same resolution as the overview. */
+  const productSel = typeof req.query.product === 'string' ? req.query.product.trim() : '';
+  if (productSel && productSel !== 'كل المنتجات') {
+    const pr = await pool.query(
+      `SELECT sku, name, COALESCE(aliases, '{}'::text[]) AS aliases
+         FROM products
+        WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) AND business_id = $2::integer LIMIT 1`,
+      [productSel, req.user.business_id]);
+    const prow = pr.rows[0];
+    const prodTokens = [prow?.sku, prow?.name, ...(prow?.aliases || []), productSel]
+      .map((t) => String(t ?? '').trim().toUpperCase()).filter((t) => t !== '');
+    if (prodTokens.length > 0) {
+      params.push(prodTokens);
+      ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))          = ANY($${params.length}::text[])
+                        OR UPPER(TRIM(COALESCE("ProductName",''))) = ANY($${params.length}::text[]) )`;
+    }
+  }
+
+  /* Campaign filter — same token resolution as the overview. */
+  const campaignSel = typeof req.query.campaign === 'string' ? req.query.campaign.trim() : '';
+  if (campaignSel && campaignSel !== 'كل الحملات') {
+    const campTokens = await resolveCampaignTokens(req.user.business_id, campaignSel);
+    if (campTokens.length === 0) {
+      ordFilter += ` AND 1=0`;
+    } else {
+      params.push(campTokens);
+      ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))          = ANY($${params.length}::text[])
+                        OR UPPER(TRIM(COALESCE("ProductName",''))) = ANY($${params.length}::text[]) )`;
+    }
+  }
+
+  return { params, ordFilter, CR };
+}
+
+/* ── GET /api/analytics/in-transit-orders ────────────────────────────────────
+   Drill-down for the 'طلبات في الطريق' / 'مستحقات لدى شركة الشحن' cards. Returns
+   the EXACT order rows that make up the card's count, so the user can copy each
+   Bosta AWB and track it in their portal. Consistency is guaranteed BY CONSTRUCTION:
+   it applies the SAME module-level FORWARD_STATIC predicate and rebuilds the SAME
+   scope (buildAnalyticsOrderScope) as GET /dashboard's in_transit_count. Gated by
+   the 'analytics' permission (admins bypass).                                    */
+router.get('/in-transit-orders', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
+  const { startDate, endDate } = req.query;
   try {
-    /* Agency scope (media_buyer / admin-impersonation) → referral_code fence,
-       identical to the overview. Admin (scope.all) adds nothing. */
-    const scope = await resolveAnalyticsScope(req);
-    if (!scope.all) {
-      const hasOrderScope = scope.referralCodes && scope.referralCodes.length > 0;
-      if (hasOrderScope) {
-        params.push(scope.referralCodes);
-        ordFilter += ` AND referral_code = ANY($${params.length}::text[])`;
-      } else {
-        ordFilter += ` AND 1=0`;
-      }
-    }
-
-    /* Product filter (alias-aware) — same resolution as the overview. */
-    const productSel = typeof req.query.product === 'string' ? req.query.product.trim() : '';
-    if (productSel && productSel !== 'كل المنتجات') {
-      const pr = await pool.query(
-        `SELECT sku, name, COALESCE(aliases, '{}'::text[]) AS aliases
-           FROM products
-          WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) AND business_id = $2::integer LIMIT 1`,
-        [productSel, req.user.business_id]);
-      const prow = pr.rows[0];
-      const prodTokens = [prow?.sku, prow?.name, ...(prow?.aliases || []), productSel]
-        .map((t) => String(t ?? '').trim().toUpperCase()).filter((t) => t !== '');
-      if (prodTokens.length > 0) {
-        params.push(prodTokens);
-        ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))          = ANY($${params.length}::text[])
-                          OR UPPER(TRIM(COALESCE("ProductName",''))) = ANY($${params.length}::text[]) )`;
-      }
-    }
-
-    /* Campaign filter — same token resolution as the overview. */
-    const campaignSel = typeof req.query.campaign === 'string' ? req.query.campaign.trim() : '';
-    if (campaignSel && campaignSel !== 'كل الحملات') {
-      const campTokens = await resolveCampaignTokens(req.user.business_id, campaignSel);
-      if (campTokens.length === 0) {
-        ordFilter += ` AND 1=0`;
-      } else {
-        params.push(campTokens);
-        ordFilter += ` AND ( UPPER(TRIM(COALESCE(sku,'')))          = ANY($${params.length}::text[])
-                          OR UPPER(TRIM(COALESCE("ProductName",''))) = ANY($${params.length}::text[]) )`;
-      }
-    }
+    const { params, ordFilter, CR } = await buildAnalyticsOrderScope(req);
 
     const { rows } = await pool.query(
       `SELECT id,
               "Phone"             AS phone,
               "FullName"          AS customer_name,
               "BostaTrackingCode" AS tracking_number,
-              ROUND(${COD}, 2)    AS cod,
+              ROUND(${DRILLDOWN_COD_EXPR}, 2) AS cod,
               "createdAt"         AS created_at,
               "shipped_at"        AS shipped_at
          FROM orders
@@ -785,6 +801,55 @@ router.get('/in-transit-orders', authenticate, requireAdminOrPermission('analyti
   } catch (err) {
     console.error('[analytics/in-transit-orders]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم أثناء جلب طلبات الطريق' });
+  }
+});
+
+/* ── GET /api/analytics/orders-by-status?statuses=… ──────────────────────────
+   Generic drill-down for the status-based dashboard cards (Confirmed / Delivered
+   / Returned-Failed). `statuses` is a comma-separated list of order statuses; the
+   list is whitelisted (DRILLDOWN_STATUSES) and parameterised. Same date/product/
+   campaign/agency scope as the overview counts, so COUNT(rows) matches the card.  */
+router.get('/orders-by-status', authenticate, requireAdminOrPermission('analytics'), async (req, res) => {
+  const { startDate, endDate } = req.query;
+  const requested = String(req.query.statuses || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const statuses = requested.filter((s) => DRILLDOWN_STATUSES.has(s));
+  if (statuses.length === 0) {
+    return res.status(400).json({ error: 'حالة غير صالحة' });
+  }
+  try {
+    const { params, ordFilter, CR } = await buildAnalyticsOrderScope(req);
+    params.push(statuses);
+    const statusIdx = params.length;
+
+    const { rows } = await pool.query(
+      `SELECT id,
+              "Phone"             AS phone,
+              "FullName"          AS customer_name,
+              "BostaTrackingCode" AS tracking_number,
+              "Status"            AS status,
+              ROUND(${DRILLDOWN_COD_EXPR}, 2) AS cod,
+              "createdAt"         AS created_at
+         FROM orders
+        WHERE 1=1${ordFilter}
+          AND "Status" = ANY($${statusIdx}::text[])
+          AND ${CR}
+        ORDER BY "createdAt" DESC
+        LIMIT 1000`,
+      params
+    );
+
+    const totalCod = rows.reduce((s, r) => s + Number(r.cod || 0), 0);
+    res.json({
+      startDate: (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,
+      endDate:   (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,
+      count:     rows.length,
+      totalCod:  Math.round(totalCod * 100) / 100,
+      orders:    rows,
+    });
+  } catch (err) {
+    console.error('[analytics/orders-by-status]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم أثناء جلب الطلبات' });
   }
 });
 
