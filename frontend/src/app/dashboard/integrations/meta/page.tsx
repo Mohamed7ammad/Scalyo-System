@@ -11,6 +11,7 @@ import {
   updateMetaAccount,
   deleteMetaAccount,
   getStaff,
+  userHasRole,
 } from '@/lib/api';
 import type { MetaConfig, MetaSyncResult, MetaAccount, StaffMember } from '@/lib/api';
 
@@ -166,7 +167,7 @@ export default function MetaIntegrationPage() {
       const { data } = await getStaff();
       /* Accounts can only be assigned to media buyers or admins (matches the
          backend validateAssignedUser allow-list). */
-      setMediaBuyers(data.filter((u) => u.role === 'media_buyer' || u.role === 'admin'));
+      setMediaBuyers(data.filter((u) => userHasRole(u, 'media_buyer') || userHasRole(u, 'admin')));
     } catch { /* swallow */ }
   }, []);
 

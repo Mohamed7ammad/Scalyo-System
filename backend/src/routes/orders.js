@@ -4,6 +4,7 @@ const authenticate  = require('../middleware/auth');
 const { requireAdmin, filterAgentFields, requireAdminOrPermission } = require('../middleware/roleGuard');
 const { agentAllowsProduct } = require('../utils/productRouting');
 const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
+const { hasRole } = require('../utils/roles');
 
 /* Treasury ledger sources that make up an agent's earned commission for an order.
    (bosta_cod / deposit are revenue/cash, NOT commission — excluded.) */
@@ -44,7 +45,7 @@ async function agentAllowedProducts(email, businessId) {
    team-leaders (supervisors) carrying the 'reassign_orders' permission. Anyone
    else is fenced to their own assigned rows. */
 function canSeeAllOrders(user) {
-  return user.role === 'admin'
+  return hasRole(user, 'admin')
     || (Array.isArray(user.permissions) && user.permissions.includes('reassign_orders'));
 }
 
@@ -331,16 +332,20 @@ function buildOrderScope(req, include = {}) {
   // the match scope (Postgres' default LIKE escape char is backslash).
   const escLike = (s) => s.replace(/[\\%_]/g, '\\$&');
 
-  if (req.user.role === 'moderator') {
+  if (canSeeAllOrders(req.user)) {
+    /* Admin / reassigning team-leader — see everything; an admin may narrow by
+       agent. Privilege wins over any restricted role held alongside it. */
+    if (incAgent && typeof req.query.agent === 'string' && req.query.agent.trim()) {
+      params.push(req.query.agent.trim());
+      where.push(`"AssignedTo" = $${params.length}`);
+    }
+  } else if (hasRole(req.user, 'moderator')) {
     /* Chat moderators (data-entry) see ONLY the orders THEY created — never
        anyone else's, and never by agent assignment. */
     params.push(String(req.user.id));
     where.push(`created_by = $${params.length}`);
-  } else if (!canSeeAllOrders(req.user)) {
+  } else {
     params.push(req.user.email);
-    where.push(`"AssignedTo" = $${params.length}`);
-  } else if (incAgent && typeof req.query.agent === 'string' && req.query.agent.trim()) {
-    params.push(req.query.agent.trim());
     where.push(`"AssignedTo" = $${params.length}`);
   }
 
@@ -573,8 +578,8 @@ router.get('/lookup', authenticate, requireAdminOrPermission('order_lookup'), as
   }
 
   /* Moderators may only search WITHIN their own created orders — never the whole
-     tenant. Everyone else (admin / after-sales) searches the full tenant. */
-  if (req.user.role === 'moderator') {
+     tenant. An admin held alongside moderator still searches everything. */
+  if (hasRole(req.user, 'moderator') && !hasRole(req.user, 'admin')) {
     params.push(String(req.user.id));
     whereClause += ` AND created_by = $${params.length}`;
   }
@@ -801,7 +806,7 @@ router.post('/', authenticate, async (req, res) => {
     try {
       let assignee = null;
 
-      if (req.user.role === 'agent') {
+      if (hasRole(req.user, 'agent')) {
         assignee = req.user.email;
       } else {
         /* Least-loaded present agent — but ONLY among agents allowed to handle
@@ -832,7 +837,7 @@ router.post('/', authenticate, async (req, res) => {
           [assignee, order.id, req.user.business_id]
         );
         if (upd.rows.length) order = upd.rows[0];
-        const how = req.user.role === 'agent' ? 'self (creator)' : 'least-loaded';
+        const how = hasRole(req.user, 'agent') ? 'self (creator)' : 'least-loaded';
         console.log(`[Manual Order] 🤝 #${order.id} assigned to ${order.AssignedTo} (${how})`);
       } else {
         console.log(`[Manual Order] ℹ️  #${order.id} left unassigned — no present agents`);
@@ -1735,7 +1740,7 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
      same rule as the multi-select /transfer. Admins keep full control. This
      closes the single-order path to stealing a confirmed order. */
   if (Object.prototype.hasOwnProperty.call(updates, 'AssignedTo')
-      && req.user.role !== 'admin'
+      && !hasRole(req.user, 'admin')
       && isProtectedStatus(currentStatus)) {
     return res.status(403).json({
       error: 'لا يمكن إعادة تعيين طلب تم تأكيده أو معالجته بالفعل.',

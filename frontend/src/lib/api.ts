@@ -75,10 +75,23 @@ export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor' | 'after
 export interface User {
   id:          number;
   email:       string;
+  /** Primary (most-privileged) role — kept in sync with `roles` for display and
+   *  backward-compat single-field checks. Prefer `roles` for gating. */
   role:        UserRole;
+  roles?:      UserRole[];   // all roles the user holds (source of truth)
   permissions?: string[];   // e.g. ['orders', 'analytics', 'reassign_orders', 'manage_staff']
   business_id?: number | null;
   plan_type?:  PlanType;
+}
+
+/** Read a user's roles tolerantly (falls back to the legacy single `role`). */
+export function userRoles(u: { roles?: UserRole[]; role?: UserRole } | null | undefined): UserRole[] {
+  if (!u) return [];
+  if (Array.isArray(u.roles) && u.roles.length) return u.roles;
+  return u.role ? [u.role] : [];
+}
+export function userHasRole(u: { roles?: UserRole[]; role?: UserRole } | null | undefined, r: UserRole): boolean {
+  return userRoles(u).includes(r);
 }
 
 export type AgentUpdate = Pick<Order, 'Status' | 'Note' | 'DeliveryRate'>;
@@ -555,7 +568,8 @@ export interface StaffMember {
   id:              number;
   name:            string;
   email:           string;
-  role:            UserRole;
+  role:            UserRole;               // primary role (admin-wins priority) — kept for back-compat
+  roles?:          UserRole[];             // all roles the user holds (source of truth)
   is_active:       boolean;
   is_absent:       boolean;
   permissions:     string[];
@@ -575,7 +589,8 @@ export interface CreateStaffPayload {
   name?:            string;
   email:            string;
   password:         string;
-  role?:            UserRole;
+  role?:            UserRole;      // legacy single role; prefer `roles`
+  roles?:           UserRole[];    // multi-role assignment (source of truth)
   permissions?:     string[];
   commission_rate?: number;
   comm_confirmed?:  number;
@@ -592,7 +607,8 @@ export interface UpdateStaffPayload {
   name?:            string;
   email?:           string;
   password?:        string;
-  role?:            UserRole;
+  role?:            UserRole;      // legacy single role; prefer `roles`
+  roles?:           UserRole[];    // multi-role assignment (source of truth)
   is_active?:       boolean;
   permissions?:     string[];
   commission_rate?: number;

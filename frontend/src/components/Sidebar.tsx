@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { userRoles, type UserRole } from '@/lib/api';
 
 /* ── Nav item definitions ──────────────────────────────────────── */
 interface NavChild {
@@ -328,7 +329,7 @@ export default function Sidebar({
 }: SidebarProps) {
   const pathname = usePathname();
   const router   = useRouter();
-  const [user,   setUser]   = useState<{ email: string; role: string; permissions?: string[]; plan_type?: string } | null>(null);
+  const [user,   setUser]   = useState<{ email: string; role: UserRole; roles?: UserRole[]; permissions?: string[]; plan_type?: string } | null>(null);
   const [isDark, setIsDark] = useState(false);
 
   /* Navigating (tapping a link) closes the mobile drawer automatically. */
@@ -347,22 +348,34 @@ export default function Sidebar({
   }, []);
 
   /** Returns true if the current user may see this nav item */
+  /* ── Multi-role visibility ──────────────────────────────────────────────────
+     A user can hold several roles; what they see is the UNION of each role's
+     access. The two RESTRICTED roles (moderator / after-sales) contribute a
+     strict allowlist; every other role follows the permission/adminOnly gates. */
+  const roles: string[] = userRoles(user);
+  const has   = (r: string) => roles.includes(r);
+  const RESTRICTED: Record<string, Set<string>> = { moderator: MODERATOR_ALLOWED, after_sales: AFTER_SALES_ALLOWED };
+  const restrictedRoles    = roles.filter((r) => RESTRICTED[r]);
+  const onlyRestricted     = restrictedRoles.length > 0 && restrictedRoles.length === roles.length;
+
   const canSee = (item: NavItem): boolean => {
-    // Moderator (chat data-entry): the most locked-down role — ONLY their own
-    // orders/commission page + the (self-scoped) order lookup.
-    if (user?.role === 'moderator') return MODERATOR_ALLOWED.has(item.href);
-    // After-Sales role: strict allowlist — ONLY returns/replacements + order lookup.
-    if (user?.role === 'after_sales') return AFTER_SALES_ALLOWED.has(item.href);
+    // Any restricted role the user holds whose allowlist covers this link → show it.
+    const allowedByRestricted = restrictedRoles.some((r) => RESTRICTED[r].has(item.href));
+    // A user with ONLY restricted roles: the union of their allowlists is the whole gate.
+    if (onlyRestricted) return allowedByRestricted;
+    // Otherwise the link is visible if any restricted role allows it, OR it passes
+    // the normal plan / denylist / role / permission gates below.
+    if (allowedByRestricted) return true;
     // Affiliate-plan tenants only ever see a restricted set of links.
     if (user?.plan_type === 'affiliate' && !AFFILIATE_ALLOWED.has(item.href)) return false;
     // Role-level denylist wins over any permission that would otherwise allow it.
-    if (item.hideForRoles && user?.role && item.hideForRoles.includes(user.role)) return false;
+    if (item.hideForRoles && item.hideForRoles.some((r) => has(r))) return false;
     // Affiliate-exclusive links are hidden from every other plan.
     if (item.affiliateOnly)      return user?.plan_type === 'affiliate';
-    if (item.adminOnly)          return user?.role === 'admin';
-    if (item.agentOnly)          return user?.role === 'agent';
+    if (item.adminOnly)          return has('admin');
+    if (item.agentOnly)          return has('agent');
     if (item.requiredPermission) {
-      if (user?.role === 'admin') return true; // admins bypass all permission gates
+      if (has('admin')) return true; // admins bypass all permission gates
       const perms = user?.permissions ?? ['orders'];
       return perms.includes(item.requiredPermission);
     }
@@ -527,7 +540,7 @@ export default function Sidebar({
                   {!rail && active && item.children && item.children.length > 0 && (
                     <div className="mt-0.5 mr-4 border-r-2 border-indigo-200 dark:border-indigo-700/60 pr-2 space-y-0.5">
                       {item.children
-                        .filter((child) => !child.adminOnly || user?.role === 'admin')
+                        .filter((child) => !child.adminOnly || has('admin'))
                         .map((child) => {
                           const childActive = pathname === child.href || pathname.startsWith(child.href);
                           return (

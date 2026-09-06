@@ -5,8 +5,29 @@ import { useRouter } from 'next/navigation';
 import {
   getStaff, createStaff, updateStaff, toggleAttendance, deleteStaff,
   getAgentAnalytics, createEmployeePayout, getMetaAccounts, getProducts,
-  StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics, MetaAccount, Product,
+  userRoles, userHasRole,
+  StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics, MetaAccount, Product, UserRole,
 } from '@/lib/api';
+
+/* ── Role helpers (multi-role) ──────────────────────────────────────────────
+   A member may hold several roles; `roles` is the source of truth, `role` is
+   the synced primary kept for back-compat. Read through these helpers so a
+   member with a legacy single `role` and no `roles` array still works. */
+const rolesOfMember = (m: StaffMember): UserRole[] => (m.roles?.length ? m.roles : [m.role]);
+const memberHasRole = (m: StaffMember, r: UserRole): boolean => rolesOfMember(m).includes(r);
+
+/* Every assignable role + its Arabic label + badge palette. Used both by the
+   create/edit multi-select and the multi-badge cell in the staff table. */
+const ROLE_META: { value: UserRole; label: string; badge: string }[] = [
+  { value:'agent',       label:'وكيل تأكيد',            badge:'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
+  { value:'supervisor',  label:'تيم ليدر',             badge:'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300' },
+  { value:'after_sales', label:'خدمة ما بعد البيع',     badge:'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300' },
+  { value:'moderator',   label:'تسجيل أوردرات',         badge:'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300' },
+  { value:'media_buyer', label:'ميديا باير',           badge:'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
+  { value:'admin',       label:'مدير النظام',           badge:'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300' },
+];
+const ROLE_LABEL = (r: UserRole) => ROLE_META.find((x) => x.value === r)?.label ?? r;
+const ROLE_BADGE = (r: UserRole) => ROLE_META.find((x) => x.value === r)?.badge ?? 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
 
 /* ── Types ──────────────────────────────────────────────────────── */
 type Tab    = 'staff' | 'analytics';
@@ -57,7 +78,7 @@ interface FormState {
   name:            string;
   email:           string;
   password:        string;
-  role:            'agent'|'admin'|'media_buyer'|'supervisor'|'after_sales'|'moderator';
+  roles:           UserRole[];   // multi-role assignment (at least one)
   is_active:       boolean;
   permissions:     string[];
   comm_confirmed:  number;
@@ -77,7 +98,7 @@ const ALL_PERMISSIONS = [
   { key:'shipping_followups', label:'متابعات شركة الشحن',     description:'متابعة وتحديث حالات الشحن المتقدمة' },
 ];
 const EMPTY_FORM: FormState = {
-  name:'', email:'', password:'', role:'agent', is_active:true, permissions:['orders'],
+  name:'', email:'', password:'', roles:['agent'], is_active:true, permissions:['orders'],
   comm_confirmed:0, comm_delivered:0, comm_rejected:0, comm_no_answer:0,
   allowed_products:[], referral_code:'', ad_account_ids:[],
 };
@@ -155,41 +176,36 @@ export default function StaffPage() {
      Admins AND team-leaders (supervisors carrying 'manage_staff') may open this
      page. A supervisor's view is deny-by-default: agents-only, no financials,
      no privileged permission grants, no hard-delete (see guards below).        */
-  const [currentUserId,   setCurrentUserId]   = useState<string | number | null>(null);
-  const [currentUserRole, setCurrentUserRole] = useState<string>('');
+  const [currentUserId,    setCurrentUserId]    = useState<string | number | null>(null);
+  const [currentUserRoles, setCurrentUserRoles] = useState<UserRole[]>([]);
   useEffect(() => {
     try {
       const u = JSON.parse(localStorage.getItem('user') || 'null');
-      const mayManage = u && (u.role === 'admin' || u.permissions?.includes('manage_staff'));
+      const mayManage = u && (userHasRole(u, 'admin') || u.permissions?.includes('manage_staff'));
       if (!mayManage) { router.replace('/dashboard'); return; }
       setCurrentUserId(u.id ?? null);
-      setCurrentUserRole(u.role ?? '');
+      setCurrentUserRoles(userRoles(u));
     } catch { router.replace('/dashboard'); }
   }, [router]);
 
   /* Full admin vs. team-leader (supervisor). The supervisor branch strips every
-     escalation surface from the UI — matching the server-side guard rails. */
-  const isAdminUser  = currentUserRole === 'admin';
+     escalation surface from the UI — matching the server-side guard rails. A
+     user counts as a full admin if they hold the admin role at all. */
+  const isAdminUser  = currentUserRoles.includes('admin');
   const isSupervisor = !isAdminUser;
   /* Financial UI (commissions, payouts, balances) is admin-only. Supervisors see
      the SAME performance analytics minus every money column/control. */
   const showFinancials = isAdminUser;
-  /* Permission bundle stamped on a freshly-created team-leader (admins only).
-     Deliberately NO 'analytics' — team-leaders never see the financial dashboard;
-     their agent-performance view is authorised through 'manage_staff'. */
-  const SUPERVISOR_PERMISSIONS = ['orders', 'reassign_orders', 'manage_staff'];
-  /* After-Sales customer-service bundle: read-only order lookup only. Returns/
-     replacements needs no permission (open to every employee); the sidebar
-     allowlist + role checks fence everything else. */
-  const AFTER_SALES_PERMISSIONS = ['order_lookup'];
-  /* Chat moderator (data-entry) bundle: order lookup only — scoped server-side to
-     their OWN created orders. Add-order + their commission view need no extra
-     permission; the sidebar allowlist + role checks fence everything else. */
-  const MODERATOR_PERMISSIONS = ['order_lookup'];
+  /* Per-role permission bundles are RESOLVED SERVER-SIDE now (see backend
+     resolvePermissions): supervisor → orders/reassign_orders/manage_staff,
+     after_sales/moderator → order_lookup, agent/admin/media_buyer → the
+     granular checkboxes. The client only forwards the checkbox selections and
+     the chosen roles; the server unions the fixed bundles authoritatively. */
   /* The only access permissions a supervisor may grant an agent. */
   const SUPERVISOR_GRANTABLE   = ['orders', 'shipping_followups'];
-  /* A supervisor may act on plain agents only; admins act on everyone. */
-  const canManageRow = (m: StaffMember) => isAdminUser || m.role === 'agent';
+  /* A supervisor may act on PURE agents only (every role is 'agent'); admins act
+     on everyone. Matches the server-side supervisorViolation guard. */
+  const canManageRow = (m: StaffMember) => isAdminUser || rolesOfMember(m).every((r) => r === 'agent');
 
   /* ── Tab ────────────────────────────────────────────────────── */
   const [activeTab, setActiveTab] = useState<Tab>('staff');
@@ -248,7 +264,7 @@ export default function StaffPage() {
     // not just enabled accounts.
     active: staff.filter(m => isOnline(m.last_active_at)).length,
     absent: staff.filter(m => m.is_absent && m.is_active).length,
-    agents: staff.filter(m => m.role === 'agent').length,
+    agents: staff.filter(m => memberHasRole(m, 'agent')).length,
   }), [staff]);
 
   const [togglingId, setTogglingId] = useState<number | null>(null);
@@ -326,7 +342,7 @@ export default function StaffPage() {
   const openEdit = (m: StaffMember) => {
     setEditTarget(m);
     setForm({
-      name: m.name, email: m.email, password: '', role: m.role,
+      name: m.name, email: m.email, password: '', roles: rolesOfMember(m),
       is_active: m.is_active,
       permissions: m.permissions?.length ? m.permissions : ['orders'],
       comm_confirmed: toN(m.comm_confirmed),
@@ -348,24 +364,22 @@ export default function StaffPage() {
       /* Agency fields only matter for media buyers; the backend ignores/clears
          them for other roles, but we keep the payload clean by sending them only
          when relevant. */
-      const isBuyer = form.role === 'media_buyer';
-      /* A team-leader (supervisor) gets a FIXED privileged bundle — the granular
-         permission checkboxes are only meaningful for agents. */
-      const resolvedPermissions =
-        form.role === 'supervisor'   ? SUPERVISOR_PERMISSIONS
-        : form.role === 'after_sales' ? AFTER_SALES_PERMISSIONS
-        : form.role === 'moderator'   ? MODERATOR_PERMISSIONS
-        : form.permissions;
+      const isBuyer = form.roles.includes('media_buyer');
+      /* Multi-role: the server RE-RESOLVES the permission set authoritatively as
+         the UNION of every role's bundle (supervisor/after_sales/moderator carry
+         FIXED bundles; agent/admin/media_buyer honour the granular checkboxes).
+         We just forward the checkbox selections as the agent-side "client perms". */
+      const resolvedPermissions = form.permissions;
       if (editTarget) {
         const payload: UpdateStaffPayload = {
-          name: form.name, email: form.email, role: form.role,
+          name: form.name, email: form.email, roles: form.roles,
           is_active: form.is_active, permissions: resolvedPermissions,
           comm_confirmed: form.comm_confirmed,
           comm_delivered: form.comm_delivered,
           comm_rejected:  form.comm_rejected,
           comm_no_answer: form.comm_no_answer,
           /* Product-routing restriction only applies to agents; clear it for others. */
-          allowed_products: form.role === 'agent' ? form.allowed_products : [],
+          allowed_products: form.roles.includes('agent') ? form.allowed_products : [],
         };
         if (isBuyer) {
           payload.referral_code  = form.referral_code.trim() || null;
@@ -379,12 +393,12 @@ export default function StaffPage() {
       } else {
         const payload: CreateStaffPayload = {
           name: form.name, email: form.email, password: form.password,
-          role: form.role, permissions: resolvedPermissions,
+          roles: form.roles, permissions: resolvedPermissions,
           comm_confirmed: form.comm_confirmed,
           comm_delivered: form.comm_delivered,
           comm_rejected:  form.comm_rejected,
           comm_no_answer: form.comm_no_answer,
-          allowed_products: form.role === 'agent' ? form.allowed_products : [],
+          allowed_products: form.roles.includes('agent') ? form.allowed_products : [],
         };
         if (isBuyer) {
           payload.referral_code  = form.referral_code.trim() || null;
@@ -696,15 +710,15 @@ export default function StaffPage() {
                         </td>
                         <td className="px-5 py-4 text-slate-500 dark:text-slate-400 whitespace-nowrap">{m.email}</td>
                         <td className="px-5 py-4">
-                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
-                            ${m.role==='admin'?'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'
-                              :m.role==='supervisor'?'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300'
-                              :m.role==='after_sales'?'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300'
-                              :m.role==='moderator'?'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300'
-                              :m.role==='media_buyer'?'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
-                              :'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
-                            {m.role==='admin'?'مدير':m.role==='supervisor'?'تيم ليدر':m.role==='after_sales'?'خدمة ما بعد البيع':m.role==='moderator'?'تسجيل أوردرات':m.role==='media_buyer'?'ميديا باير':'وكيل'}
-                          </span>
+                          {/* One badge per role the member holds (priority order). */}
+                          <div className="flex flex-wrap gap-1">
+                            {ROLE_META.filter((rm) => memberHasRole(m, rm.value)).map((rm) => (
+                              <span key={rm.value}
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${rm.badge}`}>
+                                {rm.label}
+                              </span>
+                            ))}
+                          </div>
                         </td>
                         <td className="px-5 py-4">
                           {(() => {
@@ -726,7 +740,7 @@ export default function StaffPage() {
                           })()}
                         </td>
                         <td className="px-5 py-4">
-                          {m.role==='agent' ? (
+                          {memberHasRole(m, 'agent') ? (
                             <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
                               ${m.is_absent?'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300':'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>
                               <span className={`w-1.5 h-1.5 rounded-full ${m.is_absent?'bg-red-500':'bg-emerald-500 animate-pulse'}`}/>
@@ -736,7 +750,7 @@ export default function StaffPage() {
                         </td>
                         {showFinancials && (
                           <td className="px-5 py-4">
-                            {m.role === 'agent' && (toN(m.comm_confirmed) > 0 || toN(m.comm_delivered) > 0 || toN(m.comm_rejected) > 0 || toN(m.comm_no_answer) > 0) ? (
+                            {memberHasRole(m, 'agent') && (toN(m.comm_confirmed) > 0 || toN(m.comm_delivered) > 0 || toN(m.comm_rejected) > 0 || toN(m.comm_no_answer) > 0) ? (
                               <div className="flex flex-col gap-0.5">
                                 {toN(m.comm_confirmed)  > 0 && <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400">تأكيد: {toN(m.comm_confirmed)} ج.م</span>}
                                 {toN(m.comm_delivered)  > 0 && <span className="text-[10px] font-bold text-teal-700 dark:text-teal-400">توصيل: +{toN(m.comm_delivered)} ج.م</span>}
@@ -748,7 +762,7 @@ export default function StaffPage() {
                         )}
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-2">
-                            {m.role==='agent' && (
+                            {memberHasRole(m, 'agent') && (
                               <button onClick={() => handleToggleAttendance(m)} disabled={togglingId===m.id}
                                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-95 disabled:opacity-60
                                   ${m.is_absent?'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm':'bg-red-100 hover:bg-red-200 text-red-700 dark:bg-red-900/40 dark:hover:bg-red-900/60 dark:text-red-300'}`}>
@@ -1701,39 +1715,66 @@ export default function StaffPage() {
                 <input type="password" value={form.password} onChange={e => setForm(f => ({...f,password:e.target.value}))} placeholder={editTarget?'••••••••':'كلمة مرور (6 أحرف على الأقل)'} dir="ltr"
                   className="w-full px-4 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-400 transition"/>
               </div>
-              {/* Role + Active */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">الدور</label>
-                  {isSupervisor ? (
-                    /* Team-leaders may only ever create/edit plain agents. */
-                    <div className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 cursor-not-allowed">
-                      وكيل تأكيد
-                    </div>
-                  ) : (
-                    <select value={form.role} onChange={e => setForm(f => ({...f,role:e.target.value as FormState['role']}))}
-                      className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition">
-                      <option value="agent">وكيل تأكيد</option>
-                      <option value="supervisor">تيم ليدر</option>
-                      <option value="after_sales">خدمة ما بعد البيع</option>
-                      <option value="moderator">تسجيل أوردرات (Moderator)</option>
-                      <option value="media_buyer">ميديا باير</option>
-                      <option value="admin">مدير النظام</option>
-                    </select>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">الحالة</label>
-                  <select value={form.is_active?'active':'inactive'} onChange={e => setForm(f => ({...f,is_active:e.target.value==='active'}))}
-                    className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition">
-                    <option value="active">نشط</option>
-                    <option value="inactive">غير نشط</option>
-                  </select>
-                </div>
+              {/* Roles — multi-select. A single employee may hold several roles
+                  (e.g. تسجيل أوردرات + خدمة ما بعد البيع) to cover cross-functional
+                  work; access is the UNION of every selected role. */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                  الأدوار <span className="text-slate-400 font-normal">— يمكن اختيار أكثر من دور</span>
+                </label>
+                {isSupervisor ? (
+                  /* Team-leaders may only ever create/edit plain agents. */
+                  <div className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 cursor-not-allowed">
+                    وكيل تأكيد
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {ROLE_META.map((rm) => {
+                      const checked = form.roles.includes(rm.value);
+                      return (
+                        <button key={rm.value} type="button"
+                          onClick={() => setForm(f => {
+                            const has = f.roles.includes(rm.value);
+                            // Toggle, but never allow zero roles.
+                            const next = has ? f.roles.filter(r => r !== rm.value) : [...f.roles, rm.value];
+                            return { ...f, roles: next.length ? next : f.roles };
+                          })}
+                          className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium border transition-all text-right
+                            ${checked
+                              ? 'bg-indigo-50 dark:bg-indigo-900/30 border-indigo-400 dark:border-indigo-600 text-indigo-700 dark:text-indigo-300 ring-1 ring-indigo-400/40'
+                              : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600'}`}>
+                          <span className={`w-4 h-4 rounded flex items-center justify-center shrink-0 border
+                            ${checked ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300 dark:border-slate-600'}`}>
+                            {checked && <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7"/></svg>}
+                          </span>
+                          <span className="truncate">{rm.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {/* Selected-roles summary chips */}
+                {!isSupervisor && (
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {ROLE_META.filter(rm => form.roles.includes(rm.value)).map(rm => (
+                      <span key={rm.value} className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${rm.badge}`}>{rm.label}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Status */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">الحالة</label>
+                <select value={form.is_active?'active':'inactive'} onChange={e => setForm(f => ({...f,is_active:e.target.value==='active'}))}
+                  className="w-full px-3 py-2.5 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition">
+                  <option value="active">نشط</option>
+                  <option value="inactive">غير نشط</option>
+                </select>
               </div>
 
               {/* Agency model — media buyers only */}
-              {form.role === 'media_buyer' && (
+              {form.roles.includes('media_buyer') && (
                 <div className="space-y-3 rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-900/10 p-3.5">
                   <p className="text-xs font-bold text-amber-700 dark:text-amber-400">إعدادات الميديا باير</p>
 
@@ -1795,7 +1836,7 @@ export default function StaffPage() {
               )}
 
               {/* Team-leader (supervisor) role — fixed privileged bundle, no checkboxes */}
-              {form.role === 'supervisor' && (
+              {form.roles.includes('supervisor') && (
                 <div className="rounded-xl border border-teal-200 dark:border-teal-900/40 bg-teal-50/60 dark:bg-teal-900/10 p-3.5">
                   <p className="text-xs font-bold text-teal-700 dark:text-teal-400 mb-1">صلاحيات التيم ليدر</p>
                   <p className="text-[11px] text-teal-700/80 dark:text-teal-300/70 leading-relaxed">
@@ -1806,7 +1847,7 @@ export default function StaffPage() {
               )}
 
               {/* Moderator (chat data-entry) role — fixed, hard-locked bundle */}
-              {form.role === 'moderator' && (
+              {form.roles.includes('moderator') && (
                 <div className="rounded-xl border border-cyan-200 dark:border-cyan-900/40 bg-cyan-50/60 dark:bg-cyan-900/10 p-3.5">
                   <p className="text-xs font-bold text-cyan-700 dark:text-cyan-400 mb-1">صلاحيات مسجّل الأوردرات</p>
                   <p className="text-[11px] text-cyan-700/80 dark:text-cyan-300/70 leading-relaxed">
@@ -1818,7 +1859,7 @@ export default function StaffPage() {
               )}
 
               {/* Commission matrix — agents only, and NEVER editable by a supervisor (financial) */}
-              {form.role === 'agent' && !isSupervisor && (
+              {form.roles.includes('agent') && !isSupervisor && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">
                     هيكل العمولات <span className="text-slate-400 font-normal">(0 = بدون عمولة)</span>
@@ -1852,7 +1893,7 @@ export default function StaffPage() {
               )}
 
               {/* Permissions — agents only */}
-              {form.role === 'agent' && (
+              {form.roles.includes('agent') && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">صلاحيات الوصول</label>
                   <div className="rounded-xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
@@ -1887,7 +1928,7 @@ export default function StaffPage() {
               {/* ── Product-routing restriction — agents only ────────────────────
                   Empty = handles ALL products; selecting products restricts the
                   agent to ONLY those (blocks assignment/distribution of others). */}
-              {form.role === 'agent' && (
+              {form.roles.includes('agent') && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
                     المنتجات المسموح بها

@@ -3,6 +3,7 @@ const bcrypt               = require('bcryptjs');
 const jwt                  = require('jsonwebtoken');
 const { createClient }     = require('@supabase/supabase-js');
 const pool                 = require('../config/db');
+const { rolesOf, primaryRole } = require('../utils/roles');
 
 const router = express.Router();
 
@@ -68,13 +69,17 @@ function getSupabase() {
   return _supabase;
 }
 
-/** Sign a local JWT with the same shape the dashboard expects */
+/** Sign a local JWT with the same shape the dashboard expects. Carries the full
+ *  `roles` array (source of truth for RBAC) AND a `role` = the primary role, so
+ *  any un-migrated single-field check keeps working. */
 function signToken(user) {
+  const roles = rolesOf(user);
   return jwt.sign(
     {
       id:          user.id,
       email:       user.email,
-      role:        user.role,
+      role:        primaryRole(roles),
+      roles,
       permissions: user.permissions || ['orders'],
       business_id: user.business_id || null,
       plan_type:   user.plan_type || 'ecommerce',
@@ -86,10 +91,12 @@ function signToken(user) {
 
 /** Normalise the user object returned to the client (never expose password_hash) */
 function publicUser(user) {
+  const roles = rolesOf(user);
   return {
     id:          user.id,
     email:       user.email,
-    role:        user.role,
+    role:        primaryRole(roles),
+    roles,
     permissions: user.permissions || ['orders'],
     business_id: user.business_id || null,
     plan_type:   user.plan_type || 'ecommerce',

@@ -23,7 +23,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  getOrders, getOrderStats, createOrder, getProducts,
+  getOrders, getOrderStats, createOrder, getProducts, userHasRole,
   Order, Product, ChatSource, CHAT_SOURCES, CHAT_SOURCE_LABELS,
 } from '@/lib/api';
 
@@ -75,7 +75,7 @@ export default function MyOrdersPage() {
       const token = localStorage.getItem('token');
       const u = JSON.parse(localStorage.getItem('user') || 'null');
       if (!token || !u) { router.replace('/'); return; }
-      if (u.role !== 'moderator' && u.role !== 'admin') { router.replace('/dashboard'); return; }
+      if (!userHasRole(u, 'moderator') && !userHasRole(u, 'admin')) { router.replace('/dashboard'); return; }
       setAllowed(true);
     } catch { router.replace('/'); }
   }, [router]);

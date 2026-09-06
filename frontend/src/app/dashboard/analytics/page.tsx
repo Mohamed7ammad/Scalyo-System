@@ -16,7 +16,7 @@ import {
   Cell,
 } from 'recharts';
 
-import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders, getMediaBuyers, getInTransitOrders, getOrdersByStatus } from '@/lib/api';
+import { getProducts, getDashboardStats, getProductsProfitability, getBusinessProfile, getDeliveredOrders, getMediaBuyers, getInTransitOrders, getOrdersByStatus, userRoles } from '@/lib/api';
 import type { DeliveredOrdersResponse, MediaBuyer } from '@/lib/api';
 import OrdersListModal, { OrdersListRow } from '@/components/OrdersListModal';
 
@@ -559,19 +559,19 @@ export default function AnalyticsDashboard() {
       const u = JSON.parse(localStorage.getItem('user') || 'null');
       if (!u) { router.replace('/'); return; }
       setIsAffiliate(u.plan_type === 'affiliate');
+      const roles = userRoles(u);
       /* Admins get the "filter by Media Buyer" dropdown; media buyers see a locked,
          self-scoped view (no dropdown) — the backend enforces the scope either way. */
-      setIsAdmin(u.role === 'admin');
-      /* Team-leaders (supervisors) are NEVER allowed on the financial analytics
-         dashboard — bounce them to the orders system regardless of any stale
-         'analytics' permission. */
-      if (u.role === 'supervisor') { router.replace('/dashboard'); return; }
-      /* Admins and Media Buyers always have analytics access. Other roles need
-         the explicit 'analytics' permission. */
-      if (u.role !== 'admin' && u.role !== 'media_buyer') {
-        const perms: string[] = u.permissions ?? ['orders'];
-        if (!perms.includes('analytics')) router.replace('/dashboard');
-      }
+      setIsAdmin(roles.includes('admin'));
+      /* Access to the financial analytics dashboard (any matching role wins):
+         admins & media buyers always; anyone else needs the explicit 'analytics'
+         permission. Team-leaders (supervisors) are NEVER allowed — their fixed
+         bundle carries no 'analytics', so a pure supervisor is denied here; a
+         lingering stale permission is ignored while they hold no higher role. */
+      const perms: string[] = u.permissions ?? ['orders'];
+      const canView = roles.includes('admin') || roles.includes('media_buyer')
+        || (perms.includes('analytics') && !roles.includes('supervisor'));
+      if (!canView) { router.replace('/dashboard'); return; }
     } catch {
       router.replace('/');
     }

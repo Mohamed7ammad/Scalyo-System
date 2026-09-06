@@ -17,7 +17,7 @@ import { useRouter } from 'next/navigation';
 import {
   getExchangeReturnRequests, createExchangeReturnRequest,
   updateExchangeReturnRequest, deleteExchangeReturnRequest,
-  getProducts,
+  getProducts, userHasRole,
   ExchangeReturnRequest, ExchangeReturnType, ExchangeReturnStatus,
   EXCHANGE_RETURN_TYPES, EXCHANGE_RETURN_STATUSES, Product,
   RefundMethod, REFUND_METHOD_LABELS,
@@ -151,7 +151,7 @@ export default function ExchangeReturnsPage() {
       const stored = localStorage.getItem('user');
       if (!token || !stored) { router.replace('/'); return; }
       const u = JSON.parse(stored);
-      setIsAdmin(u.role === 'admin');
+      setIsAdmin(userHasRole(u, 'admin'));
       setAllowed(true);
     } catch { router.replace('/'); }
   }, [router]);

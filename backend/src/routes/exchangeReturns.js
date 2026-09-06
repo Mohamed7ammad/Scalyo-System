@@ -19,6 +19,7 @@ const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
+const { hasRole } = require('../utils/roles');
 
 const router = express.Router();
 
@@ -218,7 +219,7 @@ router.patch('/:id', authenticate, async (req, res) => {
      (approve / reject / complete). Every other employee — including the
      after-sales customer-service role — may CREATE requests and edit notes, but
      the approval decision is reserved for the admin. */
-  if (has('status') && req.user.role !== 'admin') {
+  if (has('status') && !hasRole(req.user, 'admin')) {
     return res.status(403).json({ error: 'تغيير حالة الطلب (الموافقة/الرفض) مقتصر على المدير فقط.' });
   }
 

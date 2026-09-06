@@ -14,7 +14,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { lookupOrders, OrderLookupRow, OrderLookupBy } from '@/lib/api';
+import { lookupOrders, userHasRole, OrderLookupRow, OrderLookupBy } from '@/lib/api';
 
 /* Search modes — label + input hints per mode. */
 const SEARCH_MODES: { key: OrderLookupBy; label: string; placeholder: string; ltr: boolean }[] = [
@@ -54,7 +54,12 @@ export default function OrderLookupPage() {
       const u = JSON.parse(localStorage.getItem('user') || 'null');
       if (!token || !u) { router.replace('/'); return; }
       const perms: string[] = u.permissions ?? [];
-      const ok = u.role === 'admin' || u.role === 'after_sales' || perms.includes('order_lookup');
+      /* Any matching role grants access: admin, after-sales, or a moderator —
+         all of whom carry the 'order_lookup' permission — plus anyone explicitly
+         granted it. Multi-role aware so a combined role (e.g. moderator +
+         after_sales) still resolves correctly. */
+      const ok = userHasRole(u, 'admin') || userHasRole(u, 'after_sales')
+        || userHasRole(u, 'moderator') || perms.includes('order_lookup');
       if (!ok) { router.replace('/dashboard'); return; }
       setAllowed(true);
     } catch { router.replace('/'); }

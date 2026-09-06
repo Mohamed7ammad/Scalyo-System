@@ -4,6 +4,7 @@ const authenticate = require('../middleware/auth');
 const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { getExternalAffiliateStats, aggregateSafqaBreakdowns } = require('../services/externalAffiliate');
 const { EARNED_COMMISSION_SQL } = require('../utils/commission');
+const { hasRole, hasAnyRole } = require('../utils/roles');
 
 const router = express.Router();
 
@@ -135,7 +136,6 @@ async function loadMediaBuyerScope(businessId, userId) {
 const MAIN_ACCOUNT = 'main_account';
 
 async function resolveAnalyticsScope(req) {
-  const role       = req.user?.role;
   const businessId = req.user?.business_id;
   /* MASTER DASHBOARD: admin with no buyer selected → all:true → NO marketer/account
      filter → the grand total of EVERY order (all buyers + organic 'main_account' +
@@ -143,11 +143,9 @@ async function resolveAnalyticsScope(req) {
      it down to an individual buyer. */
   const ADMIN_ALL  = { all: true, referralCodes: null, adAccountIds: null, mediaBuyerId: null };
 
-  if (role === 'media_buyer') {
-    /* Strict isolation — never trust a client param for a media buyer. */
-    return loadMediaBuyerScope(businessId, req.user.id);
-  }
-  if (role === 'admin') {
+  /* Admin precedence: an admin (even one who ALSO holds media_buyer) gets the
+     master view + drill-down. Only a non-admin media_buyer is strictly isolated. */
+  if (hasRole(req.user, 'admin')) {
     const mb = typeof req.query.mediaBuyer === 'string' ? req.query.mediaBuyer.trim() : '';
     if (!mb) return ADMIN_ALL;                    // Master view (business-name option)
     /* "الحساب الأساسي" — isolate the Main Account: orders tagged marketer='main_account'
@@ -168,6 +166,10 @@ async function resolveAnalyticsScope(req) {
       };
     }
     return loadMediaBuyerScope(businessId, mb);   // drill-down to one buyer
+  }
+  if (hasRole(req.user, 'media_buyer')) {
+    /* Strict isolation — never trust a client param for a media buyer. */
+    return loadMediaBuyerScope(businessId, req.user.id);
   }
   return ADMIN_ALL;   // other roles are blocked by the per-route guards anyway
 }
@@ -611,7 +613,7 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
        keep the full payload. */
     const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
     const canSeeFinancials =
-      req.user.role !== 'supervisor' && (req.user.role === 'admin' || perms.includes('analytics'));
+      !hasRole(req.user, 'supervisor') && (hasRole(req.user, 'admin') || perms.includes('analytics'));
     if (!canSeeFinancials) {
       const FINANCIAL_KEYS = [
         'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
@@ -1012,7 +1014,7 @@ router.get('/my-performance', authenticate, async (req, res) => {
    ══════════════════════════════════════════════════════════════════════════ */
 router.get('/products-profitability', authenticate, async (req, res) => {
   const role = req.user?.role;
-  if (role !== 'admin' && role !== 'media_buyer') {
+  if (!hasAnyRole(req.user, 'admin', 'media_buyer')) {
     return res.status(403).json({ error: 'غير مصرح لك بعرض ربحية المنتجات' });
   }
 
@@ -1424,7 +1426,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
   try {
   /* ── Role gate ─────────────────────────────────────────────────────────── */
   const role = req.user?.role;
-  if (role !== 'admin' && role !== 'media_buyer') {
+  if (!hasAnyRole(req.user, 'admin', 'media_buyer')) {
     return res.status(403).json({ error: 'غير مصرح لك بعرض لوحة التحليلات' });
   }
 
@@ -2098,7 +2100,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
    ══════════════════════════════════════════════════════════════════════════ */
 router.get('/delivered-orders', authenticate, async (req, res) => {
   const role = req.user?.role;
-  if (role !== 'admin' && role !== 'media_buyer') {
+  if (!hasAnyRole(req.user, 'admin', 'media_buyer')) {
     return res.status(403).json({ error: 'غير مصرح لك بعرض هذه البيانات' });
   }
 
@@ -2214,7 +2216,7 @@ router.get('/delivered-orders', authenticate, async (req, res) => {
    ════════════════════════════════════════════════════════════════════ */
 router.get('/campaigns', authenticate, async (req, res) => {
   const role = req.user?.role;
-  if (role !== 'admin' && role !== 'media_buyer') {
+  if (!hasAnyRole(req.user, 'admin', 'media_buyer')) {
     return res.status(403).json({ error: 'غير مصرح لك بعرض الحملات' });
   }
 
@@ -2258,7 +2260,7 @@ router.get('/campaigns', authenticate, async (req, res) => {
    NOT call this (they only ever see themselves) → admin-only guard. '[]' on error.
    ════════════════════════════════════════════════════════════════════ */
 router.get('/media-buyers', authenticate, async (req, res) => {
-  if (req.user?.role !== 'admin') {
+  if (!hasRole(req.user, 'admin')) {
     return res.status(403).json({ error: 'غير مصرح لك بعرض قائمة الميديا باير' });
   }
   try {

@@ -2,6 +2,7 @@ const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
+const { hasRole } = require('../utils/roles');
 
 const router = express.Router();
 
@@ -71,7 +72,7 @@ const NON_ADMIN_PRODUCT_COLS = `
 
 router.get('/', authenticate, async (req, res) => {
   try {
-    const isAdmin = req.user.role === 'admin';
+    const isAdmin = hasRole(req.user, 'admin');
     const cols = isAdmin ? '*' : NON_ADMIN_PRODUCT_COLS;
     const result = await pool.query(
       `SELECT ${cols} FROM products WHERE business_id = $1 ORDER BY name ASC`,

@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { login, verifyOtp, User } from '@/lib/api';
+import { login, verifyOtp, userRoles, User } from '@/lib/api';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -23,18 +23,29 @@ export default function LoginPage() {
     localStorage.setItem('token', token);
     localStorage.setItem('user',  JSON.stringify(user));
     const perms: string[] = user.permissions ?? ['orders'];
-    /* After-Sales customer-service lands on their returns/replacements page — they
-       have no access to the orders confirmation system. */
-    if (user.role === 'moderator') {
-      /* Chat moderators (data-entry) land on their own orders/commission page —
-         they have no access to the confirmation system or company analytics. */
-      router.push('/dashboard/my-orders');
-    } else if (user.role === 'after_sales') {
-      router.push('/dashboard/exchange-returns');
-    } else if (user.role !== 'supervisor' && (user.role === 'admin' || perms.includes('analytics'))) {
-      /* Team-leaders (supervisors) land on the orders system — never the financial
-         analytics dashboard — even if a stale 'analytics' permission lingers. */
+    /* Multi-role landing: pick the richest page the user can actually reach.
+       `roles` is the union of everything they hold. */
+    const roles = userRoles(user);
+    const RESTRICTED = new Set(['after_sales', 'moderator']);   // pages fenced to a single feature
+    /* Financial dashboard: admins & media buyers, or anyone carrying the
+       'analytics' permission — but NEVER a team-leader (supervisor), even with a
+       stale 'analytics' permission lingering. */
+    const canAnalytics = roles.includes('admin') || roles.includes('media_buyer')
+      || (perms.includes('analytics') && !roles.includes('supervisor'));
+    /* Holds at least one non-restricted role (agent / supervisor / media_buyer /
+       admin) → the main orders dashboard is a valid home. */
+    const hasNonRestricted = roles.some((r) => !RESTRICTED.has(r));
+
+    if (canAnalytics) {
       router.push('/dashboard/analytics');
+    } else if (hasNonRestricted) {
+      router.push('/dashboard');
+    } else if (roles.includes('after_sales')) {
+      /* After-Sales customer-service → returns/replacements (no orders system). */
+      router.push('/dashboard/exchange-returns');
+    } else if (roles.includes('moderator')) {
+      /* Chat moderators (data-entry) → their own orders/commission page. */
+      router.push('/dashboard/my-orders');
     } else {
       router.push('/dashboard');
     }

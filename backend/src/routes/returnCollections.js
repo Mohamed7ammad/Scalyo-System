@@ -25,6 +25,7 @@ const express      = require('express');
 const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin, requireAdminOrPermission } = require('../middleware/roleGuard');
+const { hasRole } = require('../utils/roles');
 const { fetchReturningParcels } = require('./bosta');
 
 const router = express.Router();
@@ -300,7 +301,7 @@ router.post('/sync', authenticate, requireAdminOrPermission('shipping_followups'
    ════════════════════════════════════════════════════════════════════════════ */
 router.get('/analytics', authenticate, requireAdminOrPermission('shipping_followups'), async (req, res) => {
   const businessId = req.user.business_id;
-  const isAdmin    = req.user.role === 'admin';
+  const isAdmin    = hasRole(req.user, 'admin');
 
   /* Agents are scoped to their own handled_by; admins see all handlers. */
   const params = [businessId];

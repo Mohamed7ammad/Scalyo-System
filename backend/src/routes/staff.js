@@ -5,6 +5,23 @@ const authenticate = require('../middleware/auth');
 const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { checkAndSendStaffAlerts } = require('../services/alerts');
 const { EARNED_COMMISSION_SQL } = require('../utils/commission');
+const { hasRole, primaryRole, normalizeRoles } = require('../utils/roles');
+
+/* Authoritative permission set derived from a user's ROLES — the union of each
+   role's fixed bundle. A pure moderator / after-sales can never be smuggled a
+   privileged key (their branch only adds 'order_lookup'); an agent's granular
+   checkboxes are honoured; combining roles unions their bundles. */
+function resolvePermissions(roles, clientPerms) {
+  const set = new Set();
+  const cp  = Array.isArray(clientPerms) ? clientPerms.filter(Boolean) : [];
+  if (roles.includes('supervisor')) ['orders', 'reassign_orders', 'manage_staff'].forEach((p) => set.add(p));
+  if (roles.includes('after_sales')) set.add('order_lookup');
+  if (roles.includes('moderator'))   set.add('order_lookup');
+  if (roles.includes('agent'))       (cp.length ? cp : ['orders']).forEach((p) => set.add(p));
+  if (roles.includes('admin') || roles.includes('media_buyer')) { cp.forEach((p) => set.add(p)); set.add('orders'); }
+  if (set.size === 0) set.add('orders');
+  return [...set];
+}
 
 const router = express.Router();
 
@@ -24,17 +41,17 @@ const SUPERVISOR_MANAGED_ROLE    = 'agent';   // may only create/edit/suspend ag
 const SUPERVISOR_GRANTABLE_PERMS = ['orders', 'shipping_followups'];
 /* Body fields a supervisor may set. 'role' is allowed but ONLY as 'agent'
    (enforced separately); commission / agency / financial fields are absent by design. */
-const SUPERVISOR_CREATE_FIELDS = new Set(['name', 'email', 'password', 'role', 'permissions', 'allowed_products']);
-const SUPERVISOR_EDIT_FIELDS   = new Set(['name', 'role', 'is_active', 'permissions', 'password', 'allowed_products']);
+const SUPERVISOR_CREATE_FIELDS = new Set(['name', 'email', 'password', 'role', 'roles', 'permissions', 'allowed_products']);
+const SUPERVISOR_EDIT_FIELDS   = new Set(['name', 'role', 'roles', 'is_active', 'permissions', 'password', 'allowed_products']);
 
 /* Returns an Arabic error string if a NON-admin (supervisor) caller's payload
    exceeds the guard rails, or null when the action is permitted. `targetRole`
    and `isSelf` are only supplied on edits (there is no target on create).      */
-function supervisorViolation({ role, permissions, bodyKeys, allowedFields, targetRole, isSelf }) {
+function supervisorViolation({ roles, permissions, bodyKeys, allowedFields, targetRoles, isSelf }) {
   if (isSelf) return 'لا يمكنك تعديل حسابك الخاص من هنا';
-  if (targetRole !== undefined && targetRole !== SUPERVISOR_MANAGED_ROLE)
+  if (Array.isArray(targetRoles) && targetRoles.some((r) => r !== SUPERVISOR_MANAGED_ROLE))
     return 'لا تملك صلاحية إدارة هذا المستخدم';
-  if (role !== undefined && role !== SUPERVISOR_MANAGED_ROLE)
+  if (Array.isArray(roles) && roles.some((r) => r !== SUPERVISOR_MANAGED_ROLE))
     return 'لا يمكنك تعيين هذا الدور';
   const badFields = bodyKeys.filter((k) => !allowedFields.has(k));
   if (badFields.length) return `غير مسموح لك بتعديل: ${badFields.join(', ')}`;
@@ -100,11 +117,21 @@ migrations.forEach((sql) =>
     .catch((err) => console.warn(`⚠️   staff migration skipped: ${err.message}`))
 );
 
+/* ── Multi-role: users.roles TEXT[] (source of truth; `role` kept as the synced
+   PRIMARY for backward-compat). Backfilled ONCE from the legacy single role so
+   no existing user loses access. Chained so the backfill never races the ADD. */
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS roles TEXT[]`)
+  .then(() => pool.query(
+    `UPDATE users SET roles = ARRAY[role]
+       WHERE array_length(roles, 1) IS NULL AND role IS NOT NULL`))
+  .then((r) => console.log(`✅  users.roles ready (backfilled ${r?.rowCount ?? 0} legacy rows)`))
+  .catch((err) => console.warn(`⚠️   users.roles migration skipped: ${err.message}`));
+
 /* ── Shared RETURNING fragment ───────────────────────────────────────────── */
 const RETURNING = `
   RETURNING id,
     COALESCE(name, '')                          AS name,
-    email, role,
+    email, role, COALESCE(roles, ARRAY[role]) AS roles,
     COALESCE(is_active, true)                   AS is_active,
     COALESCE(is_absent, false)                  AS is_absent,
     COALESCE(permissions, '{orders}'::TEXT[])   AS permissions,
@@ -159,7 +186,7 @@ router.get('/', authenticate, requireAdminOrAnyPermission('manage_staff', 'reass
       SELECT
         id,
         COALESCE(name, '')                          AS name,
-        email, role,
+        email, role, COALESCE(roles, ARRAY[role]) AS roles,
         COALESCE(is_active, true)                   AS is_active,
         COALESCE(is_absent, false)                  AS is_absent,
         COALESCE(permissions, '{orders}'::TEXT[])   AS permissions,
@@ -190,7 +217,6 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
     name             = '',
     email,
     password,
-    role             = 'agent',
     permissions,
     commission_rate  = 0,
     comm_confirmed   = 0,
@@ -201,18 +227,29 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
     ad_account_ids,
   } = req.body;
 
+  /* Multi-role: accept a `roles` array (new) OR a single `role` (legacy). */
+  const rawRoles = Array.isArray(req.body.roles) ? req.body.roles
+                 : (req.body.role ? [req.body.role] : ['agent']);
+  const cleanRoles = [...new Set(rawRoles.map((r) => String(r).trim()).filter(Boolean))];
+
   if (!email || !password)
     return res.status(400).json({ error: 'البريد الإلكتروني وكلمة المرور مطلوبان' });
-  if (!VALID_ROLES.includes(role))
-    return res.status(400).json({ error: 'الدور يجب أن يكون agent أو admin أو media_buyer' });
+  if (cleanRoles.length === 0)
+    return res.status(400).json({ error: 'يجب اختيار دور واحد على الأقل' });
+  const invalidRole = cleanRoles.find((r) => !VALID_ROLES.includes(r));
+  if (invalidRole)
+    return res.status(400).json({ error: `دور غير صالح: ${invalidRole}` });
   if (password.length < 6)
     return res.status(400).json({ error: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' });
 
+  const roles = cleanRoles;
+  const role  = primaryRole(roles);   // synced compat primary
+
   /* ── Anti-escalation: a non-admin (supervisor) may create ONLY plain agents,
      with no privileged permissions and no financial/agency fields. ────────── */
-  if (req.user.role !== 'admin') {
+  if (!hasRole(req.user, 'admin')) {
     const violation = supervisorViolation({
-      role:         req.body.role,        // undefined when omitted (defaults to agent)
+      roles,
       permissions,
       bodyKeys:     Object.keys(req.body),
       allowedFields: SUPERVISOR_CREATE_FIELDS,
@@ -220,17 +257,13 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
     if (violation) return res.status(403).json({ error: violation });
   }
 
-  /* Chat moderators (data-entry) are a hard-locked role: regardless of what the
-     client sends, they get EXACTLY 'order_lookup' (needed to search their own
-     orders) and nothing else — no analytics/treasury/inventory/staff keys can
-     ever be smuggled onto a moderator. */
-  const perms = role === 'moderator'
-    ? ['order_lookup']
-    : (Array.isArray(permissions) && permissions.length > 0 ? permissions : ['orders']);
+  /* Authoritative permission set = union of each role's fixed bundle. Restricted
+     roles (moderator / after-sales) can never be smuggled a privileged key. */
+  const perms = resolvePermissions(roles, permissions);
 
   const cleanEmail = email.trim().toLowerCase();
   /* Agency fields apply ONLY to media buyers — ignored/cleared for other roles. */
-  const isBuyer   = role === 'media_buyer';
+  const isBuyer   = roles.includes('media_buyer');
   const refCode   = isBuyer ? cleanReferral(referral_code) : null;
   const adAccts   = isBuyer ? ad_account_ids : [];
 
@@ -248,16 +281,16 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
 
     const result = await pool.query(
       `INSERT INTO users
-         (name, email, password_hash, role, is_active, is_absent,
+         (name, email, password_hash, role, roles, is_active, is_absent,
           permissions, commission_rate, comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
           email_verified, otp_code, referral_code, allowed_products, business_id)
-       VALUES ($1,$2,$3,$4,true,false,$5,$6,$7,$8,$9,$10,true,NULL,$11,$12,$13)
+       VALUES ($1,$2,$3,$4,$14::text[],true,false,$5,$6,$7,$8,$9,$10,true,NULL,$11,$12,$13)
        ${RETURNING}`,
       [
         name.trim() || null,
         cleanEmail,
         password_hash,
-        role,
+        role,                        // $4 — synced primary
         perms,
         parseFloat(commission_rate) || 0,
         parseFloat(comm_confirmed)  || 0,
@@ -267,6 +300,7 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
         refCode,                     // $11 — media-buyer referral code (nullable)
         allowedProducts,             // $12 — product-routing restriction
         req.user.business_id,        // $13
+        roles,                       // $14 — full roles array (source of truth)
       ]
     );
 
@@ -289,27 +323,42 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
 router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), async (req, res) => {
   const { id } = req.params;
   const {
-    name, email, password, role, is_active,
+    name, email, password, is_active,
     permissions, commission_rate,
     comm_confirmed, comm_delivered, comm_rejected, comm_no_answer,
     referral_code, ad_account_ids,
   } = req.body;
 
+  /* Multi-role: a `roles` array (new) OR a single `role` (legacy) may be sent. */
+  const rolesProvided = req.body.roles !== undefined || req.body.role !== undefined;
+  let roles = null, primary = null;
+  if (rolesProvided) {
+    const rawRoles = Array.isArray(req.body.roles) ? req.body.roles
+                   : (req.body.role ? [req.body.role] : []);
+    roles = [...new Set(rawRoles.map((r) => String(r).trim()).filter(Boolean))];
+    if (roles.length === 0)
+      return res.status(400).json({ error: 'يجب اختيار دور واحد على الأقل' });
+    const bad = roles.find((r) => !VALID_ROLES.includes(r));
+    if (bad) return res.status(400).json({ error: `دور غير صالح: ${bad}` });
+    primary = primaryRole(roles);
+  }
+
   /* ── Anti-escalation: a non-admin (supervisor) may edit ONLY plain agents,
      never themselves, never a higher-level user, and only within the safe field
-     + permission allowlists. We resolve the target's CURRENT role first so a
+     + permission allowlists. We resolve the target's CURRENT roles first so a
      supervisor can't touch an admin/supervisor/media_buyer or self-promote. ── */
-  if (req.user.role !== 'admin') {
+  if (!hasRole(req.user, 'admin')) {
     const { rows: tgt } = await pool.query(
-      `SELECT id, role FROM users WHERE id = $1 AND business_id = $2`,
+      `SELECT id, role, COALESCE(roles, ARRAY[role]) AS roles FROM users WHERE id = $1 AND business_id = $2`,
       [id, req.user.business_id]
     );
     if (!tgt.length) return res.status(404).json({ error: 'الموظف غير موجود' });
     const violation = supervisorViolation({
-      role, permissions,
+      roles:         rolesProvided ? roles : undefined,
+      permissions,
       bodyKeys:      Object.keys(req.body),
       allowedFields: SUPERVISOR_EDIT_FIELDS,
-      targetRole:    tgt[0].role,
+      targetRoles:   tgt[0].roles,
       isSelf:        String(tgt[0].id) === String(req.user.id),
     });
     if (violation) return res.status(403).json({ error: violation });
@@ -321,21 +370,18 @@ router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), asy
 
   if (name       !== undefined) { sets.push(`name      = $${idx++}`); vals.push(name.trim() || null); }
   if (email      !== undefined) { sets.push(`email     = $${idx++}`); vals.push(email.trim().toLowerCase()); }
-  if (role       !== undefined) {
-    if (!VALID_ROLES.includes(role))
-      return res.status(400).json({ error: 'الدور يجب أن يكون agent أو admin أو media_buyer' });
-    sets.push(`role = $${idx++}`); vals.push(role);
-  }
-  if (is_active      !== undefined) { sets.push(`is_active      = $${idx++}`); vals.push(Boolean(is_active)); }
-  if (role === 'moderator') {
-    /* Locking a user to the moderator role also hard-resets their permissions to
-       exactly 'order_lookup' — no privileged key can survive the transition. */
-    sets.push(`permissions = $${idx++}`);
-    vals.push(['order_lookup']);
+  if (rolesProvided) {
+    /* Changing roles re-syncs the primary `role`, the `roles` array, AND the
+       authoritative permission set (union of role bundles) in one shot — so a
+       restricted role can never keep a privileged permission it no longer earns. */
+    sets.push(`role        = $${idx++}`); vals.push(primary);
+    sets.push(`roles       = $${idx++}::text[]`); vals.push(roles);
+    sets.push(`permissions = $${idx++}`); vals.push(resolvePermissions(roles, permissions));
   } else if (permissions !== undefined && Array.isArray(permissions)) {
     sets.push(`permissions = $${idx++}`);
     vals.push(permissions.length > 0 ? permissions : ['orders']);
   }
+  if (is_active      !== undefined) { sets.push(`is_active      = $${idx++}`); vals.push(Boolean(is_active)); }
   if (commission_rate !== undefined) { sets.push(`commission_rate = $${idx++}`); vals.push(parseFloat(commission_rate) || 0); }
   if (comm_confirmed  !== undefined) { sets.push(`comm_confirmed  = $${idx++}`); vals.push(parseFloat(comm_confirmed)  || 0); }
   if (comm_delivered  !== undefined) { sets.push(`comm_delivered  = $${idx++}`); vals.push(parseFloat(comm_delivered)  || 0); }
@@ -360,7 +406,7 @@ router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), asy
      Demoting away from media_buyer clears the referral code AND unassigns every
      ad account. Otherwise, set referral_code when provided. Ad-account sync runs
      after the user UPDATE (below) so it also works on an assignment-only edit. */
-  const demoting = role !== undefined && role !== 'media_buyer';
+  const demoting = rolesProvided && !roles.includes('media_buyer');
   if (demoting) {
     sets.push(`referral_code = NULL`);
   } else if (referral_code !== undefined) {
@@ -393,7 +439,7 @@ router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), asy
     /* Assignment-only edit (no user-column change) → return the current row. */
     if (!userRow) {
       const fresh = await pool.query(
-        `SELECT id, COALESCE(name,'') AS name, email, role,
+        `SELECT id, COALESCE(name,'') AS name, email, role, COALESCE(roles, ARRAY[role]) AS roles,
                 COALESCE(is_active,true) AS is_active, referral_code
            FROM users WHERE id = $1 AND business_id = $2`,
         [id, req.user.business_id]
@@ -497,7 +543,7 @@ router.post('/:id/toggle-attendance', authenticate, requireAdminOrPermission('ma
     await client.query('BEGIN');
 
     const agentResult = await client.query(
-      `SELECT id, COALESCE(name,'') AS name, email, role,
+      `SELECT id, COALESCE(name,'') AS name, email, role, COALESCE(roles, ARRAY[role]) AS roles,
               COALESCE(is_active,true)                  AS is_active,
               COALESCE(is_absent,false)                 AS is_absent,
               COALESCE(permissions,'{orders}'::TEXT[])  AS permissions,
@@ -519,7 +565,7 @@ router.post('/:id/toggle-attendance', authenticate, requireAdminOrPermission('ma
 
     const updatedResult = await client.query(
       `UPDATE users SET is_absent = $1 WHERE id = $2 AND business_id = $3
-       RETURNING id, COALESCE(name,'') AS name, email, role,
+       RETURNING id, COALESCE(name,'') AS name, email, role, COALESCE(roles, ARRAY[role]) AS roles,
                  COALESCE(is_active,true)                  AS is_active,
                  COALESCE(is_absent,false)                 AS is_absent,
                  COALESCE(permissions,'{orders}'::TEXT[])  AS permissions,

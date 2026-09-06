@@ -1,3 +1,5 @@
+const { hasRole } = require('../utils/roles');
+
 // Fields an agent is allowed to modify — everything else is blocked.
 const AGENT_ALLOWED_FIELDS = new Set([
   'Status',
@@ -21,7 +23,7 @@ const AGENT_ALLOWED_FIELDS = new Set([
 ]);
 
 function requireAdmin(req, res, next) {
-  if (req.user.role !== 'admin') {
+  if (!hasRole(req.user, 'admin')) {
     return res.status(403).json({ error: 'مطلوب صلاحيات المدير' });
   }
   next();
@@ -35,7 +37,7 @@ function requireAdmin(req, res, next) {
  */
 function requireAdminOrPermission(permission) {
   return function (req, res, next) {
-    if (req.user.role === 'admin') return next();
+    if (hasRole(req.user, 'admin')) return next();
     const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
     if (perms.includes(permission)) return next();
     return res.status(403).json({ error: 'مطلوب صلاحيات المدير' });
@@ -50,7 +52,7 @@ function requireAdminOrPermission(permission) {
  */
 function requireAdminOrAnyPermission(...permissions) {
   return function (req, res, next) {
-    if (req.user.role === 'admin') return next();
+    if (hasRole(req.user, 'admin')) return next();
     const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
     if (permissions.some((p) => perms.includes(p))) return next();
     return res.status(403).json({ error: 'مطلوب صلاحيات المدير' });
@@ -67,7 +69,7 @@ function requireAdminOrAnyPermission(...permissions) {
    the same power the dedicated /transfer + /distribute endpoints already grant
    them. Plain agents never get it. */
 function filterAgentFields(req, res, next) {
-  if (req.user.role !== 'admin') {
+  if (!hasRole(req.user, 'admin')) {
     const allowed = new Set(AGENT_ALLOWED_FIELDS);
     if (Array.isArray(req.user.permissions) && req.user.permissions.includes('reassign_orders')) {
       allowed.add('AssignedTo');

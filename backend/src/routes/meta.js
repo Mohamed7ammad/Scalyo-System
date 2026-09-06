@@ -348,11 +348,14 @@ router.get('/accounts', authenticate, requireAdmin, async (req, res) => {
 async function validateAssignedUser(assigned, businessId) {
   if (assigned == null) return null;
   const { rows } = await pool.query(
-    `SELECT role FROM users WHERE id = $1 AND business_id = $2`,
+    `SELECT COALESCE(roles, ARRAY[role]) AS roles FROM users WHERE id = $1 AND business_id = $2`,
     [assigned, businessId]
   );
   if (!rows.length) return 'الموظف المحدد غير موجود';
-  if (!['media_buyer', 'admin'].includes(rows[0].role)) {
+  /* Multi-role aware: any user HOLDING media_buyer or admin may be assigned an
+     ad account — even if it is not their primary role. */
+  const targetRoles = Array.isArray(rows[0].roles) ? rows[0].roles : [];
+  if (!targetRoles.includes('media_buyer') && !targetRoles.includes('admin')) {
     return 'يمكن إسناد الحساب الإعلاني إلى ميديا باير أو مدير فقط';
   }
   return null;
