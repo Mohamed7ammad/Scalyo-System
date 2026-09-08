@@ -926,7 +926,7 @@ export default function AnalyticsDashboard() {
   /* Forecasted Net Profit — where the bottom line should land once the current
      logistics pipeline settles. Heuristic: realised net profit + 50% of the COD
      still on the road (a delivery-rate-discounted estimate of pipeline profit). */
-  const forecastedNetProfit = netProfit + (Number.isFinite(outstandingCash) ? outstandingCash : 0) * 0.5;
+  const forecastedNetProfit = netProfit + (Number.isFinite(outstandingCash) ? outstandingCash : 0) * 0.4;
 
   /* Rates (percentages) — guard against division by zero */
   const cr    = totalOrders    > 0 ? totalConfirmed / totalOrders    * 100 : 0;
@@ -1400,14 +1400,14 @@ export default function AnalyticsDashboard() {
               trend={18}
               highlight
             />
-            {/* Forecasted Net Profit — realised profit + 50% of the COD still on
-                the road. Sits next to the True Net Profit card as a forward look. */}
+            {/* Forecasted Net Profit — realised profit + 40% of the COD still on
+                the road (conservative). Sits next to the True Net Profit card as a forward look. */}
             <KPICard
               label="صافي الربح المتوقع"
               value={loadingDash ? '...' : fmtEGP(Math.round(forecastedNetProfit))}
               subValue={loadingDash
                 ? ''
-                : `الحالي + 50% من المستحقات (${fmtEGP(Math.round(outstandingCash))}) قيد التحصيل`}
+                : `الحالي + 40% من المستحقات (${fmtEGP(Math.round(outstandingCash))}) قيد التحصيل`}
               trend={20}
               accent="text-indigo-600 dark:text-indigo-400"
             />
