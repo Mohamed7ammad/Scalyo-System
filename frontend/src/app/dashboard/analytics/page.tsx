@@ -70,6 +70,35 @@ const ARABIC_MONTHS = [
    HELPERS
    ═══════════════════════════════════════════════════════════════════ */
 
+/* Orders shipped in the last few days are still in transit with the courier —
+   their COD revenue hasn't landed, while the ad-spend/COGS for them are already
+   booked. Including them in the default view understates net profit. So the
+   dashboard OPENS on: current month → (today − CUTOFF) instead of "last 7 days".
+   The user can still pick any range afterwards via the inputs and quick pills. */
+const DEFAULT_RANGE_CUTOFF_DAYS = 5;
+
+/** Egypt-local (Africa/Cairo) default analytics window, computed once at mount:
+ *   from = 1st of the current month
+ *   to   = today − 5 days, but never earlier than `from` (early-month cap)
+ * Mirrors the Africa/Cairo math in `effectiveDates` so both stay in lock-step. */
+function defaultAnalyticsRange(): { from: string; to: string } {
+  const partsOf = (d: Date) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(d).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {} as Record<string, string>);
+
+  const t  = partsOf(new Date());                       // Egypt "today"
+  const from = `${t.year}-${t.month}-01`;               // 1st of current month
+  /* noon-UTC pivot so ±day arithmetic never crosses an offset/DST edge */
+  const pivot = new Date(Date.UTC(Number(t.year), Number(t.month) - 1, Number(t.day), 12));
+  pivot.setUTCDate(pivot.getUTCDate() - DEFAULT_RANGE_CUTOFF_DAYS);
+  const p  = partsOf(pivot);
+  let to   = `${p.year}-${p.month}-${p.day}`;           // today − 5 days
+  /* Early-month cap: if (today − 5d) precedes the 1st, clamp to a valid [from, from]. */
+  if (to < from) to = from;
+  return { from, to };
+}
+
 const fmt    = (n: number) => Math.abs(n).toLocaleString('en-US');
 /** Format a number as Egyptian Pounds. Handles NaN / Infinity gracefully (returns "0 ج.م"). */
 const fmtEGP = (n: number) => {
@@ -578,9 +607,14 @@ export default function AnalyticsDashboard() {
   }, [router]);
 
   /* ── UI state ─────────────────────────────────────────────────── */
-  const [activeRange, setActiveRange] = useState('7d');
-  const [fromDate,    setFromDate]    = useState('');
-  const [toDate,      setToDate]      = useState('');
+  /* Open on the "settled" window (current month → today−5d) instead of a preset,
+     so the initial net-profit KPI isn't distorted by not-yet-collected COD. The
+     dates seed `fromDate`/`toDate` (which `effectiveDates` prefers over a pill),
+     and `activeRange` starts empty so no quick-pill is highlighted. Lazy
+     initialisers run once at mount. */
+  const [activeRange, setActiveRange] = useState('');
+  const [fromDate,    setFromDate]    = useState(() => defaultAnalyticsRange().from);
+  const [toDate,      setToDate]      = useState(() => defaultAnalyticsRange().to);
   const [product,     setProduct]     = useState('كل المنتجات');
   const [status,      setStatus]      = useState('كل الحالات');
   const [chartView,   setChartView]   = useState<ChartView>('orders');
