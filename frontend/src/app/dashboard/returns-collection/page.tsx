@@ -197,7 +197,10 @@ export default function ReturnsCollectionPage() {
     setBusyRow(row.id);
     try {
       const res = await updateReturnCollection(row.id, { status });
-      setRecords((prev) => prev.map((r) => (r.id === row.id ? res.data : r)));
+      /* MERGE, don't replace: PATCH returns RETURNING * WITHOUT the admin-only
+         joined confirmation_agent_* fields, so overwriting would drop them and
+         make the row fail the active confirmation-agent filter (it vanishes). */
+      setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, ...res.data } : r)));
     } catch {
       showToast('تعذّر تحديث الحالة', 'error');
     } finally {
@@ -209,7 +212,9 @@ export default function ReturnsCollectionPage() {
     if (notes === (row.notes ?? '')) return;
     try {
       const res = await updateReturnCollection(row.id, { notes });
-      setRecords((prev) => prev.map((r) => (r.id === row.id ? res.data : r)));
+      /* Merge (see handleStatus) — preserves the joined confirmation-agent fields
+         so a note edit doesn't drop the row out of a filtered admin view. */
+      setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, ...res.data } : r)));
     } catch {
       showToast('تعذّر حفظ الملاحظة', 'error');
     }
@@ -240,7 +245,7 @@ export default function ReturnsCollectionPage() {
     setBusyRow(row.id);
     try {
       const res = await updateReturnCollection(row.id, { status: 'refused' });
-      setRecords((prev) => prev.map((r) => (r.id === row.id ? res.data : r)));
+      setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, ...res.data } : r)));
       showToast('تم نقل العميل إلى قائمة الرفض', 'success');
     } catch {
       showToast('تعذّر تحديث الحالة', 'error');
@@ -275,7 +280,7 @@ export default function ReturnsCollectionPage() {
     setPaySaving(true);
     try {
       const res = await payReturnCollection(payTarget.id, amount);
-      setRecords((prev) => prev.map((r) => (r.id === payTarget.id ? res.data : r)));
+      setRecords((prev) => prev.map((r) => (r.id === payTarget.id ? { ...r, ...res.data } : r)));
       setPayTarget(null);
       // commission accrual changed → refresh analytics (reviewers have no analytics)
       if (!isReviewer) getReturnAnalytics().then((a) => setAnalytics(a.data)).catch(() => {});
