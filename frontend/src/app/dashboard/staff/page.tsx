@@ -23,6 +23,7 @@ const ROLE_META: { value: UserRole; label: string; badge: string }[] = [
   { value:'supervisor',  label:'تيم ليدر',             badge:'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300' },
   { value:'after_sales', label:'خدمة ما بعد البيع',     badge:'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300' },
   { value:'moderator',   label:'تسجيل أوردرات',         badge:'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300' },
+  { value:'returns_reviewer', label:'مراجعة المرتجعات', badge:'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300' },
   { value:'media_buyer', label:'ميديا باير',           badge:'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
   { value:'admin',       label:'مدير النظام',           badge:'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300' },
 ];
@@ -1854,6 +1855,18 @@ export default function StaffPage() {
                     يضيف الطلبات ويبحث عنها (بالهاتف أو رقم الطلب)، ويتابع طلباته وعمولته على التوصيلات الناجحة —
                     <span className="font-semibold"> يرى فقط الطلبات التي أنشأها هو</span>. ممنوع تمامًا من التحليلات
                     العامة والخزينة والمخزون وإعدادات الشحن وطلبات باقي الموظفين.
+                  </p>
+                </div>
+              )}
+
+              {/* Returns Reviewer (مراجعة المرتجعات) role — restricted, single-purpose */}
+              {form.roles.includes('returns_reviewer') && (
+                <div className="rounded-xl border border-rose-200 dark:border-rose-900/40 bg-rose-50/60 dark:bg-rose-900/10 p-3.5">
+                  <p className="text-xs font-bold text-rose-700 dark:text-rose-400 mb-1">صلاحيات مراجعة المرتجعات</p>
+                  <p className="text-[11px] text-rose-700/80 dark:text-rose-300/70 leading-relaxed">
+                    يعمل فقط على قائمة تحصيل المرتجعات: يتابع العملاء، يسجّل السبب، ويحصّل رسوم المرتجع — ويحصل على
+                    <span className="font-semibold"> عمولة ثابتة 20 ج.م عند كل تحصيل</span>. لا يرى الأرقام المالية،
+                    ولا اسم موظف التأكيد، ولا أي صفحة أخرى في النظام.
                   </p>
                 </div>
               )}

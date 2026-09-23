@@ -6,10 +6,12 @@
    privileged one), so any check we haven't migrated still degrades gracefully.
    These helpers are the single place that understands both shapes.             */
 
-const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor', 'after_sales', 'moderator'];
+const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor', 'after_sales', 'moderator', 'returns_reviewer'];
 
-/* Most-privileged first — drives the primary role and the display badge order. */
-const ROLE_PRIORITY = ['admin', 'supervisor', 'media_buyer', 'agent', 'after_sales', 'moderator'];
+/* Most-privileged first — drives the primary role and the display badge order.
+   returns_reviewer is a restricted single-purpose role (like moderator /
+   after_sales), so it sits at the LOWEST priority. */
+const ROLE_PRIORITY = ['admin', 'supervisor', 'media_buyer', 'agent', 'after_sales', 'moderator', 'returns_reviewer'];
 
 /* Every role a user holds, as a clean array. Tolerant of a legacy object that
    only carries `role`, or a JWT that carries `roles`. */

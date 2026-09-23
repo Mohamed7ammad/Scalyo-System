@@ -70,7 +70,7 @@ export type PlanType = 'affiliate' | 'ecommerce';
 
 /** Every role the system recognises. 'supervisor' (تيم ليدر) is the middle
     tier between agent and admin — authorised entirely through `permissions`. */
-export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor' | 'after_sales' | 'moderator';
+export type UserRole = 'agent' | 'admin' | 'media_buyer' | 'supervisor' | 'after_sales' | 'moderator' | 'returns_reviewer';
 
 export interface User {
   id:          number;
@@ -1617,7 +1617,8 @@ export const saveFollowUpAction = (
   );
 
 /* ── Return Collection Management (إدارة تحصيل المرتجعات) ───────────────────── */
-export type ReturnCollectionStatus = 'pending' | 'no_answer' | 'follow_up' | 'paid' | 'refused';
+/* 'reason_known' (تم معرفة السبب) replaced the legacy 'follow_up' bucket. */
+export type ReturnCollectionStatus = 'pending' | 'no_answer' | 'reason_known' | 'paid' | 'refused';
 
 export interface ReturnCollection {
   id:                  number;
@@ -1633,6 +1634,13 @@ export interface ReturnCollection {
   handled_by:          string | null;     // users.id
   handler_name:        string | null;     // joined display name
   handler_email:       string | null;
+  /* Accountability — the agent who ORIGINALLY confirmed the returned order
+     (orders."AssignedTo"). Present for ADMINS ONLY; undefined for reviewers. */
+  confirmation_agent_name?:  string | null;
+  confirmation_agent_email?: string | null;
+  /* Returns-Reviewer flat commission (immediate treasury expense). */
+  reviewer_id?:              string | null;
+  reviewer_commission?:      number | string;
   created_at:          string;
   updated_at:          string;
 }
@@ -1650,12 +1658,16 @@ export interface ReturnAnalyticsRow {
 export interface ReturnAnalytics {
   is_admin: boolean;
   agents:   ReturnAnalyticsRow[];
-  totals:   Omit<ReturnAnalyticsRow, 'agent_user_id' | 'agent_name' | 'agent_email'>;
+  totals:   Omit<ReturnAnalyticsRow, 'agent_user_id' | 'agent_name' | 'agent_email'>
+            & { total_reviewer_commission?: number };
 }
 
-/** List return-collection records, optionally filtered by workflow status. */
-export const getReturnCollections = (status?: ReturnCollectionStatus) =>
-  api.get<ReturnCollection[]>('/api/return-collections', { params: status ? { status } : {} });
+/** List return-collection records, optionally filtered by workflow status and/or
+    (admin only) by the confirmation agent (orders."AssignedTo" email). */
+export const getReturnCollections = (
+  opts?: { status?: ReturnCollectionStatus; confirmation_agent?: string },
+) =>
+  api.get<ReturnCollection[]>('/api/return-collections', { params: opts ?? {} });
 
 /** Move a record through pending → no_answer → follow_up and/or edit notes. */
 export const updateReturnCollection = (

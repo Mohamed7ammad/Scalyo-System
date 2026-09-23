@@ -26,7 +26,7 @@ export default function LoginPage() {
     /* Multi-role landing: pick the richest page the user can actually reach.
        `roles` is the union of everything they hold. */
     const roles = userRoles(user);
-    const RESTRICTED = new Set(['after_sales', 'moderator']);   // pages fenced to a single feature
+    const RESTRICTED = new Set(['after_sales', 'moderator', 'returns_reviewer']);   // pages fenced to a single feature
     /* Financial dashboard: admins & media buyers, or anyone carrying the
        'analytics' permission — but NEVER a team-leader (supervisor), even with a
        stale 'analytics' permission lingering. */
@@ -46,6 +46,9 @@ export default function LoginPage() {
     } else if (roles.includes('moderator')) {
       /* Chat moderators (data-entry) → their own orders/commission page. */
       router.push('/dashboard/my-orders');
+    } else if (roles.includes('returns_reviewer')) {
+      /* Returns reviewers → the return-collection queue (their only workspace). */
+      router.push('/dashboard/returns-collection');
     } else {
       router.push('/dashboard');
     }

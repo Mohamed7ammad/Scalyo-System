@@ -14,20 +14,27 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getReturnCollections, updateReturnCollection, payReturnCollection,
-  syncReturnCollections, getReturnAnalytics, settleAgentCommission,
+  syncReturnCollections, getReturnAnalytics, settleAgentCommission, userRoles, userHasRole,
   ReturnCollection, ReturnCollectionStatus, ReturnAnalytics, ReturnAnalyticsRow,
 } from '@/lib/api';
 
 /* ── Constants & helpers ─────────────────────────────────────────────────── */
 const COMMISSION_RATE = 0.40;
+/* Flat commission a Returns Reviewer earns per collected return (mirrors the
+   backend REVIEWER_COMMISSION). Shown in the pay modal for reviewers. */
+const REVIEWER_COMMISSION = 20;
 
+/* The four workflow tabs. 'refused' is admin-only (appended below) — reviewers
+   never see it. 'reason_known' (تم معرفة السبب) replaced the old 'follow_up'. */
 const TABS: { key: ReturnCollectionStatus; label: string; accent: string }[] = [
-  { key: 'pending',   label: 'بانتظار المتابعة', accent: 'amber'   },
-  { key: 'no_answer', label: 'لا يرد',           accent: 'slate'   },
-  { key: 'follow_up', label: 'المتابعات',        accent: 'indigo'  },
-  { key: 'paid',      label: 'تم الدفع',         accent: 'emerald' },
-  { key: 'refused',   label: 'تم الرفض',         accent: 'red'     },
+  { key: 'pending',      label: 'بانتظار المتابعة', accent: 'amber'   },
+  { key: 'no_answer',    label: 'لا يرد',           accent: 'slate'   },
+  { key: 'reason_known', label: 'تم معرفة السبب',   accent: 'indigo'  },
+  { key: 'paid',         label: 'تم الدفع',         accent: 'emerald' },
 ];
+/* Admin-only extra tab for the refusal archive. */
+const REFUSED_TAB: { key: ReturnCollectionStatus; label: string; accent: string } =
+  { key: 'refused', label: 'تم الرفض', accent: 'red' };
 
 const parseN = (v: string | number | null | undefined): number => parseFloat(String(v ?? 0)) || 0;
 const fmt = (v: string | number | null | undefined): string =>
@@ -59,14 +66,14 @@ function StatCard({ label, value, accent }: { label: string; value: string; acce
 }
 
 const STATUS_BADGE: Record<ReturnCollectionStatus, string> = {
-  pending:   'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  no_answer: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
-  follow_up: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
-  paid:      'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  refused:   'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
+  pending:      'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  no_answer:    'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
+  reason_known: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
+  paid:         'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
+  refused:      'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
 };
 const STATUS_LABEL: Record<ReturnCollectionStatus, string> = {
-  pending: 'بانتظار المتابعة', no_answer: 'لا يرد', follow_up: 'متابعة', paid: 'تم الدفع', refused: 'تم الرفض',
+  pending: 'بانتظار المتابعة', no_answer: 'لا يرد', reason_known: 'تم معرفة السبب', paid: 'تم الدفع', refused: 'تم الرفض',
 };
 
 /* ══════════════════════════════════════════════════════════════════════════ */
@@ -75,6 +82,10 @@ export default function ReturnsCollectionPage() {
 
   const [allowed,  setAllowed]  = useState(false);
   const [isAdmin,  setIsAdmin]  = useState(false);
+  /* A pure Returns Reviewer sees a stripped-down, financials-free view. */
+  const [isReviewer, setIsReviewer] = useState(false);
+  /* Admin-only: filter the queue by the agent who confirmed the original order. */
+  const [agentFilter, setAgentFilter] = useState('');
   const [records,  setRecords]  = useState<ReturnCollection[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [activeTab, setActiveTab] = useState<ReturnCollectionStatus>('pending');
@@ -109,10 +120,14 @@ export default function ReturnsCollectionPage() {
       const stored = localStorage.getItem('user');
       if (!token || !stored) { router.replace('/'); return; }
       const u = JSON.parse(stored);
-      const admin = u.role === 'admin';
-      const ok = admin || (Array.isArray(u.permissions) && u.permissions.includes('shipping_followups'));
+      const admin    = userHasRole(u, 'admin');
+      const reviewer = userHasRole(u, 'returns_reviewer') && !admin;
+      const perms    = Array.isArray(u.permissions) ? u.permissions : [];
+      const ok = admin || reviewer || perms.includes('shipping_followups') || perms.includes('return_review')
+        || userRoles(u).includes('returns_reviewer');
       if (!ok) { router.replace('/dashboard'); return; }
       setIsAdmin(admin);
+      setIsReviewer(reviewer);
       setAllowed(true);
     } catch { router.replace('/'); }
   }, [router]);
@@ -121,27 +136,51 @@ export default function ReturnsCollectionPage() {
   const fetchAll = useCallback(async () => {
     try {
       setLoading(true);
-      const [recRes, anaRes] = await Promise.all([getReturnCollections(), getReturnAnalytics()]);
+      /* Reviewers get NO financial analytics — only the queue. */
+      const recRes = await getReturnCollections();
       setRecords(recRes.data);
-      setAnalytics(anaRes.data);
+      if (!isReviewer) {
+        const anaRes = await getReturnAnalytics();
+        setAnalytics(anaRes.data);
+      }
     } catch {
       showToast('تعذّر تحميل بيانات المرتجعات', 'error');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isReviewer]);
 
   useEffect(() => { if (allowed) fetchAll(); }, [allowed, fetchAll]);
 
+  /* Tabs the current user may see: reviewers get the strict 4; everyone who can
+     refuse a row (admins + queue agents) also gets the refusal archive. */
+  const visibleTabs = useMemo(() => (isReviewer ? TABS : [...TABS, REFUSED_TAB]), [isReviewer]);
+
+  /* Admin-only: distinct confirmation agents present in the loaded rows — powers
+     the "تصفية بموظف التأكيد" dropdown. */
+  const confirmationAgents = useMemo(() => {
+    if (!isAdmin) return [] as { email: string; name: string }[];
+    const map = new Map<string, string>();
+    for (const r of records) {
+      const email = (r.confirmation_agent_email ?? '').trim();
+      if (email) map.set(email, r.confirmation_agent_name || email);
+    }
+    return [...map.entries()].map(([email, name]) => ({ email, name })).sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  }, [records, isAdmin]);
+
   /* ── Derived: bucket records by status for tab counts ────────────────────── */
   const counts = useMemo(() => {
-    const c: Record<ReturnCollectionStatus, number> = { pending: 0, no_answer: 0, follow_up: 0, paid: 0, refused: 0 };
-    for (const r of records) c[r.status] = (c[r.status] ?? 0) + 1;
+    const c: Record<ReturnCollectionStatus, number> = { pending: 0, no_answer: 0, reason_known: 0, paid: 0, refused: 0 };
+    /* Counts honour the admin agent-filter so the tab badges match the table. */
+    const src = agentFilter ? records.filter((r) => (r.confirmation_agent_email ?? '') === agentFilter) : records;
+    for (const r of src) c[r.status] = (c[r.status] ?? 0) + 1;
     return c;
-  }, [records]);
+  }, [records, agentFilter]);
 
   const visibleRows = useMemo(() => {
-    const inTab = records.filter((r) => r.status === activeTab);
+    let inTab = records.filter((r) => r.status === activeTab);
+    // Admin-only: restrict to returns caused by a specific confirmation agent.
+    if (agentFilter) inTab = inTab.filter((r) => (r.confirmation_agent_email ?? '') === agentFilter);
     const q = search.trim().toLowerCase();
     if (!q) return inTab;
     // Quick search by phone / customer name / tracking number — for when a
@@ -151,7 +190,7 @@ export default function ReturnsCollectionPage() {
       (r.customer_name ?? '').toLowerCase().includes(q) ||
       (r.tracking_number ?? '').toLowerCase().includes(q),
     );
-  }, [records, activeTab, search]);
+  }, [records, activeTab, search, agentFilter]);
 
   /* ── Actions ─────────────────────────────────────────────────────────────── */
   const handleStatus = async (row: ReturnCollection, status: Exclude<ReturnCollectionStatus, 'paid'>) => {
@@ -238,8 +277,8 @@ export default function ReturnsCollectionPage() {
       const res = await payReturnCollection(payTarget.id, amount);
       setRecords((prev) => prev.map((r) => (r.id === payTarget.id ? res.data : r)));
       setPayTarget(null);
-      // commission accrual changed → refresh analytics
-      getReturnAnalytics().then((a) => setAnalytics(a.data)).catch(() => {});
+      // commission accrual changed → refresh analytics (reviewers have no analytics)
+      if (!isReviewer) getReturnAnalytics().then((a) => setAnalytics(a.data)).catch(() => {});
       showToast('تم تسجيل التحصيل ✓', 'success');
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'تعذّر تسجيل التحصيل';
@@ -318,13 +357,14 @@ export default function ReturnsCollectionPage() {
           </button>
         </div>
 
-        {/* Analytics cards */}
-        {totals && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {/* Analytics cards — hidden entirely for the Returns Reviewer. */}
+        {!isReviewer && totals && (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <StatCard label="إجمالي التحصيلات" value={`${fmt(totals.total_collected)} ج.م`} accent="text-slate-800 dark:text-white" />
             <StatCard label="إجمالي العمولات المستحقة" value={`${fmt(totals.total_commission_earned)} ج.م`} accent="text-indigo-600 dark:text-indigo-400" />
             <StatCard label="إجمالي المسدد للموظف" value={`${fmt(totals.total_paid)} ج.م`} accent="text-emerald-600 dark:text-emerald-400" />
             <StatCard label="الرصيد المتبقي" value={`${fmt(totals.remaining_balance)} ج.م`} accent={totals.remaining_balance > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500'} />
+            <StatCard label="عمولات مراجعة المرتجعات" value={`${fmt(totals.total_reviewer_commission ?? 0)} ج.م`} accent="text-rose-600 dark:text-rose-400" />
           </div>
         )}
 
@@ -401,6 +441,21 @@ export default function ReturnsCollectionPage() {
               </button>
             )}
           </div>
+          {/* Admin-only: filter every return caused by a specific confirmation agent. */}
+          {isAdmin && (
+            <select
+              value={agentFilter}
+              onChange={(e) => setAgentFilter(e.target.value)}
+              title="تصفية بموظف التأكيد"
+              className="px-3 py-2 rounded-xl text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700
+                text-slate-700 dark:text-slate-200 outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition max-w-[220px]"
+            >
+              <option value="">كل موظفي التأكيد</option>
+              {confirmationAgents.map((a) => (
+                <option key={a.email} value={a.email}>{a.name}</option>
+              ))}
+            </select>
+          )}
           <button
             onClick={handleCopyNumbers}
             className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium shadow-sm transition whitespace-nowrap
@@ -417,7 +472,7 @@ export default function ReturnsCollectionPage() {
 
         {/* Queue tabs */}
         <div className="flex flex-wrap items-center gap-2">
-          {TABS.map((t) => (
+          {visibleTabs.map((t) => (
             <button
               key={t.key}
               onClick={() => setActiveTab(t.key)}
@@ -452,13 +507,15 @@ export default function ReturnsCollectionPage() {
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
                   <tr>
-                    <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">رقم التتبع</th>
+                    {/* Reviewers see ONLY: customer, phone, product, notes, actions. */}
+                    {!isReviewer && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">رقم التتبع</th>}
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العميل</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الهاتف</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المنتج</th>
                     <th className="text-right font-semibold px-4 py-3">ملاحظات</th>
-                    {activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المُحصّل</th>}
-                    {activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العمولة (40%)</th>}
+                    {isAdmin && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">موظف التأكيد</th>}
+                    {!isReviewer && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المُحصّل</th>}
+                    {!isReviewer && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العمولة</th>}
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الإجراءات</th>
                   </tr>
                 </thead>
@@ -467,7 +524,7 @@ export default function ReturnsCollectionPage() {
                     const busy = busyRow === r.id;
                     return (
                       <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 align-top">
-                        <td className="px-4 py-3 font-mono text-xs text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">{r.tracking_number || '—'}</td>
+                        {!isReviewer && <td className="px-4 py-3 font-mono text-xs text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">{r.tracking_number || '—'}</td>}
                         <td className="px-4 py-3 text-slate-700 dark:text-slate-200 whitespace-nowrap">{r.customer_name || '—'}</td>
                         <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr">{r.phone || '—'}</td>
                         <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[14rem]">
@@ -488,8 +545,20 @@ export default function ReturnsCollectionPage() {
                             />
                           )}
                         </td>
-                        {activeTab === 'paid' && <td className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{fmt(r.collected_amount)} ج.م</td>}
-                        {activeTab === 'paid' && <td className="px-4 py-3 font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">{fmt(r.employee_commission)} ج.م</td>}
+                        {/* Accountability — the agent who confirmed the original order (admin only). */}
+                        {isAdmin && (
+                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                            {r.confirmation_agent_name
+                              ? <span className="inline-flex px-2 py-0.5 rounded-lg text-xs font-medium bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">{r.confirmation_agent_name}</span>
+                              : <span className="text-slate-300 dark:text-slate-600">—</span>}
+                          </td>
+                        )}
+                        {!isReviewer && activeTab === 'paid' && <td className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{fmt(r.collected_amount)} ج.م</td>}
+                        {!isReviewer && activeTab === 'paid' && (
+                          <td className="px-4 py-3 font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">
+                            {fmt(parseN(r.reviewer_commission) > 0 ? r.reviewer_commission : r.employee_commission)} ج.م
+                          </td>
+                        )}
                         <td className="px-4 py-3">
                           {(r.status === 'paid' || r.status === 'refused') ? (
                             /* Terminal states — badge only, no actions (archived). */
@@ -504,27 +573,29 @@ export default function ReturnsCollectionPage() {
                                   لا يرد
                                 </button>
                               )}
-                              {r.status !== 'follow_up' && (
-                                <button onClick={() => handleStatus(r, 'follow_up')} disabled={busy}
+                              {r.status !== 'reason_known' && (
+                                <button onClick={() => handleStatus(r, 'reason_known')} disabled={busy}
                                   className="px-2.5 py-1.5 text-xs rounded-lg font-medium transition bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-300 disabled:opacity-50">
-                                  متابعة
+                                  تم معرفة السبب
                                 </button>
                               )}
                               <button onClick={() => openPay(r)} disabled={busy}
                                 className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
                                 تم الدفع
                               </button>
-                              {/* Refuse / archive — subtle red ban button (active rows only) */}
-                              <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"
-                                aria-label="رفض"
-                                className="inline-flex items-center gap-1 px-2 py-1.5 text-xs rounded-lg font-medium transition
-                                  text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 dark:hover:bg-red-600 disabled:opacity-50">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                    d="M18.364 5.636L5.636 18.364M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                رفض
-                              </button>
+                              {/* Refuse / archive — reviewers don't have this action. */}
+                              {!isReviewer && (
+                                <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"
+                                  aria-label="رفض"
+                                  className="inline-flex items-center gap-1 px-2 py-1.5 text-xs rounded-lg font-medium transition
+                                    text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 dark:hover:bg-red-600 disabled:opacity-50">
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                      d="M18.364 5.636L5.636 18.364M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                  </svg>
+                                  رفض
+                                </button>
+                              )}
                             </div>
                           )}
                         </td>
@@ -562,8 +633,17 @@ export default function ReturnsCollectionPage() {
               <span className="font-bold text-emerald-600 dark:text-emerald-400" dir="ltr">{fmt(parseN(payAmount))} ج.م</span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500 dark:text-slate-400">عمولة الموظف المستحقة (40%)</span>
-              <span className="font-bold text-indigo-600 dark:text-indigo-400" dir="ltr">{fmt(payPreviewCommission)} ج.م</span>
+              {isReviewer ? (
+                <>
+                  <span className="text-slate-500 dark:text-slate-400">عمولتك (ثابتة)</span>
+                  <span className="font-bold text-rose-600 dark:text-rose-400" dir="ltr">{fmt(REVIEWER_COMMISSION)} ج.م</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-slate-500 dark:text-slate-400">عمولة الموظف المستحقة (40%)</span>
+                  <span className="font-bold text-indigo-600 dark:text-indigo-400" dir="ltr">{fmt(payPreviewCommission)} ج.م</span>
+                </>
+              )}
             </div>
           </div>
 

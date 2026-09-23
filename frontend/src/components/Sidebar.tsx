@@ -44,6 +44,13 @@ const MODERATOR_ALLOWED = new Set<string>([
   '/dashboard/order-lookup',
 ]);
 
+/* A 'returns_reviewer' (مراجعة المرتجعات) is a single-purpose restricted role:
+   they ONLY reach the return-collection queue. No analytics, treasury, staff,
+   inventory or any other page. */
+const RETURNS_REVIEWER_ALLOWED = new Set<string>([
+  '/dashboard/returns-collection',
+]);
+
 /* hrefs an 'affiliate' plan tenant is allowed to see */
 const AFFILIATE_ALLOWED = new Set<string>([
   '/dashboard/analytics',
@@ -354,7 +361,7 @@ export default function Sidebar({
      strict allowlist; every other role follows the permission/adminOnly gates. */
   const roles: string[] = userRoles(user);
   const has   = (r: string) => roles.includes(r);
-  const RESTRICTED: Record<string, Set<string>> = { moderator: MODERATOR_ALLOWED, after_sales: AFTER_SALES_ALLOWED };
+  const RESTRICTED: Record<string, Set<string>> = { moderator: MODERATOR_ALLOWED, after_sales: AFTER_SALES_ALLOWED, returns_reviewer: RETURNS_REVIEWER_ALLOWED };
   const restrictedRoles    = roles.filter((r) => RESTRICTED[r]);
   const onlyRestricted     = restrictedRoles.length > 0 && restrictedRoles.length === roles.length;
 
@@ -615,7 +622,9 @@ export default function Sidebar({
                         ? 'خدمة ما بعد البيع'
                         : user?.role === 'moderator'
                           ? 'تسجيل أوردرات'
-                          : 'موظف تأكيد'}
+                          : user?.role === 'returns_reviewer'
+                            ? 'مراجعة المرتجعات'
+                            : 'موظف تأكيد'}
               </p>
             </div>
             {/* Theme toggle */}

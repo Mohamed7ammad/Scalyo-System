@@ -635,6 +635,9 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 const RESERVED_AUTO_SOURCES = new Set([
   'bosta_cod', 'deposit',
   'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
+  /* Auto-posted by the returns module (returnCollections.js) — settled/reverted
+     there, never editable here (some carry order_id = NULL, so guard by source). */
+  'return_collection', 'return_review_commission', 'agent_commission_payout',
 ]);
 
 /* Load a tenant-scoped, MANUAL (order_id IS NULL) transaction or send the right

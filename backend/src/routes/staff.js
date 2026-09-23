@@ -17,6 +17,7 @@ function resolvePermissions(roles, clientPerms) {
   if (roles.includes('supervisor')) ['orders', 'reassign_orders', 'manage_staff'].forEach((p) => set.add(p));
   if (roles.includes('after_sales')) set.add('order_lookup');
   if (roles.includes('moderator'))   set.add('order_lookup');
+  if (roles.includes('returns_reviewer')) set.add('return_review');
   if (roles.includes('agent'))       (cp.length ? cp : ['orders']).forEach((p) => set.add(p));
   if (roles.includes('admin') || roles.includes('media_buyer')) { cp.forEach((p) => set.add(p)); set.add('orders'); }
   if (set.size === 0) set.add('orders');
@@ -29,7 +30,7 @@ const router = express.Router();
    and sees a data-scoped analytics dashboard. 'supervisor' (تيم ليدر / team-leader)
    is a middle tier: manages front-line agents + reassigns orders + views
    analytics, but is NOT a super-admin (see the guard rails below). */
-const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor', 'after_sales', 'moderator'];
+const VALID_ROLES = ['agent', 'admin', 'media_buyer', 'supervisor', 'after_sales', 'moderator', 'returns_reviewer'];
 
 /* ── Team-leader (supervisor) guard rails — deny-by-default ──────────────────
    A supervisor is authorised via the 'manage_staff' permission but must never

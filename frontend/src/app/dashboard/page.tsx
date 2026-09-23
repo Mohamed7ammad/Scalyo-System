@@ -231,6 +231,8 @@ export default function DashboardPage() {
     /* Chat moderators (data-entry) never see the full confirmation dashboard —
        bounce them to their own orders/commission page on any direct URL hit. */
     if (parsed?.role === 'moderator') { router.replace('/dashboard/my-orders'); return; }
+    /* Returns reviewers only ever work the return-collection queue. */
+    if (parsed?.role === 'returns_reviewer') { router.replace('/dashboard/returns-collection'); return; }
     setUser(parsed);
   }, [router]);
 

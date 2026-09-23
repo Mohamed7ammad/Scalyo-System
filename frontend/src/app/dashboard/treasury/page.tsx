@@ -193,6 +193,10 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
     label: 'شراء مخزون',
     cls: 'bg-cyan-100 text-cyan-700 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-300 dark:border-cyan-700/40',
   },
+  return_review_commission: {
+    label: 'عمولة تحصيل مرتجع',
+    cls: 'bg-violet-100 text-violet-700 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-700/40',
+  },
 };
 
 /* Auto-generated sources (reconciled from orders) — NOT editable/deletable from
@@ -201,6 +205,8 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
 const RESERVED_AUTO_SOURCES = new Set([
   'bosta_cod', 'deposit',
   'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
+  /* Auto-posted by the returns module — settled/reverted there, never edited here. */
+  'return_collection', 'return_review_commission', 'agent_commission_payout',
 ]);
 function isEditableTxn(t: TreasuryTransaction): boolean {
   /* Locked when linked to an order (commission/deposit/COD), a reserved auto
