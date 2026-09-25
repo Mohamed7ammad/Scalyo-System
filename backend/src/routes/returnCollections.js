@@ -40,7 +40,7 @@ const REVIEWER_COMMISSION = 20;
 /* Active-window floor: returns whose ORIGINAL order was placed before this date
    are obsolete and must never enter the queue. The Bosta sync explicitly skips
    them (matches the one-off purge cutoff) so old orders can't leak back in. */
-const RETURN_SYNC_MIN_ORDER_DATE = new Date('2026-09-15T00:00:00Z');
+const RETURN_SYNC_MIN_ORDER_DATE = new Date('2026-09-01T00:00:00Z');
 
 /* Workflow states the queue is bucketed into. 'paid' is terminal; 'refused'
    is an archive state for customers who refuse to pay (kept for CRM/accounting
@@ -420,10 +420,18 @@ router.post('/sync', authenticate, allowReturns, async (req, res) => {
 
   let upserted = 0;
   let skippedOld = 0;
+  let skippedExchange = 0;
   try {
     for (const p of parcels) {
       const tracking = (p.trackingNumber || '').trim();
       if (!tracking) continue;   // can't dedupe a parcel with no tracking number
+      /* Exchange gate: 'تبديل' (exchange) parcels carry NO product — they are not
+         return-fee collections and must never enter the queue. Empty product is
+         the reliable signal (exchanges never match a local order → no product). */
+      if (!p.product || !String(p.product).trim()) {
+        skippedExchange += 1;
+        continue;
+      }
       /* Date gate: drop returns for orders placed before the active-window floor.
          Only matched parcels carry an order date; unmatched (no local order) can't
          be dated, so they pass through as before. */
@@ -453,8 +461,8 @@ router.post('/sync', authenticate, allowReturns, async (req, res) => {
       );
       upserted += r.rowCount;
     }
-    console.log(`[return-collections sync] upserted ${upserted}/${parcels.length} returning parcels (skipped ${skippedOld} pre-cutoff)`);
-    res.json({ synced: upserted, fetched: parcels.length, skipped_old: skippedOld });
+    console.log(`[return-collections sync] upserted ${upserted}/${parcels.length} returning parcels (skipped ${skippedOld} pre-cutoff, ${skippedExchange} exchange/no-product)`);
+    res.json({ synced: upserted, fetched: parcels.length, skipped_old: skippedOld, skipped_exchange: skippedExchange });
   } catch (err) {
     console.error('[return-collections sync] upsert failed:', err);
     res.status(500).json({ error: 'خطأ في الخادم أثناء حفظ المرتجعات' });
