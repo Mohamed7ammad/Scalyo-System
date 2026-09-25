@@ -37,6 +37,11 @@ const RETURN_COMMISSION_RATE = 0.40;
    treasury expense at collection time (no later settlement). */
 const REVIEWER_COMMISSION = 20;
 
+/* Active-window floor: returns whose ORIGINAL order was placed before this date
+   are obsolete and must never enter the queue. The Bosta sync explicitly skips
+   them (matches the one-off purge cutoff) so old orders can't leak back in. */
+const RETURN_SYNC_MIN_ORDER_DATE = new Date('2026-09-15T00:00:00Z');
+
 /* Workflow states the queue is bucketed into. 'paid' is terminal; 'refused'
    is an archive state for customers who refuse to pay (kept for CRM/accounting
    history instead of hard-deleting). 'reason_known' (تم معرفة السبب) replaced the
@@ -414,10 +419,18 @@ router.post('/sync', authenticate, allowReturns, async (req, res) => {
   }
 
   let upserted = 0;
+  let skippedOld = 0;
   try {
     for (const p of parcels) {
       const tracking = (p.trackingNumber || '').trim();
       if (!tracking) continue;   // can't dedupe a parcel with no tracking number
+      /* Date gate: drop returns for orders placed before the active-window floor.
+         Only matched parcels carry an order date; unmatched (no local order) can't
+         be dated, so they pass through as before. */
+      if (p.order_created_at && new Date(p.order_created_at) < RETURN_SYNC_MIN_ORDER_DATE) {
+        skippedOld += 1;
+        continue;
+      }
       const r = await pool.query(
         `INSERT INTO return_collections
            (business_id, order_id, customer_name, phone, tracking_number, product_name, status)
@@ -440,8 +453,8 @@ router.post('/sync', authenticate, allowReturns, async (req, res) => {
       );
       upserted += r.rowCount;
     }
-    console.log(`[return-collections sync] upserted ${upserted}/${parcels.length} returning parcels`);
-    res.json({ synced: upserted, fetched: parcels.length });
+    console.log(`[return-collections sync] upserted ${upserted}/${parcels.length} returning parcels (skipped ${skippedOld} pre-cutoff)`);
+    res.json({ synced: upserted, fetched: parcels.length, skipped_old: skippedOld });
   } catch (err) {
     console.error('[return-collections sync] upsert failed:', err);
     res.status(500).json({ error: 'خطأ في الخادم أثناء حفظ المرتجعات' });

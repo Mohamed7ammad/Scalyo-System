@@ -744,6 +744,7 @@ async function enrichWithLocalOrder(rows, businessId) {
   /* Default every row first so the shape is consistent even with no matches. */
   for (const r of rows) {
     r.order_id            = null;
+    r.order_created_at    = null;   // local order's placement date (for date-gating)
     r.return_note         = '';
     r.return_shipping_fee = 0;
     r.product             = '';   // comma-separated product name(s) for this parcel
@@ -753,7 +754,7 @@ async function enrichWithLocalOrder(rows, businessId) {
 
   try {
     const { rows: locals } = await pool.query(
-      `SELECT id, "BostaTrackingCode", "ProductName", return_note, return_shipping_fee
+      `SELECT id, "BostaTrackingCode", "ProductName", return_note, return_shipping_fee, "createdAt"
        FROM   orders
        WHERE  "BostaTrackingCode" = ANY($1::text[])
          AND  business_id = $2`,
@@ -782,6 +783,7 @@ async function enrichWithLocalOrder(rows, businessId) {
       const o   = byTracking.get(key);
       if (o) {
         r.order_id            = o.id;
+        r.order_created_at    = o.createdAt ?? null;
         r.return_note         = o.return_note ?? '';
         r.return_shipping_fee = Number(o.return_shipping_fee ?? 0) || 0;
       }
