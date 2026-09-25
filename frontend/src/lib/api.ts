@@ -1634,6 +1634,9 @@ export interface ReturnCollection {
   handled_by:          string | null;     // users.id
   handler_name:        string | null;     // joined display name
   handler_email:       string | null;
+  /* When the customer originally placed the order (orders."createdAt"). Shown to
+     everyone (incl. reviewers) as 'تاريخ الطلب'. Null for unmatched parcels. */
+  order_created_at?:         string | null;
   /* Accountability — the agent who ORIGINALLY confirmed the returned order
      (orders."AssignedTo"). Present for ADMINS ONLY; undefined for reviewers. */
   confirmation_agent_name?:  string | null;

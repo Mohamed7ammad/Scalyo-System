@@ -14,7 +14,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getReturnCollections, updateReturnCollection, payReturnCollection,
-  syncReturnCollections, getReturnAnalytics, settleAgentCommission, userRoles, userHasRole,
+  syncReturnCollections, getReturnAnalytics, settleAgentCommission,
+  deleteReturnCollection, userRoles, userHasRole,
   ReturnCollection, ReturnCollectionStatus, ReturnAnalytics, ReturnAnalyticsRow,
 } from '@/lib/api';
 
@@ -39,6 +40,15 @@ const REFUSED_TAB: { key: ReturnCollectionStatus; label: string; accent: string 
 const parseN = (v: string | number | null | undefined): number => parseFloat(String(v ?? 0)) || 0;
 const fmt = (v: string | number | null | undefined): string =>
   parseN(v).toLocaleString('en-US', { maximumFractionDigits: 2 });
+
+/* Original order date → clean 'DD MMM YYYY' (e.g. 15 Sep 2026). '—' when absent. */
+const fmtOrderDate = (iso: string | null | undefined): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+};
 
 interface Toast { message: string; type: 'success' | 'error' }
 
@@ -249,6 +259,24 @@ export default function ReturnsCollectionPage() {
       showToast('تم نقل العميل إلى قائمة الرفض', 'success');
     } catch {
       showToast('تعذّر تحديث الحالة', 'error');
+    } finally {
+      setBusyRow(null);
+    }
+  };
+
+  /* Permanently delete a record (admin) — e.g. a customer who shouldn't be
+     contacted. Backend detaches any linked treasury revenue so the balance is
+     unchanged. Removes the row from local state on success. */
+  const handleDelete = async (row: ReturnCollection) => {
+    if (!window.confirm('هل أنت متأكد من حذف هذا السجل نهائياً؟')) return;
+    setBusyRow(row.id);
+    try {
+      await deleteReturnCollection(row.id);
+      setRecords((prev) => prev.filter((r) => r.id !== row.id));
+      showToast('تم حذف السجل نهائياً', 'success');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'تعذّر حذف السجل';
+      showToast(msg, 'error');
     } finally {
       setBusyRow(null);
     }
@@ -517,6 +545,7 @@ export default function ReturnsCollectionPage() {
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العميل</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الهاتف</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المنتج</th>
+                    <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">تاريخ الطلب</th>
                     <th className="text-right font-semibold px-4 py-3">ملاحظات</th>
                     {isAdmin && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">موظف التأكيد</th>}
                     {!isReviewer && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المُحصّل</th>}
@@ -535,6 +564,8 @@ export default function ReturnsCollectionPage() {
                         <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[14rem]">
                           <span className="line-clamp-2" title={r.product_name ?? ''}>{r.product_name || '—'}</span>
                         </td>
+                        {/* Original order date — visible to everyone incl. reviewers. */}
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr">{fmtOrderDate(r.order_created_at)}</td>
                         <td className="px-4 py-3">
                           {r.status === 'paid' ? (
                             <span className="text-xs text-slate-500 dark:text-slate-400">{r.notes || '—'}</span>
@@ -565,44 +596,58 @@ export default function ReturnsCollectionPage() {
                           </td>
                         )}
                         <td className="px-4 py-3">
-                          {(r.status === 'paid' || r.status === 'refused') ? (
-                            /* Terminal states — badge only, no actions (archived). */
-                            <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_BADGE[r.status]}`}>
-                              {STATUS_LABEL[r.status]}
-                            </span>
-                          ) : (
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              {r.status !== 'no_answer' && (
-                                <button onClick={() => handleStatus(r, 'no_answer')} disabled={busy}
-                                  className="px-2.5 py-1.5 text-xs rounded-lg font-medium transition bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 disabled:opacity-50">
-                                  لا يرد
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {(r.status === 'paid' || r.status === 'refused') ? (
+                              /* Terminal states — badge only (archived). */
+                              <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_BADGE[r.status]}`}>
+                                {STATUS_LABEL[r.status]}
+                              </span>
+                            ) : (
+                              <>
+                                {r.status !== 'no_answer' && (
+                                  <button onClick={() => handleStatus(r, 'no_answer')} disabled={busy}
+                                    className="px-2.5 py-1.5 text-xs rounded-lg font-medium transition bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 disabled:opacity-50">
+                                    لا يرد
+                                  </button>
+                                )}
+                                {r.status !== 'reason_known' && (
+                                  <button onClick={() => handleStatus(r, 'reason_known')} disabled={busy}
+                                    className="px-2.5 py-1.5 text-xs rounded-lg font-medium transition bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-300 disabled:opacity-50">
+                                    تم معرفة السبب
+                                  </button>
+                                )}
+                                <button onClick={() => openPay(r)} disabled={busy}
+                                  className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                                  تم الدفع
                                 </button>
-                              )}
-                              {r.status !== 'reason_known' && (
-                                <button onClick={() => handleStatus(r, 'reason_known')} disabled={busy}
-                                  className="px-2.5 py-1.5 text-xs rounded-lg font-medium transition bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-300 disabled:opacity-50">
-                                  تم معرفة السبب
-                                </button>
-                              )}
-                              <button onClick={() => openPay(r)} disabled={busy}
-                                className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
-                                تم الدفع
+                                {/* Refuse / archive — reviewers don't have this action. */}
+                                {!isReviewer && (
+                                  <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"
+                                    aria-label="رفض"
+                                    className="inline-flex items-center gap-1 px-2 py-1.5 text-xs rounded-lg font-medium transition
+                                      text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 dark:hover:bg-red-600 disabled:opacity-50">
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                        d="M18.364 5.636L5.636 18.364M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    رفض
+                                  </button>
+                                )}
+                              </>
+                            )}
+                            {/* Permanent delete — ADMIN ONLY, available on every row. */}
+                            {isAdmin && (
+                              <button onClick={() => handleDelete(r)} disabled={busy} title="حذف نهائي" aria-label="حذف"
+                                className="inline-flex items-center gap-1 px-2 py-1.5 text-xs rounded-lg font-medium transition
+                                  text-red-600 hover:text-white hover:bg-red-600 dark:text-red-400 dark:hover:bg-red-600 disabled:opacity-50">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                                حذف
                               </button>
-                              {/* Refuse / archive — reviewers don't have this action. */}
-                              {!isReviewer && (
-                                <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"
-                                  aria-label="رفض"
-                                  className="inline-flex items-center gap-1 px-2 py-1.5 text-xs rounded-lg font-medium transition
-                                    text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 dark:hover:bg-red-600 disabled:opacity-50">
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                      d="M18.364 5.636L5.636 18.364M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                  </svg>
-                                  رفض
-                                </button>
-                              )}
-                            </div>
-                          )}
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );

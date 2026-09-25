@@ -171,7 +171,8 @@ router.get('/', authenticate, allowReturns, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT rc.*,
               ${AGENT_NAME_SQL} AS handler_name,
-              u.email           AS handler_email${confCols}
+              u.email           AS handler_email,
+              o."createdAt"     AS order_created_at${confCols}
        FROM   return_collections rc
        LEFT   JOIN users  u  ON u.id = rc.handled_by
        LEFT   JOIN orders o  ON o.id = rc.order_id AND o.business_id = rc.business_id
@@ -627,9 +628,12 @@ router.post('/settle', authenticate, requireAdmin, async (req, res) => {
 
 /* ════════════════════════════════════════════════════════════════════════════
    DELETE /api/return-collections/:id
-   Permanently remove a record (e.g. customer refused to pay). If the record was
-   already marked paid it carries a 'return_collection' treasury revenue row — we
-   delete that in the same transaction so the company balance stays accurate.
+   Permanently remove a record (e.g. a customer who shouldn't be contacted). If
+   the record was already marked paid it carries a 'return_collection' treasury
+   revenue row — we DETACH it (return_collection_id = NULL) instead of deleting,
+   so the collected cash stays in the books and the balance is 100% unchanged
+   (never orphan a transaction). Any reviewer-commission expense has no
+   return_collection_id link, so it simply persists as historical spend.
    The settlement ledger is a per-agent aggregate and is left untouched.
 
    Admin-only: agents archive via PATCH status='refused' instead of hard-deleting.
@@ -642,10 +646,11 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    /* Drop any linked treasury revenue first (no-op for unpaid records). */
+    /* Detach any linked treasury revenue (no-op for unpaid records) — the money
+       stays in the treasury as a standalone row, never orphaned. */
     await client.query(
-      `DELETE FROM treasury_transactions
-       WHERE return_collection_id = $1 AND business_id = $2 AND source = 'return_collection'`,
+      `UPDATE treasury_transactions SET return_collection_id = NULL
+       WHERE return_collection_id = $1 AND business_id = $2`,
       [id, businessId]
     );
 
