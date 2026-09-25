@@ -172,7 +172,7 @@ router.get('/', authenticate, allowReturns, async (req, res) => {
        LEFT   JOIN orders o  ON o.id = rc.order_id AND o.business_id = rc.business_id
        LEFT   JOIN users  ca ON ca.email = o."AssignedTo" AND ca.business_id = rc.business_id
        WHERE  ${where}
-       ORDER  BY rc.updated_at DESC`,
+       ORDER  BY rc.created_at DESC, rc.id DESC`,
       params
     );
     res.json(rows);
