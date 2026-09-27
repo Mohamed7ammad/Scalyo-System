@@ -650,6 +650,8 @@ export default function AnalyticsDashboard() {
   /* Drill-down modal shared by the four metric cards (in-transit + confirmed /
      delivered / returned). One <OrdersListModal>; `activeModal` picks the source. */
   const [activeModal,  setActiveModal]  = useState<ModalKey | null>(null);
+  /* Expected-Profit breakdown modal (transparency drill-down). */
+  const [showExpectedProfit, setShowExpectedProfit] = useState(false);
   const [modalData,    setModalData]    = useState<{ count: number; totalCod: number; orders: OrdersListRow[] } | null>(null);
   const [modalLoading, setModalLoading] = useState(false);
 
@@ -957,10 +959,25 @@ export default function AnalyticsDashboard() {
                   - (Number.isFinite(effectiveOpex)    ? effectiveOpex    : 0)
                   - (Number.isFinite(effectiveShipping)? effectiveShipping: 0);
 
-  /* Forecasted Net Profit — where the bottom line should land once the current
-     logistics pipeline settles. Heuristic: realised net profit + 50% of the COD
-     still on the road (a delivery-rate-discounted estimate of pipeline profit). */
-  const forecastedNetProfit = netProfit + (Number.isFinite(outstandingCash) ? outstandingCash : 0) * 0.4;
+  /* ── Expected Profit (unit economics) ───────────────────────────────────────
+     The profit the CURRENT in-transit pipeline will add once it settles, derived
+     STRICTLY from historical terminal-order outcomes in the date range:
+       terminal orders    = delivered + returned + refused/cancelled
+       historical DR       = delivered ÷ terminal orders
+       avg profit / order  = net profit ÷ delivered   (per DELIVERED order)
+       expected delivered  = in-transit × historical DR
+       expected profit     = expected delivered × avg profit/order
+     Computed client-side so the drill-down math is IDENTICAL to the displayed
+     Net-Profit card (itself a client composition of COGS / OPEX / shipping) — a
+     server recompute would diverge from what the admin sees. */
+  const terminalOrders       = totalDelivered + totalReturned + totalRejected;
+  const historicalDr         = terminalOrders > 0 ? totalDelivered / terminalOrders : 0;   // 0..1 fraction
+  const avgNetProfitPerOrder = totalDelivered  > 0 ? netProfit / totalDelivered      : 0;
+  const expectedDelivered    = inTransitCount * historicalDr;
+  const totalExpectedProfit  = expectedDelivered * avgNetProfitPerOrder;
+  const expectedProfitDetails = {
+    inTransitCount, historicalDr, expectedDelivered, avgNetProfitPerOrder, totalExpectedProfit,
+  };
 
   /* Rates (percentages) — guard against division by zero */
   const cr    = totalOrders    > 0 ? totalConfirmed / totalOrders    * 100 : 0;
@@ -1434,16 +1451,16 @@ export default function AnalyticsDashboard() {
               trend={18}
               highlight
             />
-            {/* Forecasted Net Profit — realised profit + 40% of the COD still on
-                the road (conservative). Sits next to the True Net Profit card as a forward look. */}
+            {/* Expected Profit — unit-economics forecast of what the in-transit
+                pipeline will add (in-transit × historical DR × avg profit/order).
+                Clickable → full breakdown modal. */}
             <KPICard
-              label="صافي الربح المتوقع"
-              value={loadingDash ? '...' : fmtEGP(Math.round(forecastedNetProfit))}
-              subValue={loadingDash
-                ? ''
-                : `الحالي + 40% من المستحقات (${fmtEGP(Math.round(outstandingCash))}) قيد التحصيل`}
+              label="الربح المتوقع"
+              value={loadingDash ? '...' : fmtEGP(Math.round(totalExpectedProfit))}
+              subValue={loadingDash ? '' : 'مبني على نسبة التسليم ومتوسط ربح الطلب'}
               trend={20}
               accent="text-indigo-600 dark:text-indigo-400"
+              onClick={loadingDash ? undefined : () => setShowExpectedProfit(true)}
             />
             </div>
           </div>
@@ -2703,6 +2720,66 @@ export default function AnalyticsDashboard() {
         emptyText={activeModal ? MODAL_META[activeModal].empty : ''}
         emptySub={activeModal ? MODAL_META[activeModal].emptySub : ''}
       />
+
+      {/* ═══════ Expected-Profit breakdown (transparency drill-down) ═══════ */}
+      {showExpectedProfit && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          onClick={(e) => e.target === e.currentTarget && setShowExpectedProfit(false)}
+          dir="rtl"
+        >
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-800">
+              <h3 className="text-base font-bold text-slate-800 dark:text-white">كيف تم حساب الربح المتوقع؟</h3>
+              <button onClick={() => setShowExpectedProfit(false)} aria-label="إغلاق"
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-5 space-y-3 text-sm">
+              {/* الطلبات في الطريق */}
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500 dark:text-slate-400">الطلبات في الطريق</span>
+                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmt(inTransitCount)} طلب</span>
+              </div>
+              {/* نسبة التسليم التاريخية */}
+              <div className="flex items-start justify-between">
+                <span className="text-slate-500 dark:text-slate-400">
+                  نسبة التسليم التاريخية
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">المسلّم ÷ (المسلّم + المرتجع + المرفوض)</span>
+                </span>
+                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmtPct(historicalDr * 100)}</span>
+              </div>
+              {/* المتوقع تسليمه */}
+              <div className="flex items-start justify-between">
+                <span className="text-slate-500 dark:text-slate-400">
+                  المتوقع تسليمه
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-600" dir="ltr">{fmt(inTransitCount)} × {fmtPct(historicalDr * 100)}</span>
+                </span>
+                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{expectedDelivered.toFixed(1)} طلب</span>
+              </div>
+              {/* متوسط الربح لكل طلب مُسلّم */}
+              <div className="flex items-start justify-between">
+                <span className="text-slate-500 dark:text-slate-400">
+                  متوسط الربح لكل طلب مُسلّم
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">صافي الربح ÷ الطلبات المسلّمة</span>
+                </span>
+                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmtEGP(Math.round(avgNetProfitPerOrder))}</span>
+              </div>
+              {/* Total */}
+              <div className="border-t border-slate-200 dark:border-slate-700 pt-3 flex items-center justify-between">
+                <span className="font-bold text-slate-800 dark:text-white">إجمالي الربح المتوقع</span>
+                <span className="text-lg font-extrabold text-indigo-600 dark:text-indigo-400" dir="ltr">{fmtEGP(Math.round(totalExpectedProfit))}</span>
+              </div>
+              <p className="text-[11px] text-slate-400 dark:text-slate-600 text-center" dir="ltr">
+                {expectedDelivered.toFixed(1)} × {fmtEGP(Math.round(avgNetProfitPerOrder))} ≈ {fmtEGP(Math.round(totalExpectedProfit))}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
