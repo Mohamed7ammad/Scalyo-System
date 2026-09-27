@@ -1591,10 +1591,13 @@ export default function AnalyticsDashboard() {
                 accent="text-rose-600 dark:text-rose-400"
               />
             )}
+            {/* Operating profit per delivered piece (before ads) — the SAME
+                avgNetProfitPerOrder the Expected-Profit forecast uses, with the
+                final net per piece (after ads) as the subtext. */}
             <KPICard
-              label="متوسط الربح / توصيل"
-              value={(loadingDash || loadingProfitability) ? '...' : fmtEGP(Math.round(avgProfit))}
-              subValue="صافي الربح ÷ عدد التوصيلات"
+              label="متوسط ربح القطعة (التشغيلي)"
+              value={(loadingDash || loadingProfitability) ? '...' : fmtEGP(Math.round(avgNetProfitPerOrder))}
+              subValue={(loadingDash || loadingProfitability) ? '' : `الصافي النهائي للقطعة: ${fmtEGP(Math.round(avgProfit))}`}
               trend={3.8}
               accent="text-emerald-600 dark:text-emerald-400"
             />
