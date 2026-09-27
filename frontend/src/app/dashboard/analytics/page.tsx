@@ -959,26 +959,6 @@ export default function AnalyticsDashboard() {
                   - (Number.isFinite(effectiveOpex)    ? effectiveOpex    : 0)
                   - (Number.isFinite(effectiveShipping)? effectiveShipping: 0);
 
-  /* ── Expected Profit (unit economics) ───────────────────────────────────────
-     The profit the CURRENT in-transit pipeline will add once it settles, derived
-     STRICTLY from historical terminal-order outcomes in the date range:
-       terminal orders    = delivered + returned + refused/cancelled
-       historical DR       = delivered ÷ terminal orders
-       avg profit / order  = net profit ÷ delivered   (per DELIVERED order)
-       expected delivered  = in-transit × historical DR
-       expected profit     = expected delivered × avg profit/order
-     Computed client-side so the drill-down math is IDENTICAL to the displayed
-     Net-Profit card (itself a client composition of COGS / OPEX / shipping) — a
-     server recompute would diverge from what the admin sees. */
-  const terminalOrders       = totalDelivered + totalReturned + totalRejected;
-  const historicalDr         = terminalOrders > 0 ? totalDelivered / terminalOrders : 0;   // 0..1 fraction
-  const avgNetProfitPerOrder = totalDelivered  > 0 ? netProfit / totalDelivered      : 0;
-  const expectedDelivered    = inTransitCount * historicalDr;
-  const totalExpectedProfit  = expectedDelivered * avgNetProfitPerOrder;
-  const expectedProfitDetails = {
-    inTransitCount, historicalDr, expectedDelivered, avgNetProfitPerOrder, totalExpectedProfit,
-  };
-
   /* Rates (percentages) — guard against division by zero */
   const cr    = totalOrders    > 0 ? totalConfirmed / totalOrders    * 100 : 0;
   const dr    = totalConfirmed > 0 ? totalDelivered / totalConfirmed * 100 : 0;
@@ -995,14 +975,30 @@ export default function AnalyticsDashboard() {
      Divided by total PLACED orders (DB count) so it is 1:1 comparable with the
      live CPP, which is also per placed order. (Affiliate view has its own MAX
      CPP inside SafqaAffiliateGrid — this only drives the e-commerce card.) */
-  const maxCpp = useMemo(() => {
-    const netProfitBeforeAds =
-        (Number.isFinite(totalRevenue)      ? totalRevenue      : 0)
-      - (Number.isFinite(effectiveCogs)     ? effectiveCogs     : 0)
-      - (Number.isFinite(effectiveShipping) ? effectiveShipping : 0)
-      - (Number.isFinite(effectiveOpex)     ? effectiveOpex     : 0);
-    return totalOrders > 0 ? netProfitBeforeAds / totalOrders : 0;
-  }, [totalRevenue, effectiveCogs, effectiveShipping, effectiveOpex, totalOrders]);
+  /* Net Profit BEFORE ad spend — shared by the break-even CPP and the Expected
+     Profit forecast so both use one identical definition. */
+  const netProfitBeforeAds =
+      (Number.isFinite(totalRevenue)      ? totalRevenue      : 0)
+    - (Number.isFinite(effectiveCogs)     ? effectiveCogs     : 0)
+    - (Number.isFinite(effectiveShipping) ? effectiveShipping : 0)
+    - (Number.isFinite(effectiveOpex)     ? effectiveOpex     : 0);
+  const maxCpp = totalOrders > 0 ? netProfitBeforeAds / totalOrders : 0;
+
+  /* ── Expected Profit (unit economics) ───────────────────────────────────────
+     The profit the CURRENT in-transit pipeline will add once it settles:
+       historical DR       = the SAME `dr` shown on the 'الطلبات المُسلّمة' card
+                             (delivered ÷ confirmed) — no second DR definition
+       avg profit / order  = net profit BEFORE ads ÷ delivered. Ad spend is
+                             excluded on purpose: the ads for in-transit orders
+                             are already paid (sunk), so charging them again
+                             against the forecast would undervalue it.
+       expected delivered  = in-transit × historical DR
+       expected profit     = expected delivered × avg profit/order
+     Client-side, from the same operands as the Net-Profit card. */
+  const historicalDr         = dr / 100;   // card % → 0..1 fraction
+  const avgNetProfitPerOrder = totalDelivered > 0 ? netProfitBeforeAds / totalDelivered : 0;
+  const expectedDelivered    = inTransitCount * historicalDr;
+  const totalExpectedProfit  = expectedDelivered * avgNetProfitPerOrder;
 
   /* ── Chart data — maps daily_chart_stats to Recharts shape ─────── */
   const chartData = useMemo(() => {
@@ -2748,7 +2744,7 @@ export default function AnalyticsDashboard() {
               <div className="flex items-start justify-between">
                 <span className="text-slate-500 dark:text-slate-400">
                   نسبة التسليم التاريخية
-                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">المسلّم ÷ (المسلّم + المرتجع + المرفوض)</span>
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">المسلّم ÷ المؤكد — نفس نسبة كارت الطلبات المُسلّمة</span>
                 </span>
                 <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmtPct(historicalDr * 100)}</span>
               </div>
@@ -2764,7 +2760,7 @@ export default function AnalyticsDashboard() {
               <div className="flex items-start justify-between">
                 <span className="text-slate-500 dark:text-slate-400">
                   متوسط الربح لكل طلب مُسلّم
-                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">صافي الربح ÷ الطلبات المسلّمة</span>
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">الربح قبل الإعلانات ÷ الطلبات المسلّمة (إعلانات الطلبات الحالية مدفوعة بالفعل)</span>
                 </span>
                 <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmtEGP(Math.round(avgNetProfitPerOrder))}</span>
               </div>
