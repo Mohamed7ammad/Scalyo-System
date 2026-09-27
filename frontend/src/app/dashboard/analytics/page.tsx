@@ -997,8 +997,12 @@ export default function AnalyticsDashboard() {
      Client-side, from the same operands as the Net-Profit card. */
   const historicalDr         = dr / 100;   // card % → 0..1 fraction
   const avgNetProfitPerOrder = totalDelivered > 0 ? netProfitBeforeAds / totalDelivered : 0;
-  const expectedDelivered    = inTransitCount * historicalDr;
-  const totalExpectedProfit  = expectedDelivered * avgNetProfitPerOrder;
+  const expectedDelivered       = inTransitCount * historicalDr;
+  const inTransitExpectedProfit = expectedDelivered * avgNetProfitPerOrder;
+  /* Total projected profit for the period = realised net profit + what the
+     in-transit pipeline is expected to add. This is the card's headline.
+     Summed from the ROUNDED parts so the receipt modal always adds up exactly. */
+  const totalProjectedProfit    = Math.round(netProfit) + Math.round(inTransitExpectedProfit);
 
   /* ── Chart data — maps daily_chart_stats to Recharts shape ─────── */
   const chartData = useMemo(() => {
@@ -1447,13 +1451,13 @@ export default function AnalyticsDashboard() {
               trend={18}
               highlight
             />
-            {/* Expected Profit — unit-economics forecast of what the in-transit
-                pipeline will add (in-transit × historical DR × avg profit/order).
-                Clickable → full breakdown modal. */}
+            {/* Total Projected Profit — realised net profit + the in-transit
+                pipeline's expected profit (in-transit × DR × avg profit before
+                ads). Clickable → receipt-style breakdown modal. */}
             <KPICard
-              label="الربح المتوقع"
-              value={loadingDash ? '...' : fmtEGP(Math.round(totalExpectedProfit))}
-              subValue={loadingDash ? '' : 'مبني على نسبة التسليم ومتوسط ربح الطلب'}
+              label="إجمالي الربح المتوقع"
+              value={loadingDash ? '...' : fmtEGP(Math.round(totalProjectedProfit))}
+              subValue={loadingDash ? '' : 'الصافي المُحقق + أرباح الطلبات قيد التوصيل'}
               trend={20}
               accent="text-indigo-600 dark:text-indigo-400"
               onClick={loadingDash ? undefined : () => setShowExpectedProfit(true)}
@@ -2737,43 +2741,43 @@ export default function AnalyticsDashboard() {
                 </svg>
               </button>
             </div>
-            <div className="p-5 space-y-3 text-sm">
-              {/* الطلبات في الطريق */}
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500 dark:text-slate-400">الطلبات في الطريق</span>
-                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmt(inTransitCount)} طلب</span>
-              </div>
-              {/* نسبة التسليم التاريخية */}
-              <div className="flex items-start justify-between">
-                <span className="text-slate-500 dark:text-slate-400">
-                  نسبة التسليم التاريخية
-                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">المسلّم ÷ المؤكد — نفس نسبة كارت الطلبات المُسلّمة</span>
+            {/* Receipt: realised net profit + in-transit expected profit = total. */}
+            <div className="p-5 space-y-4 text-sm">
+              {/* صافي الربح المُحقق */}
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-slate-600 dark:text-slate-300">
+                  صافي الربح المُحقق
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-500">نفس كارت صافي الربح النهائي للفترة</span>
                 </span>
-                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmtPct(historicalDr * 100)}</span>
-              </div>
-              {/* المتوقع تسليمه */}
-              <div className="flex items-start justify-between">
-                <span className="text-slate-500 dark:text-slate-400">
-                  المتوقع تسليمه
-                  <span className="block text-[10px] text-slate-400 dark:text-slate-600" dir="ltr">{fmt(inTransitCount)} × {fmtPct(historicalDr * 100)}</span>
+                <span className={`font-bold whitespace-nowrap ${netProfit < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-800 dark:text-slate-100'}`} dir="ltr">
+                  {fmtEGP(Math.round(netProfit))}
                 </span>
-                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{expectedDelivered.toFixed(1)} طلب</span>
               </div>
-              {/* متوسط الربح لكل طلب مُسلّم */}
-              <div className="flex items-start justify-between">
-                <span className="text-slate-500 dark:text-slate-400">
-                  متوسط الربح لكل طلب مُسلّم
-                  <span className="block text-[10px] text-slate-400 dark:text-slate-600">الربح قبل الإعلانات ÷ الطلبات المسلّمة (إعلانات الطلبات الحالية مدفوعة بالفعل)</span>
+              {/* + أرباح قيد التوصيل */}
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-slate-600 dark:text-slate-300">
+                  <span className="text-emerald-600 dark:text-emerald-400 font-bold ml-1">+</span>
+                  أرباح قيد التوصيل
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-500">
+                    ({fmt(inTransitCount)} طلب × {fmtPct(historicalDr * 100)} تسليم × {fmtEGP(Math.round(avgNetProfitPerOrder))})
+                  </span>
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-500">
+                    الربح قبل الإعلانات لكل قطعة — إعلانات هذه الطلبات مدفوعة بالفعل
+                  </span>
                 </span>
-                <span className="font-bold text-slate-800 dark:text-slate-100" dir="ltr">{fmtEGP(Math.round(avgNetProfitPerOrder))}</span>
+                <span className="font-bold whitespace-nowrap text-emerald-600 dark:text-emerald-400" dir="ltr">
+                  {fmtEGP(Math.round(inTransitExpectedProfit))}
+                </span>
               </div>
-              {/* Total */}
-              <div className="border-t border-slate-200 dark:border-slate-700 pt-3 flex items-center justify-between">
+              {/* = إجمالي الربح المتوقع */}
+              <div className="border-t-2 border-dashed border-slate-200 dark:border-slate-700 pt-4 flex items-center justify-between gap-3">
                 <span className="font-bold text-slate-800 dark:text-white">إجمالي الربح المتوقع</span>
-                <span className="text-lg font-extrabold text-indigo-600 dark:text-indigo-400" dir="ltr">{fmtEGP(Math.round(totalExpectedProfit))}</span>
+                <span className="text-xl font-extrabold whitespace-nowrap text-indigo-600 dark:text-indigo-400" dir="ltr">
+                  {fmtEGP(Math.round(totalProjectedProfit))}
+                </span>
               </div>
-              <p className="text-[11px] text-slate-400 dark:text-slate-600 text-center" dir="ltr">
-                {expectedDelivered.toFixed(1)} × {fmtEGP(Math.round(avgNetProfitPerOrder))} ≈ {fmtEGP(Math.round(totalExpectedProfit))}
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 text-center" dir="ltr">
+                {fmtEGP(Math.round(netProfit))} + {fmtEGP(Math.round(inTransitExpectedProfit))} = {fmtEGP(Math.round(totalProjectedProfit))}
               </p>
             </div>
           </div>
