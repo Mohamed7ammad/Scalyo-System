@@ -6,6 +6,7 @@ const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = 
 const { checkAndSendStaffAlerts } = require('../services/alerts');
 const { EARNED_COMMISSION_SQL } = require('../utils/commission');
 const { hasRole, primaryRole, normalizeRoles } = require('../utils/roles');
+const { normalizeEmail } = require('../utils/email');
 
 /* Authoritative permission set derived from a user's ROLES — the union of each
    role's fixed bundle. A pure moderator / after-sales can never be smuggled a
@@ -262,7 +263,9 @@ router.post('/', authenticate, requireAdminOrPermission('manage_staff'), async (
      roles (moderator / after-sales) can never be smuggled a privileged key. */
   const perms = resolvePermissions(roles, permissions);
 
-  const cleanEmail = email.trim().toLowerCase();
+  /* Strip whitespace + invisible RTL/format chars (see utils/email.js). */
+  const cleanEmail = normalizeEmail(email);
+  if (!cleanEmail.includes('@')) return res.status(400).json({ error: 'بريد إلكتروني غير صالح' });
   /* Agency fields apply ONLY to media buyers — ignored/cleared for other roles. */
   const isBuyer   = roles.includes('media_buyer');
   const refCode   = isBuyer ? cleanReferral(referral_code) : null;
@@ -370,7 +373,12 @@ router.patch('/:id', authenticate, requireAdminOrPermission('manage_staff'), asy
   let   idx  = 1;
 
   if (name       !== undefined) { sets.push(`name      = $${idx++}`); vals.push(name.trim() || null); }
-  if (email      !== undefined) { sets.push(`email     = $${idx++}`); vals.push(email.trim().toLowerCase()); }
+  if (email      !== undefined) {
+    /* Strip whitespace + invisible RTL/format chars (see utils/email.js). */
+    const cleanEmail = normalizeEmail(email);
+    if (!cleanEmail.includes('@')) return res.status(400).json({ error: 'بريد إلكتروني غير صالح' });
+    sets.push(`email     = $${idx++}`); vals.push(cleanEmail);
+  }
   if (rolesProvided) {
     /* Changing roles re-syncs the primary `role`, the `roles` array, AND the
        authoritative permission set (union of role bundles) in one shot — so a

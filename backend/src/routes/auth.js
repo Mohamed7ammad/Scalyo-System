@@ -4,6 +4,7 @@ const jwt                  = require('jsonwebtoken');
 const { createClient }     = require('@supabase/supabase-js');
 const pool                 = require('../config/db');
 const { rolesOf, primaryRole } = require('../utils/roles');
+const { normalizeEmail }       = require('../utils/email');
 
 const router = express.Router();
 
@@ -110,9 +111,10 @@ router.post('/login', async (req, res) => {
     return res.status(400).json({ error: 'البريد الإلكتروني وكلمة المرور مطلوبان' });
   }
 
-  /* Emails are stored lowercased at creation — normalise the lookup so a
-     mixed-case login (e.g. "Staff@x.com") still matches and doesn't 401. */
-  const cleanEmail = email.trim().toLowerCase();
+  /* Emails are stored normalised at creation — normalise the lookup the same
+     way so a mixed-case or pasted-from-Arabic login (with invisible RTL marks)
+     still matches and doesn't 401. See utils/email.js. */
+  const cleanEmail = normalizeEmail(email);
 
   try {
     // ── 1. Look up the user in our local users table ─────────────────
@@ -137,7 +139,7 @@ router.post('/login', async (req, res) => {
     //      b) local check failed but the user record still exists (safety net)
     if (!authOk && user) {
       const { data: sbData, error: sbError } = await getSupabase()
-        .auth.signInWithPassword({ email, password });
+        .auth.signInWithPassword({ email: cleanEmail, password });
       if (!sbError && sbData?.user) authOk = true;
     }
 
@@ -174,11 +176,17 @@ router.post('/login', async (req, res) => {
    Creates a brand-new tenant (business_profile) + its first admin user.
    Payload: { email, password, brand_name, plan_type }                 */
 router.post('/register', async (req, res) => {
-  const { email, password, brand_name, plan_type } = req.body || {};
+  const { email: rawEmail, password, brand_name, plan_type } = req.body || {};
+  /* Normalise (lowercase + strip whitespace / invisible RTL chars). Register used
+     to store the RAW value, which the lowercased login lookup couldn't match. */
+  const email = normalizeEmail(rawEmail);
 
   // ── Validation ───────────────────────────────────────────────────
   if (!email || !password || !brand_name) {
     return res.status(400).json({ error: 'البريد الإلكتروني وكلمة المرور واسم البراند مطلوبة' });
+  }
+  if (!email.includes('@')) {
+    return res.status(400).json({ error: 'بريد إلكتروني غير صالح' });
   }
   if (password.length < 6) {
     return res.status(400).json({ error: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' });
@@ -237,7 +245,7 @@ router.post('/register', async (req, res) => {
    member, flips email_verified=true, clears the code, and returns a normal login
    payload (token + user) so the client proceeds straight to the dashboard.     */
 router.post('/verify-otp', async (req, res) => {
-  const rawEmail = (req.body?.email || '').trim().toLowerCase();
+  const rawEmail = normalizeEmail(req.body?.email);
   const otp      = String(req.body?.otp || '').trim();
 
   if (!rawEmail || !otp) {
