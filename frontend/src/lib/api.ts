@@ -1687,6 +1687,16 @@ export const payReturnCollection = (id: number, collected_amount: number) =>
 export const syncReturnCollections = () =>
   api.post<{ synced: number; fetched: number }>('/api/return-collections/sync');
 
+/** The CALLER's own Returns-Reviewer earnings (scoped server-side to req.user). */
+export interface MyReturnStats {
+  paid_count:       number;   // returns this user marked 'تم الدفع'
+  total_collected:  number;   // Σ EGP collected from customers
+  total_commission: number;   // Σ commission booked (30% of each collection)
+  commission_rate:  number;   // e.g. 0.30
+}
+export const getMyReturnStats = () =>
+  api.get<MyReturnStats>('/api/return-collections/my-stats');
+
 /** Per-agent collection + commission settlement analytics. */
 export const getReturnAnalytics = () =>
   api.get<ReturnAnalytics>('/api/return-collections/analytics');

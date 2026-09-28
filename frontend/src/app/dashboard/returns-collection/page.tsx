@@ -21,9 +21,9 @@ import {
 
 /* ── Constants & helpers ─────────────────────────────────────────────────── */
 const COMMISSION_RATE = 0.40;
-/* Flat commission a Returns Reviewer earns per collected return (mirrors the
-   backend REVIEWER_COMMISSION). Shown in the pay modal for reviewers. */
-const REVIEWER_COMMISSION = 20;
+/* Returns Reviewer commission: 30% of the collected amount (mirrors the backend
+   REVIEWER_COMMISSION_RATE). Previewed in the pay modal for reviewers. */
+const REVIEWER_COMMISSION_RATE = 0.30;
 
 /* The four workflow tabs. 'refused' is admin-only (appended below) — reviewers
    never see it. 'reason_known' (تم معرفة السبب) replaced the old 'follow_up'. */
@@ -685,8 +685,8 @@ export default function ReturnsCollectionPage() {
             <div className="flex items-center justify-between">
               {isReviewer ? (
                 <>
-                  <span className="text-slate-500 dark:text-slate-400">عمولتك (ثابتة)</span>
-                  <span className="font-bold text-rose-600 dark:text-rose-400" dir="ltr">{fmt(REVIEWER_COMMISSION)} ج.م</span>
+                  <span className="text-slate-500 dark:text-slate-400">عمولتك (30%)</span>
+                  <span className="font-bold text-rose-600 dark:text-rose-400" dir="ltr">{fmt(parseN(payAmount) * REVIEWER_COMMISSION_RATE)} ج.م</span>
                 </>
               ) : (
                 <>

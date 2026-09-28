@@ -32,10 +32,10 @@ const router = express.Router();
 
 /* Fixed 40% agent commission on every collected return fee (accrued → settled). */
 const RETURN_COMMISSION_RATE = 0.40;
-/* Flat commission (EGP) awarded to a Returns Reviewer each time THEY collect a
-   return. Unlike the agent's accrued 40%, this is PAID IMMEDIATELY: it books a
+/* Returns Reviewer commission: 30% of the EXACT amount collected from the
+   customer. Unlike the agent's accrued 40%, this is PAID IMMEDIATELY: it books a
    treasury expense at collection time (no later settlement). */
-const REVIEWER_COMMISSION = 20;
+const REVIEWER_COMMISSION_RATE = 0.30;
 
 /* Active-window floor: returns whose ORIGINAL order was placed before this date
    are obsolete and must never enter the queue. The Bosta sync explicitly skips
@@ -102,7 +102,7 @@ pool.query(`
      flat commission is paid immediately as a treasury expense — these columns
      make the award idempotent and reversible:
        reviewer_id                → which reviewer collected (for attribution)
-       reviewer_commission        → flat EGP awarded (0 when an agent collected)
+       reviewer_commission        → EGP awarded (30% of collected; 0 when an agent collected)
        reviewer_commission_tx_id  → the treasury expense row; NULL ⇒ not yet awarded */
   .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS reviewer_id VARCHAR(255)`))
   .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS reviewer_commission NUMERIC(12,2) NOT NULL DEFAULT 0`))
@@ -296,8 +296,8 @@ router.patch('/:id', authenticate, allowReturns, async (req, res) => {
    Mark a return as collected. 100% of the fee → treasury revenue (idempotent per
    row). The commission depends on WHO collected:
      • Agent / admin   → 40% ACCRUED on the row (employee_commission), settled later.
-     • Returns Reviewer → flat 20 EGP paid IMMEDIATELY as a treasury EXPENSE
-       (source='return_review_commission'), booked exactly once per row.
+     • Returns Reviewer → 30% of the collected amount, paid IMMEDIATELY as a
+       treasury EXPENSE (source='return_review_commission'), ONE row per return.
    ════════════════════════════════════════════════════════════════════════════ */
 router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
   const businessId = req.user.business_id;
@@ -308,9 +308,8 @@ router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
     return res.status(400).json({ error: 'المبلغ المُحصّل يجب أن يكون أكبر من صفر' });
   }
 
-  const reviewer   = isReviewer(req.user);
-  /* Reviewer collections carry NO 40% accrual — their reward is the flat expense. */
-  const commission = reviewer ? 0 : Math.round(amount * RETURN_COMMISSION_RATE * 100) / 100;
+  const reviewer           = isReviewer(req.user);
+  const reviewerCommission = Math.round(amount * REVIEWER_COMMISSION_RATE * 100) / 100;
 
   const client = await pool.connect();
   try {
@@ -327,6 +326,11 @@ router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
       return res.status(404).json({ error: 'السجل غير موجود' });
     }
     let reviewerTxId = pre.rows[0].reviewer_commission_tx_id;
+    /* A row that already carries a reviewer commission STAYS a reviewer row even
+       if someone else re-pays it — so it can never also accrue the agent 40%. */
+    const reviewerRow = reviewer || !!reviewerTxId;
+    /* Reviewer collections carry NO 40% accrual — their reward is the 30% expense. */
+    const commission  = reviewerRow ? 0 : Math.round(amount * RETURN_COMMISSION_RATE * 100) / 100;
 
     const upd = await client.query(
       `UPDATE return_collections
@@ -359,10 +363,26 @@ router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
       ]
     );
 
-    /* Reviewer flat commission → immediate treasury EXPENSE, booked exactly ONCE
-       per row (guarded by reviewer_commission_tx_id). A re-pay corrects the
-       revenue above but never books a second expense — no duplicate-commission. */
-    if (reviewer && !reviewerTxId) {
+    /* Reviewer commission (30% of collected) → immediate treasury EXPENSE. ONE
+       expense row per return (guarded by reviewer_commission_tx_id):
+         • first pay → insert the expense;
+         • re-pay with a corrected amount → UPDATE that same expense + the row,
+           so the commission always equals 30% of the latest amount and is never
+           booked twice. */
+    if (reviewerTxId) {
+      await client.query(
+        `UPDATE treasury_transactions SET amount = $1 WHERE id = $2 AND business_id = $3`,
+        [reviewerCommission.toFixed(2), reviewerTxId, businessId]
+      );
+      const upd2 = await client.query(
+        `UPDATE return_collections SET reviewer_commission = $1
+         WHERE id = $2 AND business_id = $3 RETURNING *`,
+        [reviewerCommission, id, businessId]
+      );
+      await client.query('COMMIT');
+      return res.json(upd2.rows[0]);
+    }
+    if (reviewer) {
       const exp = await client.query(
         `INSERT INTO treasury_transactions
            (order_id, amount, type, source, description, transaction_date, business_id)
@@ -370,7 +390,7 @@ router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
          RETURNING id`,
         [
           row.order_id,
-          REVIEWER_COMMISSION.toFixed(2),
+          reviewerCommission.toFixed(2),
           `عمولة تحصيل مرتجع${row.tracking_number ? ' #' + row.tracking_number : ''}` +
             (row.customer_name ? ` — ${row.customer_name}` : ''),
           businessId,
@@ -382,7 +402,7 @@ router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
            SET reviewer_id = $1, reviewer_commission = $2, reviewer_commission_tx_id = $3
          WHERE id = $4 AND business_id = $5
          RETURNING *`,
-        [req.user.id, REVIEWER_COMMISSION, reviewerTxId, id, businessId]
+        [req.user.id, reviewerCommission, reviewerTxId, id, businessId]
       );
       await client.query('COMMIT');
       return res.json(upd2.rows[0]);
@@ -467,6 +487,40 @@ router.post('/sync', authenticate, allowReturns, async (req, res) => {
   } catch (err) {
     console.error('[return-collections sync] upsert failed:', err);
     res.status(500).json({ error: 'خطأ في الخادم أثناء حفظ المرتجعات' });
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════════════
+   GET /api/return-collections/my-stats
+   The CALLER's own Returns-Reviewer earnings — strictly scoped to req.user.id
+   (reviewer_id is stamped only when a reviewer marks a return paid):
+     paid_count          → returns this user marked 'تم الدفع'
+     total_collected     → Σ amount they collected from customers
+     total_commission    → Σ reviewer_commission booked for them (30% of each
+                           collection — the exact amounts expensed to treasury)
+   ════════════════════════════════════════════════════════════════════════════ */
+router.get('/my-stats', authenticate, allowReturns, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int                               AS paid_count,
+              COALESCE(SUM(collected_amount), 0)::float    AS total_collected,
+              COALESCE(SUM(reviewer_commission), 0)::float AS total_commission
+       FROM   return_collections
+       WHERE  business_id = $1
+         AND  reviewer_id = $2::text
+         AND  status      = 'paid'`,
+      [req.user.business_id, String(req.user.id)]
+    );
+    const r = rows[0];
+    res.json({
+      paid_count:       r.paid_count,
+      total_collected:  Math.round(r.total_collected  * 100) / 100,
+      total_commission: Math.round(r.total_commission * 100) / 100,
+      commission_rate:  REVIEWER_COMMISSION_RATE,
+    });
+  } catch (err) {
+    console.error('[return-collections my-stats]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
 

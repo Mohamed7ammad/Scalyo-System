@@ -1865,7 +1865,7 @@ export default function StaffPage() {
                   <p className="text-xs font-bold text-rose-700 dark:text-rose-400 mb-1">صلاحيات مراجعة المرتجعات</p>
                   <p className="text-[11px] text-rose-700/80 dark:text-rose-300/70 leading-relaxed">
                     يعمل فقط على قائمة تحصيل المرتجعات: يتابع العملاء، يسجّل السبب، ويحصّل رسوم المرتجع — ويحصل على
-                    <span className="font-semibold"> عمولة ثابتة 20 ج.م عند كل تحصيل</span>. لا يرى الأرقام المالية،
+                    <span className="font-semibold"> عمولة 30% من كل مبلغ يحصّله</span>. لا يرى الأرقام المالية،
                     ولا اسم موظف التأكيد، ولا أي صفحة أخرى في النظام.
                   </p>
                 </div>

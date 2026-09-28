@@ -49,6 +49,7 @@ const MODERATOR_ALLOWED = new Set<string>([
    inventory or any other page. */
 const RETURNS_REVIEWER_ALLOWED = new Set<string>([
   '/dashboard/returns-collection',
+  '/dashboard/my-return-commissions',   // عمولاتي — their personal earnings
 ]);
 
 /* hrefs an 'affiliate' plan tenant is allowed to see */
@@ -187,6 +188,19 @@ const NAV_ITEMS: NavItem[] = [
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
           d="M3 10h11a6 6 0 016 6v1M3 10l5 5m-5-5l5-5M21 12a9 9 0 01-9 9" />
+      </svg>
+    ),
+  },
+  {
+    /* Returns Reviewer's personal earnings (30% of what they collect). Reached via
+       the RETURNS_REVIEWER_ALLOWED allowlist; hidden from admins and from anyone
+       without the 'return_review' permission. */
+    href: '/dashboard/my-return-commissions', label: 'عمولاتي',
+    subLabel: 'My Commissions', requiredPermission: 'return_review', hideForRoles: ['admin'],
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
     ),
   },
