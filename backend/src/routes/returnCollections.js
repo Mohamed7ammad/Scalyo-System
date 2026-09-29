@@ -58,7 +58,25 @@ function allowReturns(req, res, next) {
   const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
   if (perms.includes('shipping_followups') || perms.includes('return_review')) return next();
   if (hasRole(req.user, 'returns_reviewer')) return next();
+  /* Team Leader (supervisor) — MONITORING access: sees every return and can
+     follow up, but can never collect money or delete (see canCollect / DELETE). */
+  if (hasRole(req.user, 'supervisor')) return next();
   return res.status(403).json({ error: 'مطلوب صلاحيات المدير' });
+}
+
+/* May this caller record a collection (money)? Admins, queue agents
+   (shipping_followups) and Returns Reviewers — NOT a team leader whose only
+   way into this module is the supervisor role. */
+function canCollect(user) {
+  if (hasRole(user, 'admin') || hasRole(user, 'returns_reviewer')) return true;
+  const perms = Array.isArray(user.permissions) ? user.permissions : [];
+  return perms.includes('shipping_followups') || perms.includes('return_review');
+}
+
+/* May this caller see the confirmation-agent accountability data? Admins and
+   Team Leaders (they manage the confirmation agents). Never a pure reviewer. */
+function seesAccountability(user) {
+  return hasRole(user, 'admin') || hasRole(user, 'supervisor');
 }
 
 /* True when the caller is acting purely as a Returns Reviewer (not an admin) —
@@ -142,11 +160,13 @@ const AGENT_NAME_SQL = `COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '
    ACCOUNTABILITY: for admins we JOIN the ORIGINAL order to surface which agent
    confirmed the (now-returned) order — orders."AssignedTo" holds that agent's
    email (there is no separate confirmed_by column). This is exposed to ADMINS
-   ONLY; a Returns Reviewer must never learn who confirmed the order.
+   and TEAM LEADERS only; a Returns Reviewer must never learn who confirmed it.
+   Every caller sees ALL of the tenant's rows (shared pool, never self-scoped).
    ════════════════════════════════════════════════════════════════════════════ */
 router.get('/', authenticate, allowReturns, async (req, res) => {
   const businessId = req.user.business_id;
-  const isAdmin    = hasRole(req.user, 'admin');
+  /* Admin + Team Leader see the confirmation-agent column/filter. */
+  const accountability = seesAccountability(req.user);
   const { status, confirmation_agent } = req.query;
 
   const params = [businessId];
@@ -155,14 +175,14 @@ router.get('/', authenticate, allowReturns, async (req, res) => {
     params.push(String(status));
     where += ` AND rc.status = $${params.length}`;
   }
-  /* Admin-only: filter every return caused by a specific confirmation agent. */
-  if (isAdmin && confirmation_agent) {
+  /* Admin/TL: filter every return caused by a specific confirmation agent. */
+  if (accountability && confirmation_agent) {
     params.push(String(confirmation_agent));
     where += ` AND o."AssignedTo" = $${params.length}`;
   }
 
-  /* Confirmation-agent columns are added to the projection for admins only. */
-  const confCols = isAdmin
+  /* Confirmation-agent columns are added to the projection for admins + TLs only. */
+  const confCols = accountability
     ? `, o."AssignedTo" AS confirmation_agent_email,
          COALESCE(NULLIF(TRIM(ca.name), ''), SPLIT_PART(ca.email, '@', 1)) AS confirmation_agent_name`
     : '';
@@ -272,8 +292,13 @@ router.patch('/:id', authenticate, allowReturns, async (req, res) => {
     const params = [];
     if (hasStatus) { params.push(String(req.body.status)); sets.push(`status = $${params.length}`); }
     if (hasNotes)  { params.push(req.body.notes == null ? '' : String(req.body.notes)); sets.push(`notes = $${params.length}`); }
-    params.push(req.user.id);
-    sets.push(`handled_by = COALESCE(handled_by, $${params.length})`);
+    /* Claim-on-action — but ONLY for people who can collect. A monitoring-only
+       Team Leader must never become the row's handler: a later agent collection
+       accrues its 40% to handled_by, which would divert it to the TL. */
+    if (canCollect(req.user)) {
+      params.push(req.user.id);
+      sets.push(`handled_by = COALESCE(handled_by, $${params.length})`);
+    }
     sets.push('updated_at = NOW()');
 
     params.push(id, businessId);
@@ -300,6 +325,11 @@ router.patch('/:id', authenticate, allowReturns, async (req, res) => {
        treasury EXPENSE (source='return_review_commission'), ONE row per return.
    ════════════════════════════════════════════════════════════════════════════ */
 router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
+  /* Team Leaders are monitoring-only: recording money (treasury revenue +
+     commission accrual) is reserved for admins, queue agents and reviewers. */
+  if (!canCollect(req.user)) {
+    return res.status(403).json({ error: 'التيم ليدر للمتابعة فقط — لا يمكنه تسجيل التحصيل' });
+  }
   const businessId = req.user.business_id;
   const { id }     = req.params;
 
@@ -690,7 +720,8 @@ router.post('/settle', authenticate, requireAdmin, async (req, res) => {
    return_collection_id link, so it simply persists as historical spend.
    The settlement ledger is a per-agent aggregate and is left untouched.
 
-   Admin-only: agents archive via PATCH status='refused' instead of hard-deleting.
+   ADMIN-ONLY (requireAdmin) — explicitly NOT Team Leaders, reviewers or agents:
+   they archive via PATCH status='refused' instead of hard-deleting.
    ════════════════════════════════════════════════════════════════════════════ */
 router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   const businessId = req.user.business_id;

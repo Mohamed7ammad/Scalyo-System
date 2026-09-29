@@ -99,6 +99,13 @@ export default function ReturnsCollectionPage() {
   const [isAdmin,  setIsAdmin]  = useState(false);
   /* A pure Returns Reviewer sees a stripped-down, financials-free view. */
   const [isReviewer, setIsReviewer] = useState(false);
+  /* Confirmation-agent column + filter: admins AND Team Leaders (supervisor). */
+  const [seesAccountability, setSeesAccountability] = useState(false);
+  /* Money (analytics cards, collected/commission columns): admins + queue agents
+     only — never reviewers or monitoring-only Team Leaders. */
+  const [showMoney, setShowMoney] = useState(false);
+  /* May record «تم الدفع»? Mirrors backend canCollect — Team Leaders can't. */
+  const [canCollect, setCanCollect] = useState(false);
   /* Admin-only: filter the queue by the agent who confirmed the original order. */
   const [agentFilter, setAgentFilter] = useState('');
   /* Product filter — analyse returns/refusals per product. '' = all products. */
@@ -130,21 +137,26 @@ export default function ReturnsCollectionPage() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  /* ── Auth guard — admin or shipping_followups permission ─────────────────── */
+  /* ── Auth guard — admin, queue agents, reviewers, or Team Leaders ────────── */
   useEffect(() => {
     try {
       const token = localStorage.getItem('token');
       const stored = localStorage.getItem('user');
       if (!token || !stored) { router.replace('/'); return; }
       const u = JSON.parse(stored);
-      const admin    = userHasRole(u, 'admin');
-      const reviewer = userHasRole(u, 'returns_reviewer') && !admin;
-      const perms    = Array.isArray(u.permissions) ? u.permissions : [];
-      const ok = admin || reviewer || perms.includes('shipping_followups') || perms.includes('return_review')
-        || userRoles(u).includes('returns_reviewer');
+      const admin      = userHasRole(u, 'admin');
+      const reviewer   = userHasRole(u, 'returns_reviewer') && !admin;
+      const teamLeader = userHasRole(u, 'supervisor');
+      const perms      = Array.isArray(u.permissions) ? u.permissions : [];
+      const collects   = admin || userRoles(u).includes('returns_reviewer')
+        || perms.includes('shipping_followups') || perms.includes('return_review');
+      const ok = collects || teamLeader;   // Team Leader = monitoring access
       if (!ok) { router.replace('/dashboard'); return; }
       setIsAdmin(admin);
       setIsReviewer(reviewer);
+      setSeesAccountability(admin || teamLeader);
+      setShowMoney(!reviewer && (admin || perms.includes('shipping_followups')));
+      setCanCollect(collects);
       setAllowed(true);
     } catch { router.replace('/'); }
   }, [router]);
@@ -153,10 +165,11 @@ export default function ReturnsCollectionPage() {
   const fetchAll = useCallback(async () => {
     try {
       setLoading(true);
-      /* Reviewers get NO financial analytics — only the queue. */
+      /* Reviewers and Team Leaders get NO financial analytics — only the queue
+         (the analytics endpoint would 403 them anyway). */
       const recRes = await getReturnCollections();
       setRecords(recRes.data);
-      if (!isReviewer) {
+      if (showMoney) {
         const anaRes = await getReturnAnalytics();
         setAnalytics(anaRes.data);
       }
@@ -165,7 +178,7 @@ export default function ReturnsCollectionPage() {
     } finally {
       setLoading(false);
     }
-  }, [isReviewer]);
+  }, [showMoney]);
 
   useEffect(() => { if (allowed) fetchAll(); }, [allowed, fetchAll]);
 
@@ -176,14 +189,14 @@ export default function ReturnsCollectionPage() {
   /* Admin-only: distinct confirmation agents present in the loaded rows — powers
      the "تصفية بموظف التأكيد" dropdown. */
   const confirmationAgents = useMemo(() => {
-    if (!isAdmin) return [] as { email: string; name: string }[];
+    if (!seesAccountability) return [] as { email: string; name: string }[];
     const map = new Map<string, string>();
     for (const r of records) {
       const email = (r.confirmation_agent_email ?? '').trim();
       if (email) map.set(email, r.confirmation_agent_name || email);
     }
     return [...map.entries()].map(([email, name]) => ({ email, name })).sort((a, b) => a.name.localeCompare(b.name, 'ar'));
-  }, [records, isAdmin]);
+  }, [records, seesAccountability]);
 
   /* Distinct product names across ALL loaded rows (every status) — powers the
      'كل المنتجات' dropdown. Stable while switching tabs. */
@@ -337,7 +350,7 @@ export default function ReturnsCollectionPage() {
       setRecords((prev) => prev.map((r) => (r.id === payTarget.id ? { ...r, ...res.data } : r)));
       setPayTarget(null);
       // commission accrual changed → refresh analytics (reviewers have no analytics)
-      if (!isReviewer) getReturnAnalytics().then((a) => setAnalytics(a.data)).catch(() => {});
+      if (showMoney) getReturnAnalytics().then((a) => setAnalytics(a.data)).catch(() => {});
       showToast('تم تسجيل التحصيل ✓', 'success');
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'تعذّر تسجيل التحصيل';
@@ -500,8 +513,8 @@ export default function ReturnsCollectionPage() {
               </button>
             )}
           </div>
-          {/* Admin-only: filter every return caused by a specific confirmation agent. */}
-          {isAdmin && (
+          {/* Admin + Team Leader: filter every return caused by a specific confirmation agent. */}
+          {seesAccountability && (
             <select
               value={agentFilter}
               onChange={(e) => setAgentFilter(e.target.value)}
@@ -589,9 +602,9 @@ export default function ReturnsCollectionPage() {
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المنتج</th>
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">تاريخ الطلب</th>
                     <th className="text-right font-semibold px-4 py-3">ملاحظات</th>
-                    {isAdmin && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">موظف التأكيد</th>}
-                    {!isReviewer && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المُحصّل</th>}
-                    {!isReviewer && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العمولة</th>}
+                    {seesAccountability && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">موظف التأكيد</th>}
+                    {showMoney && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المُحصّل</th>}
+                    {showMoney && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العمولة</th>}
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الإجراءات</th>
                   </tr>
                 </thead>
@@ -623,16 +636,16 @@ export default function ReturnsCollectionPage() {
                             />
                           )}
                         </td>
-                        {/* Accountability — the agent who confirmed the original order (admin only). */}
-                        {isAdmin && (
+                        {/* Accountability — the agent who confirmed the original order (admin + TL). */}
+                        {seesAccountability && (
                           <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">
                             {r.confirmation_agent_name
                               ? <span className="inline-flex px-2 py-0.5 rounded-lg text-xs font-medium bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">{r.confirmation_agent_name}</span>
                               : <span className="text-slate-300 dark:text-slate-600">—</span>}
                           </td>
                         )}
-                        {!isReviewer && activeTab === 'paid' && <td className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{fmt(r.collected_amount)} ج.م</td>}
-                        {!isReviewer && activeTab === 'paid' && (
+                        {showMoney && activeTab === 'paid' && <td className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{fmt(r.collected_amount)} ج.م</td>}
+                        {showMoney && activeTab === 'paid' && (
                           <td className="px-4 py-3 font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">
                             {fmt(parseN(r.reviewer_commission) > 0 ? r.reviewer_commission : r.employee_commission)} ج.م
                           </td>
@@ -658,10 +671,13 @@ export default function ReturnsCollectionPage() {
                                     تم معرفة السبب
                                   </button>
                                 )}
-                                <button onClick={() => openPay(r)} disabled={busy}
-                                  className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
-                                  تم الدفع
-                                </button>
+                                {/* Record payment — hidden for monitoring-only Team Leaders. */}
+                                {canCollect && (
+                                  <button onClick={() => openPay(r)} disabled={busy}
+                                    className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                                    تم الدفع
+                                  </button>
+                                )}
                                 {/* Refuse / archive — reviewers don't have this action. */}
                                 {!isReviewer && (
                                   <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"

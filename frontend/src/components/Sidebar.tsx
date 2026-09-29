@@ -22,6 +22,7 @@ interface NavItem {
   agentOnly?:          boolean;   // true = agents only (hidden from admins)
   affiliateOnly?:      boolean;   // true = visible only to plan_type === 'affiliate'
   hideForRoles?:       string[];  // roles explicitly denied this link, even if a permission would allow it
+  allowRoles?:         string[];  // roles granted this link regardless of requiredPermission
   requiredPermission?: string;    // if set, user must have this key (or be admin)
   icon:                React.ReactNode;
   children?:           NavChild[];   // optional sub-links shown when parent is active
@@ -183,7 +184,9 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     href: '/dashboard/returns-collection', label: 'إدارة تحصيل المرتجعات',
-    subLabel: 'Returns', requiredPermission: 'shipping_followups',
+    /* Team Leaders (supervisor) get it by ROLE for monitoring — deliberately NOT
+       via 'shipping_followups', which would also unlock the delayed-shipments page. */
+    subLabel: 'Returns', requiredPermission: 'shipping_followups', allowRoles: ['supervisor'],
     icon: (
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
@@ -391,6 +394,8 @@ export default function Sidebar({
     if (user?.plan_type === 'affiliate' && !AFFILIATE_ALLOWED.has(item.href)) return false;
     // Role-level denylist wins over any permission that would otherwise allow it.
     if (item.hideForRoles && item.hideForRoles.some((r) => has(r))) return false;
+    // Role-level grant (e.g. Team Leader → returns monitoring) without handing out the permission.
+    if (item.allowRoles && item.allowRoles.some((r) => has(r))) return true;
     // Affiliate-exclusive links are hidden from every other plan.
     if (item.affiliateOnly)      return user?.plan_type === 'affiliate';
     if (item.adminOnly)          return has('admin');
