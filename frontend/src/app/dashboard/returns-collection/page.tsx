@@ -41,6 +41,11 @@ const parseN = (v: string | number | null | undefined): number => parseFloat(Str
 const fmt = (v: string | number | null | undefined): string =>
   parseN(v).toLocaleString('en-US', { maximumFractionDigits: 2 });
 
+/* Products on a return row. One parcel can carry several products — the Bosta
+   sync joins their names with '، ' — so split to match each one exactly. */
+const productsOf = (r: ReturnCollection): string[] =>
+  (r.product_name ?? '').split('، ').map((s) => s.trim()).filter(Boolean);
+
 /* Original order date → clean 'DD MMM YYYY' (e.g. 15 Sep 2026). '—' when absent. */
 const fmtOrderDate = (iso: string | null | undefined): string => {
   if (!iso) return '—';
@@ -96,6 +101,8 @@ export default function ReturnsCollectionPage() {
   const [isReviewer, setIsReviewer] = useState(false);
   /* Admin-only: filter the queue by the agent who confirmed the original order. */
   const [agentFilter, setAgentFilter] = useState('');
+  /* Product filter — analyse returns/refusals per product. '' = all products. */
+  const [productFilter, setProductFilter] = useState('');
   const [records,  setRecords]  = useState<ReturnCollection[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [activeTab, setActiveTab] = useState<ReturnCollectionStatus>('pending');
@@ -178,19 +185,38 @@ export default function ReturnsCollectionPage() {
     return [...map.entries()].map(([email, name]) => ({ email, name })).sort((a, b) => a.name.localeCompare(b.name, 'ar'));
   }, [records, isAdmin]);
 
+  /* Distinct product names across ALL loaded rows (every status) — powers the
+     'كل المنتجات' dropdown. Stable while switching tabs. */
+  const productOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of records) productsOf(r).forEach((p) => set.add(p));
+    return [...set].sort((a, b) => a.localeCompare(b, 'ar'));
+  }, [records]);
+
+  /* If a refresh/delete removes the last row of the selected product, fall back
+     to all products instead of showing an empty table with a stale filter. */
+  useEffect(() => {
+    if (productFilter && !productOptions.includes(productFilter)) setProductFilter('');
+  }, [productFilter, productOptions]);
+
+  /* ONE predicate for the dropdown filters (agent + product) so the tab badges
+     and the table can never disagree. */
+  const passesFilters = useCallback((r: ReturnCollection) =>
+    (!agentFilter   || (r.confirmation_agent_email ?? '') === agentFilter) &&
+    (!productFilter || productsOf(r).includes(productFilter)),
+  [agentFilter, productFilter]);
+
   /* ── Derived: bucket records by status for tab counts ────────────────────── */
   const counts = useMemo(() => {
     const c: Record<ReturnCollectionStatus, number> = { pending: 0, no_answer: 0, reason_known: 0, paid: 0, refused: 0 };
-    /* Counts honour the admin agent-filter so the tab badges match the table. */
-    const src = agentFilter ? records.filter((r) => (r.confirmation_agent_email ?? '') === agentFilter) : records;
-    for (const r of src) c[r.status] = (c[r.status] ?? 0) + 1;
+    /* Counts honour the agent + product filters so the tab badges match the table. */
+    for (const r of records) if (passesFilters(r)) c[r.status] = (c[r.status] ?? 0) + 1;
     return c;
-  }, [records, agentFilter]);
+  }, [records, passesFilters]);
 
   const visibleRows = useMemo(() => {
-    let inTab = records.filter((r) => r.status === activeTab);
-    // Admin-only: restrict to returns caused by a specific confirmation agent.
-    if (agentFilter) inTab = inTab.filter((r) => (r.confirmation_agent_email ?? '') === agentFilter);
+    // Status tab → agent/product dropdowns → free-text search, all combined.
+    const inTab = records.filter((r) => r.status === activeTab && passesFilters(r));
     const q = search.trim().toLowerCase();
     if (!q) return inTab;
     // Quick search by phone / customer name / tracking number — for when a
@@ -200,7 +226,7 @@ export default function ReturnsCollectionPage() {
       (r.customer_name ?? '').toLowerCase().includes(q) ||
       (r.tracking_number ?? '').toLowerCase().includes(q),
     );
-  }, [records, activeTab, search, agentFilter]);
+  }, [records, activeTab, search, passesFilters]);
 
   /* ── Actions ─────────────────────────────────────────────────────────────── */
   const handleStatus = async (row: ReturnCollection, status: Exclude<ReturnCollectionStatus, 'paid'>) => {
@@ -489,6 +515,22 @@ export default function ReturnsCollectionPage() {
               ))}
             </select>
           )}
+          {/* Product filter — analyse returns/refusals per product. Shown to
+              everyone (product is already a visible column). */}
+          <select
+            value={productFilter}
+            onChange={(e) => setProductFilter(e.target.value)}
+            title="تصفية بالمنتج"
+            className={`px-3 py-2 rounded-xl text-sm border outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition max-w-[240px] truncate
+              ${productFilter
+                ? 'bg-indigo-50 border-indigo-300 text-indigo-700 dark:bg-indigo-900/30 dark:border-indigo-700 dark:text-indigo-300'
+                : 'bg-slate-50 border-slate-200 text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200'}`}
+          >
+            <option value="">كل المنتجات</option>
+            {productOptions.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
           <button
             onClick={handleCopyNumbers}
             className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium shadow-sm transition whitespace-nowrap
