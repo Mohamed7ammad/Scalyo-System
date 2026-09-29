@@ -58,19 +58,26 @@ function allowReturns(req, res, next) {
   const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
   if (perms.includes('shipping_followups') || perms.includes('return_review')) return next();
   if (hasRole(req.user, 'returns_reviewer')) return next();
-  /* Team Leader (supervisor) — MONITORING access: sees every return and can
-     follow up, but can never collect money or delete (see canCollect / DELETE). */
+  /* Team Leader (supervisor) — READ-ONLY monitoring: sees every return but can't
+     change anything (requireWrite blocks PATCH/pay/sync; DELETE is admin-only). */
   if (hasRole(req.user, 'supervisor')) return next();
   return res.status(403).json({ error: 'مطلوب صلاحيات المدير' });
 }
 
-/* May this caller record a collection (money)? Admins, queue agents
-   (shipping_followups) and Returns Reviewers — NOT a team leader whose only
-   way into this module is the supervisor role. */
-function canCollect(user) {
+/* May this caller WRITE to return records — status, notes, payments, sync?
+   Admins, queue agents (shipping_followups) and Returns Reviewers. A Team
+   Leader whose only way into this module is the supervisor role is STRICTLY
+   READ-ONLY (view + monitor). */
+function canWrite(user) {
   if (hasRole(user, 'admin') || hasRole(user, 'returns_reviewer')) return true;
   const perms = Array.isArray(user.permissions) ? user.permissions : [];
   return perms.includes('shipping_followups') || perms.includes('return_review');
+}
+
+/* Route guard for every mutating endpoint (PATCH, pay, sync). */
+function requireWrite(req, res, next) {
+  if (canWrite(req.user)) return next();
+  return res.status(403).json({ error: 'التيم ليدر للعرض والمتابعة فقط — لا يمكنه تعديل المرتجعات' });
 }
 
 /* May this caller see the confirmation-agent accountability data? Admins and
@@ -213,7 +220,7 @@ router.get('/', authenticate, allowReturns, async (req, res) => {
    Move a record through the pending → no_answer → follow_up queue and/or edit
    notes. Claim-on-action: the first agent to act takes ownership (handled_by).
    ════════════════════════════════════════════════════════════════════════════ */
-router.patch('/:id', authenticate, allowReturns, async (req, res) => {
+router.patch('/:id', authenticate, allowReturns, requireWrite, async (req, res) => {
   const businessId = req.user.business_id;
   const { id }     = req.params;
   const hasStatus  = Object.prototype.hasOwnProperty.call(req.body, 'status');
@@ -292,13 +299,11 @@ router.patch('/:id', authenticate, allowReturns, async (req, res) => {
     const params = [];
     if (hasStatus) { params.push(String(req.body.status)); sets.push(`status = $${params.length}`); }
     if (hasNotes)  { params.push(req.body.notes == null ? '' : String(req.body.notes)); sets.push(`notes = $${params.length}`); }
-    /* Claim-on-action — but ONLY for people who can collect. A monitoring-only
-       Team Leader must never become the row's handler: a later agent collection
-       accrues its 40% to handled_by, which would divert it to the TL. */
-    if (canCollect(req.user)) {
-      params.push(req.user.id);
-      sets.push(`handled_by = COALESCE(handled_by, $${params.length})`);
-    }
+    /* Claim-on-action for the acting worker if the row is still unhandled.
+       (Read-only Team Leaders never get here — requireWrite rejects them — so
+       they can never become a row's handler / divert an agent's 40%.) */
+    params.push(req.user.id);
+    sets.push(`handled_by = COALESCE(handled_by, $${params.length})`);
     sets.push('updated_at = NOW()');
 
     params.push(id, businessId);
@@ -324,12 +329,7 @@ router.patch('/:id', authenticate, allowReturns, async (req, res) => {
      • Returns Reviewer → 30% of the collected amount, paid IMMEDIATELY as a
        treasury EXPENSE (source='return_review_commission'), ONE row per return.
    ════════════════════════════════════════════════════════════════════════════ */
-router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
-  /* Team Leaders are monitoring-only: recording money (treasury revenue +
-     commission accrual) is reserved for admins, queue agents and reviewers. */
-  if (!canCollect(req.user)) {
-    return res.status(403).json({ error: 'التيم ليدر للمتابعة فقط — لا يمكنه تسجيل التحصيل' });
-  }
+router.post('/:id/pay', authenticate, allowReturns, requireWrite, async (req, res) => {
   const businessId = req.user.business_id;
   const { id }     = req.params;
 
@@ -455,7 +455,7 @@ router.post('/:id/pay', authenticate, allowReturns, async (req, res) => {
    touches agent work (status / amounts / commission / handled_by) on existing
    rows — only refreshes contact + product fields → rows persist permanently.
    ════════════════════════════════════════════════════════════════════════════ */
-router.post('/sync', authenticate, allowReturns, async (req, res) => {
+router.post('/sync', authenticate, allowReturns, requireWrite, async (req, res) => {
   const businessId = req.user.business_id;
 
   let parcels;

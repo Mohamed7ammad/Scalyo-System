@@ -104,8 +104,9 @@ export default function ReturnsCollectionPage() {
   /* Money (analytics cards, collected/commission columns): admins + queue agents
      only — never reviewers or monitoring-only Team Leaders. */
   const [showMoney, setShowMoney] = useState(false);
-  /* May record «تم الدفع»? Mirrors backend canCollect — Team Leaders can't. */
-  const [canCollect, setCanCollect] = useState(false);
+  /* May WRITE (status, notes, payment, sync)? Mirrors backend canWrite —
+     Team Leaders are strictly read-only (view + monitor). */
+  const [canWrite, setCanWrite] = useState(false);
   /* Admin-only: filter the queue by the agent who confirmed the original order. */
   const [agentFilter, setAgentFilter] = useState('');
   /* Product filter — analyse returns/refusals per product. '' = all products. */
@@ -156,7 +157,7 @@ export default function ReturnsCollectionPage() {
       setIsReviewer(reviewer);
       setSeesAccountability(admin || teamLeader);
       setShowMoney(!reviewer && (admin || perms.includes('shipping_followups')));
-      setCanCollect(collects);
+      setCanWrite(collects);
       setAllowed(true);
     } catch { router.replace('/'); }
   }, [router]);
@@ -415,6 +416,7 @@ export default function ReturnsCollectionPage() {
               متابعة الشحنات العائدة · تحصيل رسوم المرتجع · عمولات الموظفين
             </p>
           </div>
+          {canWrite && (
           <button
             onClick={handleSync}
             disabled={syncing}
@@ -427,6 +429,7 @@ export default function ReturnsCollectionPage() {
             </svg>
             {syncing ? 'جارٍ التحديث…' : 'تحديث المرتجعات'}
           </button>
+          )}
         </div>
 
         {/* Analytics cards — hidden entirely for the Returns Reviewer. */}
@@ -621,16 +624,22 @@ export default function ReturnsCollectionPage() {
                         </td>
                         {/* Original order date — visible to everyone incl. reviewers. */}
                         <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr">{fmtOrderDate(r.order_created_at)}</td>
-                        <td className="px-4 py-3">
-                          {r.status === 'paid' ? (
-                            <span className="text-xs text-slate-500 dark:text-slate-400">{r.notes || '—'}</span>
+                        {/* Notes — full multi-line textarea (saved on blur). Paid rows and
+                            read-only Team Leaders see the wrapped text instead. The row grows
+                            to fit either way. */}
+                        <td className="px-4 py-3 min-w-[13rem] max-w-[20rem]">
+                          {(r.status === 'paid' || !canWrite) ? (
+                            <p className="text-xs leading-relaxed text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-words">
+                              {r.notes || '—'}
+                            </p>
                           ) : (
-                            <input
-                              type="text"
+                            <textarea
+                              rows={2}
                               defaultValue={r.notes ?? ''}
                               placeholder="أضف ملاحظة…"
                               onBlur={(e) => handleNotesBlur(r, e.target.value)}
-                              className="w-40 px-2 py-1 rounded-lg text-xs bg-slate-50 dark:bg-slate-800
+                              className="w-full min-h-[60px] resize-y px-2 py-1.5 rounded-lg text-xs leading-relaxed
+                                whitespace-pre-wrap break-words bg-slate-50 dark:bg-slate-800
                                 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200
                                 outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
                             />
@@ -652,8 +661,8 @@ export default function ReturnsCollectionPage() {
                         )}
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            {(r.status === 'paid' || r.status === 'refused') ? (
-                              /* Terminal states — badge only (archived). */
+                            {(!canWrite || r.status === 'paid' || r.status === 'refused') ? (
+                              /* Terminal states, or a read-only Team Leader — status badge only. */
                               <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_BADGE[r.status]}`}>
                                 {STATUS_LABEL[r.status]}
                               </span>
@@ -671,13 +680,10 @@ export default function ReturnsCollectionPage() {
                                     تم معرفة السبب
                                   </button>
                                 )}
-                                {/* Record payment — hidden for monitoring-only Team Leaders. */}
-                                {canCollect && (
-                                  <button onClick={() => openPay(r)} disabled={busy}
-                                    className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
-                                    تم الدفع
-                                  </button>
-                                )}
+                                <button onClick={() => openPay(r)} disabled={busy}
+                                  className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                                  تم الدفع
+                                </button>
                                 {/* Refuse / archive — reviewers don't have this action. */}
                                 {!isReviewer && (
                                   <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"
