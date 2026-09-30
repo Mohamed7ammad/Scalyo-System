@@ -1680,6 +1680,9 @@ export interface ReturnCollection {
   /* Reviewer flag: customer says nobody called them to confirm → possible fake
      confirmation (accountability for the confirmation team). */
   unconfirmed_claim?:        boolean;
+  /* Team Leader's investigation reply to that complaint (e.g. a Google Drive
+     link to the confirmation call). Written by admins / Team Leaders only. */
+  team_leader_reply?:        string | null;
   created_at:          string;
   updated_at:          string;
 }
@@ -1711,7 +1714,7 @@ export const getReturnCollections = (
 /** Move a record through pending → no_answer → follow_up and/or edit notes. */
 export const updateReturnCollection = (
   id: number,
-  data: { status?: Exclude<ReturnCollectionStatus, 'paid'>; notes?: string; unconfirmed_claim?: boolean },
+  data: { status?: Exclude<ReturnCollectionStatus, 'paid'>; notes?: string; unconfirmed_claim?: boolean; team_leader_reply?: string },
 ) =>
   api.patch<ReturnCollection>(`/api/return-collections/${id}`, data);
 

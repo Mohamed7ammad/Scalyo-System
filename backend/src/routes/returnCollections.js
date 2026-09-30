@@ -136,6 +136,10 @@ pool.query(`
      "no one ever called me to confirm" — surfaces possibly FAKE confirmations
      (filterable, and combinable with the confirmation-agent filter). */
   .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS unconfirmed_claim BOOLEAN NOT NULL DEFAULT FALSE`))
+  /* Team Leader's investigation reply to a confirmation complaint — typically a
+     Google Drive link to the confirmation call recording as proof. Written ONLY
+     by admins / Team Leaders (see PATCH permissions); readable by everyone. */
+  .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS team_leader_reply TEXT`))
   /* One-time status rename: the old 'follow_up' bucket is now 'reason_known'. */
   .then(() => pool.query(`UPDATE return_collections SET status = 'reason_known' WHERE status = 'follow_up'`))
   .then((r) => console.log(`✅  return_collections table ready (migrated ${r?.rowCount ?? 0} follow_up → reason_known)`))
@@ -224,16 +228,41 @@ router.get('/', authenticate, allowReturns, async (req, res) => {
    Move a record through the pending → no_answer → follow_up queue and/or edit
    notes. Claim-on-action: the first agent to act takes ownership (handled_by).
    ════════════════════════════════════════════════════════════════════════════ */
-router.patch('/:id', authenticate, allowReturns, requireWrite, async (req, res) => {
+router.patch('/:id', authenticate, allowReturns, async (req, res) => {
   const businessId = req.user.business_id;
   const { id }     = req.params;
-  const hasStatus  = Object.prototype.hasOwnProperty.call(req.body, 'status');
-  const hasNotes   = Object.prototype.hasOwnProperty.call(req.body, 'notes');
-  const hasClaim   = Object.prototype.hasOwnProperty.call(req.body, 'unconfirmed_claim');
+  const body       = req.body || {};
+  const has        = (k) => Object.prototype.hasOwnProperty.call(body, k);
+  const hasStatus  = has('status');
+  const hasNotes   = has('notes');
+  const hasClaim   = has('unconfirmed_claim');
+  const hasReply   = has('team_leader_reply');
 
-  if (!hasStatus && !hasNotes && !hasClaim) {
+  /* ── Permissions (explicit — this route does NOT use requireWrite) ──────────
+     • Writers (admin / queue agents / reviewers) may PATCH status, notes, claim.
+     • team_leader_reply is writable ONLY by admins and Team Leaders.
+     • A read-only Team Leader may PATCH ONLY a payload that is EXACTLY
+       { team_leader_reply } — any other key (status, notes, the claim flag,
+       anything else) → 403. They stay blocked from pay / sync / delete. */
+  const isTeamLeader = hasRole(req.user, 'supervisor');
+  const replyOnly    = hasReply && Object.keys(body).length === 1;
+  if (hasReply && !(hasRole(req.user, 'admin') || isTeamLeader)) {
+    return res.status(403).json({ error: 'رد التيم ليدر يكتبه التيم ليدر أو المدير فقط' });
+  }
+  if (!canWrite(req.user) && !(isTeamLeader && replyOnly)) {
+    return res.status(403).json({ error: 'التيم ليدر للعرض والمتابعة فقط — لا يمكنه تعديل المرتجعات' });
+  }
+
+  if (!hasStatus && !hasNotes && !hasClaim && !hasReply) {
     return res.status(400).json({ error: 'لا توجد حقول للتحديث' });
   }
+  if (hasReply && body.team_leader_reply !== null && typeof body.team_leader_reply !== 'string') {
+    return res.status(400).json({ error: 'قيمة غير صالحة لرد التيم ليدر' });
+  }
+  if (hasReply && String(body.team_leader_reply ?? '').length > 2000) {
+    return res.status(400).json({ error: 'رد التيم ليدر طويل جدًا (الحد 2000 حرف)' });
+  }
+  const replyValue = hasReply ? String(body.team_leader_reply ?? '') : null;
   if (hasStatus && !PATCHABLE_STATUSES.includes(String(req.body.status))) {
     return res.status(400).json({ error: 'حالة غير صالحة (الدفع يتم من زر تم الدفع)' });
   }
@@ -283,15 +312,16 @@ router.patch('/:id', authenticate, allowReturns, requireWrite, async (req, res) 
         }
         const notes = hasNotes ? (req.body.notes == null ? '' : String(req.body.notes)) : row.notes;
         const claim = hasClaim ? req.body.unconfirmed_claim : row.unconfirmed_claim;
+        const reply = hasReply ? replyValue : row.team_leader_reply;
         const upd = await client.query(
           `UPDATE return_collections
-             SET status = $1, notes = $2, unconfirmed_claim = $3,
+             SET status = $1, notes = $2, unconfirmed_claim = $3, team_leader_reply = $4,
                  collected_amount = 0, employee_commission = 0,
                  reviewer_commission = 0, reviewer_commission_tx_id = NULL, reviewer_id = NULL,
                  updated_at = NOW()
-           WHERE id = $4 AND business_id = $5
+           WHERE id = $5 AND business_id = $6
            RETURNING *`,
-          [String(req.body.status), notes, claim, id, businessId]
+          [String(req.body.status), notes, claim, reply, id, businessId]
         );
         await client.query('COMMIT');
         return res.json(upd.rows[0]);
@@ -310,11 +340,15 @@ router.patch('/:id', authenticate, allowReturns, requireWrite, async (req, res) 
     if (hasStatus) { params.push(String(req.body.status)); sets.push(`status = $${params.length}`); }
     if (hasNotes)  { params.push(req.body.notes == null ? '' : String(req.body.notes)); sets.push(`notes = $${params.length}`); }
     if (hasClaim)  { params.push(req.body.unconfirmed_claim); sets.push(`unconfirmed_claim = $${params.length}`); }
-    /* Claim-on-action for the acting worker if the row is still unhandled.
-       (Read-only Team Leaders never get here — requireWrite rejects them — so
-       they can never become a row's handler / divert an agent's 40%.) */
-    params.push(req.user.id);
-    sets.push(`handled_by = COALESCE(handled_by, $${params.length})`);
+    if (hasReply)  { params.push(replyValue); sets.push(`team_leader_reply = $${params.length}`); }
+    /* Claim-on-action for the acting worker if the row is still unhandled — but
+       NOT for a reply-only save: investigating a complaint isn't handling the
+       return, and a Team Leader must never become the handler (a later agent
+       collection accrues its 40% to handled_by). */
+    if (!replyOnly) {
+      params.push(req.user.id);
+      sets.push(`handled_by = COALESCE(handled_by, $${params.length})`);
+    }
     sets.push('updated_at = NOW()');
 
     params.push(id, businessId);

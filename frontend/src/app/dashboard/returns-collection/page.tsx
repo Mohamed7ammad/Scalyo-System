@@ -46,6 +46,22 @@ const fmt = (v: string | number | null | undefined): string =>
 const productsOf = (r: ReturnCollection): string[] =>
   (r.product_name ?? '').split('، ').map((s) => s.trim()).filter(Boolean);
 
+/* Render text with http(s) URLs as clickable links — the Team Leader pastes a
+   Google Drive call-recording link as proof. React escapes all text, and only
+   http/https hrefs are ever produced (no javascript: etc.). */
+const URL_RE = /(https?:\/\/[^\s]+)/g;
+const urlsIn = (t: string | null | undefined): string[] => (t ?? '').match(URL_RE) ?? [];
+function LinkifiedText({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(URL_RE).map((part, i) => /^https?:\/\//.test(part)
+        ? <a key={i} href={part} target="_blank" rel="noopener noreferrer" dir="ltr"
+            className="underline text-sky-700 dark:text-sky-300 break-all">{part}</a>
+        : <span key={i}>{part}</span>)}
+    </>
+  );
+}
+
 /* Original order date → clean 'DD MMM YYYY' (e.g. 15 Sep 2026). '—' when absent. */
 const fmtOrderDate = (iso: string | null | undefined): string => {
   if (!iso) return '—';
@@ -107,6 +123,9 @@ export default function ReturnsCollectionPage() {
   /* May WRITE (status, notes, payment, sync)? Mirrors backend canWrite —
      Team Leaders are strictly read-only (view + monitor). */
   const [canWrite, setCanWrite] = useState(false);
+  /* May edit the Team Leader investigation reply? Admins + Team Leaders only
+     (the ONE field a read-only Team Leader can write). */
+  const [canEditTlReply, setCanEditTlReply] = useState(false);
   /* Admin-only: filter the queue by the agent who confirmed the original order. */
   const [agentFilter, setAgentFilter] = useState('');
   /* Product filter — analyse returns/refusals per product. '' = all products. */
@@ -160,6 +179,7 @@ export default function ReturnsCollectionPage() {
       setSeesAccountability(admin || teamLeader);
       setShowMoney(!reviewer && (admin || perms.includes('shipping_followups')));
       setCanWrite(collects);
+      setCanEditTlReply(admin || teamLeader);
       setAllowed(true);
     } catch { router.replace('/'); }
   }, [router]);
@@ -278,6 +298,19 @@ export default function ReturnsCollectionPage() {
 
   /* Toggle the "customer says nobody called to confirm" flag — optimistic, saved
      immediately via PATCH, rolled back if the save fails. */
+  /* Save the Team Leader's investigation reply on blur (reply-only PATCH — the
+     one write a read-only Team Leader is allowed). */
+  const handleTlReplyBlur = async (row: ReturnCollection, value: string) => {
+    if (value === (row.team_leader_reply ?? '')) return;
+    try {
+      const res = await updateReturnCollection(row.id, { team_leader_reply: value });
+      setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, ...res.data } : r)));
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'تعذّر حفظ رد التيم ليدر';
+      showToast(msg, 'error');
+    }
+  };
+
   const handleClaimToggle = async (row: ReturnCollection, checked: boolean) => {
     setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, unconfirmed_claim: checked } : r)));
     try {
@@ -702,6 +735,40 @@ export default function ReturnsCollectionPage() {
                               ⚠ العميل ادعى عدم التأكيد
                             </span>
                           ) : null}
+                          {/* Team Leader investigation reply — on complaint rows (or wherever a
+                              reply already exists). Admin + TL edit; everyone else reads. */}
+                          {(r.unconfirmed_claim || r.team_leader_reply) && (
+                            canEditTlReply ? (
+                              <div className="mt-2 rounded-lg border border-amber-200 dark:border-amber-800/60 bg-amber-50/70 dark:bg-amber-900/15 p-2">
+                                <label className="block text-[10px] font-bold text-amber-800 dark:text-amber-300 mb-1">
+                                  رد التيم ليدر (رابط المكالمة)
+                                </label>
+                                <textarea
+                                  rows={2}
+                                  defaultValue={r.team_leader_reply ?? ''}
+                                  placeholder="الصق رابط تسجيل مكالمة التأكيد (Google Drive) أو نتيجة التحقيق…"
+                                  onBlur={(e) => handleTlReplyBlur(r, e.target.value)}
+                                  className="w-full min-h-[48px] resize-y px-2 py-1 rounded-md text-[11px] leading-relaxed
+                                    whitespace-pre-wrap break-words bg-white/80 dark:bg-slate-900/60
+                                    border border-amber-200 dark:border-amber-800/60 text-slate-700 dark:text-slate-200
+                                    outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                                />
+                                {urlsIn(r.team_leader_reply).map((u) => (
+                                  <a key={u} href={u} target="_blank" rel="noopener noreferrer"
+                                    className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-sky-700 dark:text-sky-300 hover:underline">
+                                    فتح التسجيل ↗
+                                  </a>
+                                ))}
+                              </div>
+                            ) : r.team_leader_reply ? (
+                              <div className="mt-2 rounded-lg border border-amber-200 dark:border-amber-800/60 bg-amber-50/70 dark:bg-amber-900/15 p-2">
+                                <p className="text-[10px] font-bold text-amber-800 dark:text-amber-300 mb-0.5">رد التيم ليدر</p>
+                                <p className="text-[11px] leading-relaxed text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words">
+                                  <LinkifiedText text={r.team_leader_reply} />
+                                </p>
+                              </div>
+                            ) : null
+                          )}
                         </td>
                         {/* Accountability — the agent who confirmed the original order (admin + TL). */}
                         {seesAccountability && (
