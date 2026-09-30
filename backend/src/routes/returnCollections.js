@@ -132,6 +132,10 @@ pool.query(`
   .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS reviewer_id VARCHAR(255)`))
   .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS reviewer_commission NUMERIC(12,2) NOT NULL DEFAULT 0`))
   .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS reviewer_commission_tx_id INTEGER`))
+  /* Confirmation accountability: the reviewer flags a return whose customer says
+     "no one ever called me to confirm" — surfaces possibly FAKE confirmations
+     (filterable, and combinable with the confirmation-agent filter). */
+  .then(() => pool.query(`ALTER TABLE return_collections ADD COLUMN IF NOT EXISTS unconfirmed_claim BOOLEAN NOT NULL DEFAULT FALSE`))
   /* One-time status rename: the old 'follow_up' bucket is now 'reason_known'. */
   .then(() => pool.query(`UPDATE return_collections SET status = 'reason_known' WHERE status = 'follow_up'`))
   .then((r) => console.log(`✅  return_collections table ready (migrated ${r?.rowCount ?? 0} follow_up → reason_known)`))
@@ -225,12 +229,17 @@ router.patch('/:id', authenticate, allowReturns, requireWrite, async (req, res) 
   const { id }     = req.params;
   const hasStatus  = Object.prototype.hasOwnProperty.call(req.body, 'status');
   const hasNotes   = Object.prototype.hasOwnProperty.call(req.body, 'notes');
+  const hasClaim   = Object.prototype.hasOwnProperty.call(req.body, 'unconfirmed_claim');
 
-  if (!hasStatus && !hasNotes) {
+  if (!hasStatus && !hasNotes && !hasClaim) {
     return res.status(400).json({ error: 'لا توجد حقول للتحديث' });
   }
   if (hasStatus && !PATCHABLE_STATUSES.includes(String(req.body.status))) {
     return res.status(400).json({ error: 'حالة غير صالحة (الدفع يتم من زر تم الدفع)' });
+  }
+  /* Strict boolean — never coerce "false"/0/'' into a truthy flag. */
+  if (hasClaim && typeof req.body.unconfirmed_claim !== 'boolean') {
+    return res.status(400).json({ error: 'قيمة غير صالحة لـ unconfirmed_claim' });
   }
 
   try {
@@ -273,15 +282,16 @@ router.patch('/:id', authenticate, allowReturns, requireWrite, async (req, res) 
           );
         }
         const notes = hasNotes ? (req.body.notes == null ? '' : String(req.body.notes)) : row.notes;
+        const claim = hasClaim ? req.body.unconfirmed_claim : row.unconfirmed_claim;
         const upd = await client.query(
           `UPDATE return_collections
-             SET status = $1, notes = $2,
+             SET status = $1, notes = $2, unconfirmed_claim = $3,
                  collected_amount = 0, employee_commission = 0,
                  reviewer_commission = 0, reviewer_commission_tx_id = NULL, reviewer_id = NULL,
                  updated_at = NOW()
-           WHERE id = $3 AND business_id = $4
+           WHERE id = $4 AND business_id = $5
            RETURNING *`,
-          [String(req.body.status), notes, id, businessId]
+          [String(req.body.status), notes, claim, id, businessId]
         );
         await client.query('COMMIT');
         return res.json(upd.rows[0]);
@@ -299,6 +309,7 @@ router.patch('/:id', authenticate, allowReturns, requireWrite, async (req, res) 
     const params = [];
     if (hasStatus) { params.push(String(req.body.status)); sets.push(`status = $${params.length}`); }
     if (hasNotes)  { params.push(req.body.notes == null ? '' : String(req.body.notes)); sets.push(`notes = $${params.length}`); }
+    if (hasClaim)  { params.push(req.body.unconfirmed_claim); sets.push(`unconfirmed_claim = $${params.length}`); }
     /* Claim-on-action for the acting worker if the row is still unhandled.
        (Read-only Team Leaders never get here — requireWrite rejects them — so
        they can never become a row's handler / divert an agent's 40%.) */

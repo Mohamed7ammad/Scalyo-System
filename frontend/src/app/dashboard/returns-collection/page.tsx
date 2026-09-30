@@ -111,6 +111,8 @@ export default function ReturnsCollectionPage() {
   const [agentFilter, setAgentFilter] = useState('');
   /* Product filter — analyse returns/refusals per product. '' = all products. */
   const [productFilter, setProductFilter] = useState('');
+  /* «شكاوى التأكيد» — only rows the reviewer flagged "customer says nobody called". */
+  const [claimsOnly, setClaimsOnly] = useState(false);
   const [records,  setRecords]  = useState<ReturnCollection[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [activeTab, setActiveTab] = useState<ReturnCollectionStatus>('pending');
@@ -217,8 +219,12 @@ export default function ReturnsCollectionPage() {
      and the table can never disagree. */
   const passesFilters = useCallback((r: ReturnCollection) =>
     (!agentFilter   || (r.confirmation_agent_email ?? '') === agentFilter) &&
-    (!productFilter || productsOf(r).includes(productFilter)),
-  [agentFilter, productFilter]);
+    (!productFilter || productsOf(r).includes(productFilter)) &&
+    (!claimsOnly    || r.unconfirmed_claim === true),
+  [agentFilter, productFilter, claimsOnly]);
+
+  /* Total flagged rows (all tabs) — shown on the «شكاوى التأكيد» toggle. */
+  const claimsCount = useMemo(() => records.filter((r) => r.unconfirmed_claim === true).length, [records]);
 
   /* ── Derived: bucket records by status for tab counts ────────────────────── */
   const counts = useMemo(() => {
@@ -267,6 +273,19 @@ export default function ReturnsCollectionPage() {
       setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, ...res.data } : r)));
     } catch {
       showToast('تعذّر حفظ الملاحظة', 'error');
+    }
+  };
+
+  /* Toggle the "customer says nobody called to confirm" flag — optimistic, saved
+     immediately via PATCH, rolled back if the save fails. */
+  const handleClaimToggle = async (row: ReturnCollection, checked: boolean) => {
+    setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, unconfirmed_claim: checked } : r)));
+    try {
+      const res = await updateReturnCollection(row.id, { unconfirmed_claim: checked });
+      setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, ...res.data } : r)));
+    } catch {
+      setRecords((prev) => prev.map((r) => (r.id === row.id ? { ...r, unconfirmed_claim: !checked } : r)));
+      showToast('تعذّر حفظ علامة عدم التأكيد', 'error');
     }
   };
 
@@ -547,6 +566,27 @@ export default function ReturnsCollectionPage() {
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
+          {/* «شكاوى التأكيد» — customers who said nobody called to confirm. Pair with
+              the confirmation-agent filter to see whose confirmations they were. */}
+          <button
+            onClick={() => setClaimsOnly((v) => !v)}
+            aria-pressed={claimsOnly}
+            title="عرض المرتجعات التي ادعى عميلها أن أحدًا لم يتصل لتأكيد الطلب"
+            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border transition whitespace-nowrap
+              ${claimsOnly
+                ? 'bg-rose-600 border-rose-600 text-white shadow-sm'
+                : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-rose-50 hover:border-rose-200 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200'}`}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.279 3H5z" />
+            </svg>
+            شكاوى التأكيد
+            <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-xs font-bold
+              ${claimsOnly ? 'bg-white/25 text-white' : 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300'}`}>
+              {claimsCount}
+            </span>
+          </button>
           <button
             onClick={handleCopyNumbers}
             className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium shadow-sm transition whitespace-nowrap
@@ -644,6 +684,24 @@ export default function ReturnsCollectionPage() {
                                 outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition"
                             />
                           )}
+                          {/* "Customer says nobody called to confirm" — editable by writers on
+                              every row (no money effect); read-only users see a badge only. */}
+                          {canWrite ? (
+                            <label className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium cursor-pointer select-none
+                              ${r.unconfirmed_claim ? 'text-rose-700 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                              <input
+                                type="checkbox"
+                                checked={r.unconfirmed_claim === true}
+                                onChange={(e) => handleClaimToggle(r, e.target.checked)}
+                                className="w-3.5 h-3.5 rounded accent-rose-600 cursor-pointer"
+                              />
+                              العميل ادعى عدم التأكيد
+                            </label>
+                          ) : r.unconfirmed_claim ? (
+                            <span className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">
+                              ⚠ العميل ادعى عدم التأكيد
+                            </span>
+                          ) : null}
                         </td>
                         {/* Accountability — the agent who confirmed the original order (admin + TL). */}
                         {seesAccountability && (

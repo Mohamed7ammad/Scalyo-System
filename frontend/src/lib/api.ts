@@ -1677,6 +1677,9 @@ export interface ReturnCollection {
   /* Returns-Reviewer flat commission (immediate treasury expense). */
   reviewer_id?:              string | null;
   reviewer_commission?:      number | string;
+  /* Reviewer flag: customer says nobody called them to confirm → possible fake
+     confirmation (accountability for the confirmation team). */
+  unconfirmed_claim?:        boolean;
   created_at:          string;
   updated_at:          string;
 }
@@ -1708,7 +1711,7 @@ export const getReturnCollections = (
 /** Move a record through pending → no_answer → follow_up and/or edit notes. */
 export const updateReturnCollection = (
   id: number,
-  data: { status?: Exclude<ReturnCollectionStatus, 'paid'>; notes?: string },
+  data: { status?: Exclude<ReturnCollectionStatus, 'paid'>; notes?: string; unconfirmed_claim?: boolean },
 ) =>
   api.patch<ReturnCollection>(`/api/return-collections/${id}`, data);
 
