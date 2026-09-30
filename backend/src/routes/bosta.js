@@ -606,6 +606,14 @@ function mapDelivery(d) {
     cod:            Number(d.cod ?? d.specs?.cod ?? 0) || 0,
     city:           [cityStr, zoneStr].filter(Boolean).join(' - ') || '',
     updatedAt:      d.updatedAt ?? d.lastUpdateDate ?? d.createdAt ?? null,
+    /* Bosta's "وقت التوصيل المتوقع" — the latest date the parcel should arrive
+       (e.g. 2026-10-03T20:59:59.999Z = Sat 3 Oct 23:59 Cairo). Verified against
+       the dashboard: `scheduledAt` === sla.orderSla.orderSlaTimestamp. */
+    expectedAt:     d.scheduledAt ?? d.sla?.orderSla?.orderSlaTimestamp ?? null,
+    /* Bosta's own package contents — a fallback label/quantity for parcels that
+       don't match a local order. */
+    itemsCount:     Number(d.specs?.packageDetails?.itemsCount) || null,
+    description:    pickName(d.specs?.packageDetails?.description),
   };
 }
 

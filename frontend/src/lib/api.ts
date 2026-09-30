@@ -378,6 +378,39 @@ export interface InTransitDetailsResponse {
 export const getInTransitDetails = () =>
   api.get<InTransitDetailsResponse>('/api/inventory/in-transit/details');
 
+/* ── Incoming Returns forecast (المرتجعات القادمة) — Bosta return-leg parcels
+   not yet received in the warehouse, per product, by expected arrival day. */
+export interface IncomingReturnArrival {
+  date:  string | null;   // 'YYYY-MM-DD' (Cairo) — Bosta's expected date; null = unknown
+  units: number;
+}
+export interface IncomingReturnProduct {
+  key:           string;
+  name:          string;
+  sku:           string | null;
+  source:        'orders' | 'bosta';   // 'bosta' = parcel not in local orders; label from Bosta
+  current_stock: number | null;        // products.stock_quantity (can be negative); null = not in catalogue
+  total_units:   number;
+  parcels:       number;
+  arrivals:      IncomingReturnArrival[];   // ascending by date, unknown last
+}
+export interface IncomingReturnsResponse {
+  source:     'bosta';
+  today:      string;   // Cairo 'YYYY-MM-DD' — reference for "today / tomorrow / overdue"
+  fetched_at: string;
+  cached:     boolean;
+  totals: {
+    parcels: number; units: number; products: number;
+    bosta_parcels: number;
+    received_excluded: number;   // Bosta still lists them, warehouse already logged them
+    unmatched_parcels: number;
+  };
+  products: IncomingReturnProduct[];
+}
+/** Admin-only. `fresh` forces a live Bosta pull (otherwise served from a short cache). */
+export const getIncomingReturns = (fresh = false) =>
+  api.get<IncomingReturnsResponse>('/api/inventory/incoming-returns', { params: fresh ? { fresh: 1 } : {} });
+
 export const upsertInventory = (ProductName: string, StockQuantity: number) =>
   api.post<InventoryItem>('/api/inventory', { ProductName, StockQuantity });
 
