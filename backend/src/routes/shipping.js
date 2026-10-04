@@ -246,40 +246,10 @@ function resolveBostaCity(raw) {
 function mapToBostaCity(raw) { return resolveBostaCity(raw).name; }
 const normalizeCity = mapToBostaCity;
 
-/* ── Product images for a batch of orders ────────────────────────────────────
-   Builds SKU / name / alias lookups once per dispatch (the catalogue is small),
-   then resolves each order to its product's image_url. Returns a function
-   order → string[] (empty when the product has no image on file). */
-async function buildProductImageResolver(businessId) {
-  const norm = (s) => String(s ?? '').trim().toLowerCase();
-  let rows = [];
-  try {
-    ({ rows } = await pool.query(
-      `SELECT name, sku, aliases, image_url FROM products
-       WHERE business_id = $1 AND COALESCE(TRIM(image_url), '') <> ''`,
-      [businessId]
-    ));
-  } catch (err) {
-    /* Never let an image lookup break dispatch — worst case we ship without
-       open-package (which still succeeds) instead of failing the whole run. */
-    console.warn('[shipping] product image lookup failed — shipping without images:', err.message);
-    return () => [];
-  }
-  const bySku = new Map(), byName = new Map();
-  for (const p of rows) {
-    const url = String(p.image_url).trim();
-    if (p.sku) bySku.set(norm(p.sku), url);
-    byName.set(norm(p.name), url);
-    for (const a of (Array.isArray(p.aliases) ? p.aliases : [])) {
-      if (a && !byName.has(norm(a))) byName.set(norm(a), url);
-    }
-  }
-  console.log(`[shipping] product images on file: ${rows.length}`);
-  return (order) => {
-    const url = bySku.get(norm(order.sku)) || byName.get(norm(order.ProductName));
-    return url ? [url] : [];
-  };
-}
+/* Key an order to its product, for the per-run "Bosta has no image for this
+   product" cache below. SKU when we have one, else the product name. */
+const productKeyOf = (order) =>
+  String(order.sku || order.ProductName || '').trim().toLowerCase() || '(unknown)';
 
 /** True for Bosta's "open-package needs product images" rejection (Oct 2026). */
 const isMissingImageError = (err) =>
@@ -288,25 +258,25 @@ const isMissingImageError = (err) =>
   );
 
 /** Map one DB order row to a Bosta delivery payload.
- *  `images` = product image URLs for this order (see resolveProductImages).
- *  Bosta (Oct 2026) rejects a delivery with HTTP 400 "Product images are required
- *  when allowToOpenPackage is enabled." — so open-package is only requested when
- *  we actually have an image; otherwise we ship WITHOUT it rather than fail. */
-function toBosta(order, allowOpen = false, payWithPoints = false, images = []) {
+ *  NOTE (verified against the live Bosta API, Oct 2026): product images CANNOT be
+ *  supplied here. Bosta rejects a delivery with HTTP 400 "Product images are
+ *  required when allowToOpenPackage is enabled." unless the product carries an
+ *  image INSIDE Bosta's own catalogue (uploaded in their dashboard) — sending
+ *  image URLs in this payload (root or specs.packageDetails, under images /
+ *  productImages / productImage) does NOT satisfy it; all variants were probed
+ *  and still 400'd. So open-package is simply requested or not, and the dispatch
+ *  loop retries without it when Bosta objects. */
+function toBosta(order, allowOpen = false, payWithPoints = false) {
   const { firstName, lastName } = splitName(order.FullName);
   const gov     = resolveBostaCity(order.City || order.Governorate);
-  const imgs      = (Array.isArray(images) ? images : []).filter(Boolean).slice(0, 5);
-  const hasImages = imgs.length > 0;
-  const isAllowed = allowOpen === true && hasImages;
+  const isAllowed = allowOpen === true;
   const useWallet = payWithPoints === true;
 
   // Diagnostic: confirm resolved values before sending to Bosta
   console.log(
     `[toBosta] order=${order.id} | city_raw="${order.City || order.Governorate}"` +
     ` → city="${gov.name}" cityId="${gov.id ?? '(none)'}" code="${gov.code ?? '(none)'}"` +
-    ` | allowOpen=${allowOpen} → isAllowed=${isAllowed}` +
-    `${allowOpen === true && !hasImages ? ' (FORCED OFF — no product image)' : ''}` +
-    ` | images=${imgs.length} | payWithPoints=${useWallet}`
+    ` | allowOpen=${allowOpen} → isAllowed=${isAllowed} | payWithPoints=${useWallet}`
   );
 
   /* Send the EXACT Bosta name AND the cityId/cityCode from Bosta's own
@@ -348,18 +318,9 @@ function toBosta(order, allowOpen = false, payWithPoints = false, images = []) {
         itemsCount:           order.quantity    || 1,
         allowToOpenPackage:   isAllowed, // nested primary
         allowExploration:     isAllowed, // nested alternate
-        /* Product images — required by Bosta whenever open-package is on. The
-           exact key isn't documented, so (like allowToOpenPackage above) we send
-           every plausible variant; unknown keys are ignored by Bosta. If the key
-           is still wrong the dispatch loop retries once WITHOUT open-package, so
-           a shipment can never be blocked by this. */
-        ...(hasImages ? { images: imgs, productImages: imgs, productImage: imgs[0] } : {}),
       },
-      ...(hasImages ? { images: imgs, productImages: imgs } : {}),
       notes: shippingNotes,   // specs-level mirror (Bosta version variance)
     },
-
-    ...(hasImages ? { images: imgs, productImages: imgs } : {}),
 
     // Both casing variants — Bosta V2 inconsistently uses both across endpoints
     dropOffAddress: addressBlock,
@@ -554,13 +515,17 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
        knows to add images rather than silently losing the feature. */
     const shippedWithoutOpenPackage = [];
 
-    const imagesFor = await buildProductImageResolver(businessId);
+    /* Products Bosta has NO catalogue image for (learned from its own 400 during
+       THIS run) — so we only pay the failed round-trip once per product, not once
+       per order. Rebuilt each dispatch, so uploading images in the Bosta dashboard
+       re-enables open-package automatically on the next run. */
+    const noBostaImage = new Set();
 
     console.log(`[shipping/forward] dispatching ${orders.length} order(s) via the throttled Bosta queue…`);
     for (const order of orders) {
       try {
-        const images   = imagesFor(order);
-        const postIt   = (pl) => enqueueBosta(
+        const pKey   = productKeyOf(order);
+        const postIt = (pl) => enqueueBosta(
           () => axios.post(`${BOSTA_BASE}/deliveries`, pl, {
             headers: {
               'Authorization': apiKey,
@@ -574,17 +539,21 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
         /* Funnel every shipment-creation call through the shared global Bosta
            queue: serialized with a safe gap + 429 back-off, so a bulk dispatch
            of dozens of orders (or a webhook spike) never trips the rate limit. */
+        /* Ask for open-package unless Bosta already told us this product has no
+           image in its catalogue. */
+        const wantOpen = allowOpen === true && !noBostaImage.has(pKey);
         let bostaRes;
-        let openPackageDropped = allowOpen === true && images.length === 0;
+        let openPackageDropped = allowOpen === true && !wantOpen;
         try {
-          bostaRes = await postIt(toBosta(order, allowOpen, payWithPoints, images));
+          bostaRes = await postIt(toBosta(order, wantOpen, payWithPoints));
         } catch (err) {
-          /* SAFETY NET: Bosta still wants images (our image key/URL wasn't
-             accepted). Ship it WITHOUT open-package rather than block the order —
-             a shipped parcel beats a perfect payload. */
+          /* SAFETY NET: Bosta wants a product image it doesn't have. Ship WITHOUT
+             open-package rather than block the order — a shipped parcel beats a
+             perfect payload — and skip the doomed attempt for this product again. */
           if (!isMissingImageError(err)) throw err;
-          console.warn(`[shipping] order ${order.id}: Bosta rejected the product image — retrying without open-package`);
-          bostaRes = await postIt(toBosta(order, false, payWithPoints, []));
+          noBostaImage.add(pKey);
+          console.warn(`[shipping] order ${order.id}: Bosta has no product image for "${pKey}" — shipping without open-package`);
+          bostaRes = await postIt(toBosta(order, false, payWithPoints));
           openPackageDropped = true;
         }
         if (openPackageDropped) {
@@ -671,7 +640,7 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
         ? `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length}. متبقٍ ${remaining} طلب — اضغط "إرسال للشحن" مرة أخرى لإكمالها.`
         : `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length} طلب`)
         + (noOpen > 0
-          ? ` — ${noOpen} منها بدون خاصية "فتح الشحنة" لعدم وجود صورة للمنتج. أضف صورة المنتج من «إدارة المخزون» لتفعيلها.`
+          ? ` — ${noOpen} منها بدون خاصية "فتح الشحنة" لأن المنتج ليس له صورة في بوسطة. ارفع صورة المنتج من لوحة بوسطة لتفعيلها تلقائيًا.`
           : ''),
       success,
       failed,
