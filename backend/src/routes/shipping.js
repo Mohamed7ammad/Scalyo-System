@@ -246,11 +246,6 @@ function resolveBostaCity(raw) {
 function mapToBostaCity(raw) { return resolveBostaCity(raw).name; }
 const normalizeCity = mapToBostaCity;
 
-/* Key an order to its product, for the per-run "Bosta has no image for this
-   product" cache below. SKU when we have one, else the product name. */
-const productKeyOf = (order) =>
-  String(order.sku || order.ProductName || '').trim().toLowerCase() || '(unknown)';
-
 /** True for Bosta's "open-package needs product images" rejection (Oct 2026). */
 const isMissingImageError = (err) =>
   /product\s+images?\s+(are|is)\s+required/i.test(
@@ -510,21 +505,14 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
 
     const success = [];
     const failed  = [];
-    /* Orders that shipped WITHOUT open-package because no product image was on
-       file (or Bosta rejected the image) — surfaced in the response so the admin
-       knows to add images rather than silently losing the feature. */
-    const shippedWithoutOpenPackage = [];
 
-    /* Products Bosta has NO catalogue image for (learned from its own 400 during
-       THIS run) — so we only pay the failed round-trip once per product, not once
-       per order. Rebuilt each dispatch, so uploading images in the Bosta dashboard
-       re-enables open-package automatically on the next run. */
-    const noBostaImage = new Set();
+    /* Distinct products blocked by Bosta's missing-image rule this run — surfaced
+       in the response so the admin knows exactly what to fix in Bosta. */
+    const blockedProducts = new Set();
 
     console.log(`[shipping/forward] dispatching ${orders.length} order(s) via the throttled Bosta queue…`);
     for (const order of orders) {
       try {
-        const pKey   = productKeyOf(order);
         const postIt = (pl) => enqueueBosta(
           () => axios.post(`${BOSTA_BASE}/deliveries`, pl, {
             headers: {
@@ -538,27 +526,13 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
 
         /* Funnel every shipment-creation call through the shared global Bosta
            queue: serialized with a safe gap + 429 back-off, so a bulk dispatch
-           of dozens of orders (or a webhook spike) never trips the rate limit. */
-        /* Ask for open-package unless Bosta already told us this product has no
-           image in its catalogue. */
-        const wantOpen = allowOpen === true && !noBostaImage.has(pKey);
-        let bostaRes;
-        let openPackageDropped = allowOpen === true && !wantOpen;
-        try {
-          bostaRes = await postIt(toBosta(order, wantOpen, payWithPoints));
-        } catch (err) {
-          /* SAFETY NET: Bosta wants a product image it doesn't have. Ship WITHOUT
-             open-package rather than block the order — a shipped parcel beats a
-             perfect payload — and skip the doomed attempt for this product again. */
-          if (!isMissingImageError(err)) throw err;
-          noBostaImage.add(pKey);
-          console.warn(`[shipping] order ${order.id}: Bosta has no product image for "${pKey}" — shipping without open-package`);
-          bostaRes = await postIt(toBosta(order, false, payWithPoints));
-          openPackageDropped = true;
-        }
-        if (openPackageDropped) {
-          shippedWithoutOpenPackage.push({ orderId: order.id, product: order.ProductName || '' });
-        }
+           of dozens of orders (or a webhook spike) never trips the rate limit.
+
+           STRICT MODE (owner's decision): open-package is a hard requirement. If
+           Bosta rejects for a missing product image we do NOT silently ship
+           without it — the order is left unshipped and reported, so the parcel
+           always carries the feature the business sells on. */
+        const bostaRes = await postIt(toBosta(order, allowOpen, payWithPoints));
 
         /* Log full Bosta response so we can inspect every returned field */
         console.log('✅ Bosta Success Response Data:', JSON.stringify(bostaRes.data, null, 2));
@@ -603,6 +577,17 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
           err.message                 ??
           'خطأ غير معروف';
 
+        /* Bosta's missing-product-image rejection → a precise, actionable Arabic
+           message naming the product, instead of the raw English string. */
+        if (isMissingImageError(err)) {
+          const pName = (order.ProductName || '').trim() || 'غير محدد';
+          blockedProducts.add(pName);
+          const msg = `فشل الإرسال: يجب رفع صورة للمنتج «${pName}» في لوحة تحكم بوسطة أولاً (خاصية "فتح الشحنة" مفعّلة).`;
+          failed.push({ orderId: order.id, name: order.FullName, phone: order.Phone, error: msg, product: pName, reason: 'missing_product_image' });
+          console.error(`❌  Bosta: order ${order.id} BLOCKED — no product image for "${pName}"`);
+          continue;
+        }
+
         /* Translate Bosta's auth rejection into a clear, actionable message that
            points at the RIGHT field (the api.bosta.co API Key — not the password
            / bearer token), so this stops looking like the wallet-token problem. */
@@ -631,24 +616,24 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
 
     const processed = success.length + failed.length;
     const remaining = Math.max(0, totalPending - processed);
-    const noOpen    = shippedWithoutOpenPackage.length;
-    if (noOpen > 0) {
-      console.warn(`[shipping/forward] ${noOpen} order(s) shipped WITHOUT open-package (no product image on file)`);
+    const blocked = [...blockedProducts];
+    if (blocked.length > 0) {
+      console.warn(`[shipping/forward] blocked by missing Bosta product images: ${blocked.join(' | ')}`);
     }
     res.json({
       message: (remaining > 0
         ? `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length}. متبقٍ ${remaining} طلب — اضغط "إرسال للشحن" مرة أخرى لإكمالها.`
         : `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length} طلب`)
-        + (noOpen > 0
-          ? ` — ${noOpen} منها بدون خاصية "فتح الشحنة" لأن المنتج ليس له صورة في بوسطة. ارفع صورة المنتج من لوحة بوسطة لتفعيلها تلقائيًا.`
+        + (blocked.length > 0
+          ? ` — تم إيقاف الإرسال لمنتجات بدون صورة في بوسطة: ${blocked.join('، ')}. ارفع صورة كل منتج من لوحة تحكم بوسطة ثم أعد المحاولة.`
           : ''),
       success,
       failed,
       total_pending: totalPending,
       processed,
       remaining,
-      /* Orders that lost open-package for lack of a product image. */
-      shipped_without_open_package: shippedWithoutOpenPackage,
+      /* Distinct product names Bosta blocked for a missing image. */
+      blocked_products: blocked,
     });
 
   } catch (err) {
