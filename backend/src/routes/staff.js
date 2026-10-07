@@ -4,7 +4,7 @@ const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { checkAndSendStaffAlerts } = require('../services/alerts');
-const { EARNED_COMMISSION_SQL } = require('../utils/commission');
+const { earnedCommissionSql } = require('../utils/commission');
 const { hasRole, primaryRole, normalizeRoles } = require('../utils/roles');
 const { normalizeEmail } = require('../utils/email');
 
@@ -717,12 +717,9 @@ router.post('/heartbeat', authenticate, async (req, res) => {
 async function getEmployeeBalance(userId, businessId) {
   const commRes = await pool.query(
     `SELECT COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '@', 1)) AS name,
-            ${EARNED_COMMISSION_SQL} AS lifetime_commission
+            ${earnedCommissionSql('$2::integer')} AS lifetime_commission
        FROM users u
-       LEFT JOIN orders o ON o."AssignedTo" = u.email AND o.business_id = $2::integer
-      WHERE u.id = $1 AND u.business_id = $2::integer
-      GROUP BY u.id, u.name, u.email,
-               u.comm_confirmed, u.comm_delivered, u.comm_rejected, u.comm_no_answer`,
+      WHERE u.id = $1 AND u.business_id = $2::integer`,
     [userId, businessId]
   );
   if (!commRes.rows.length) return { exists: false };

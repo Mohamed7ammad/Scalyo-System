@@ -3,7 +3,7 @@ const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { getExternalAffiliateStats, aggregateSafqaBreakdowns } = require('../services/externalAffiliate');
-const { EARNED_COMMISSION_SQL } = require('../utils/commission');
+const { earnedCommissionSql } = require('../utils/commission');
 const { hasRole, hasAnyRole } = require('../utils/roles');
 
 const router = express.Router();
@@ -252,6 +252,24 @@ const FORWARD_STATIC = `
    (any date) into EVERY filtered period, so "Today" showed last week's backlog.
    The date range is now applied strictly; when no dates are passed we still join
    ALL of the tenant's orders (the all-time view).                            */
+/* Egypt-local createdAt window on `col` → array of SQL predicates; pushes its
+   own bound params. Shared by the order join and the commission sum so both
+   use the identical period. */
+function buildCreatedRange(params, startDate, endDate, col) {
+  const parts = [];
+  if (startDate) {
+    // Midnight Cairo on startDate, expressed as a UTC-anchored ISO string.
+    params.push(`${startDate}T00:00:00${getEgyptOffset(startDate)}`);
+    parts.push(`${col} >= $${params.length}::timestamptz`);
+  }
+  if (endDate) {
+    // Last second of endDate in Cairo time.
+    params.push(`${endDate}T23:59:59${getEgyptOffset(endDate)}`);
+    parts.push(`${col} <= $${params.length}::timestamptz`);
+  }
+  return parts;
+}
+
 function buildJoinOn(params, startDate, endDate, bizIdx) {
   /* TENANT ISOLATION: only orders belonging to the caller's tenant may ever be
      joined onto a user row.  bizIdx is the $-position of req.user.business_id. */
@@ -266,21 +284,7 @@ function buildJoinOn(params, startDate, endDate, bizIdx) {
     return `LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email)) AND ${bizClause}`;
   }
 
-  const rangeParts = [];
-
-  if (startDate) {
-    const offset = getEgyptOffset(startDate);
-    // Midnight Cairo on startDate, expressed as a UTC-anchored ISO string.
-    params.push(`${startDate}T00:00:00${offset}`);
-    rangeParts.push(`o."createdAt" >= $${params.length}::timestamptz`);
-  }
-
-  if (endDate) {
-    const offset = getEgyptOffset(endDate);
-    // Last second of endDate in Cairo time.
-    params.push(`${endDate}T23:59:59${offset}`);
-    rangeParts.push(`o."createdAt" <= $${params.length}::timestamptz`);
-  }
+  const rangeParts = buildCreatedRange(params, startDate, endDate, 'o."createdAt"');
 
   return [
     `LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email))`,
@@ -290,9 +294,10 @@ function buildJoinOn(params, startDate, endDate, bizIdx) {
 }
 
 /* ── Shared SELECT / GROUP BY fragment ──────────────────────────────
-   Receives the pre-built ON-clause string and a WHERE clause string
-   (role filter or email filter — never date conditions).             */
-function buildAgentSql(joinOnClause, whereClause) {
+   Receives the pre-built ON-clause string, a WHERE clause string (role
+   filter or email filter — never date conditions) and the earned-commission
+   expression (earnedCommissionSql, same period window as the join).   */
+function buildAgentSql(joinOnClause, whereClause, earnedSql) {
   return `
     SELECT
       u.id                                                              AS agent_id,
@@ -338,8 +343,10 @@ function buildAgentSql(joinOnClause, whereClause) {
       )                                                                 AS ndr_pct,
 
       /* Earned commission — shared formula (utils/commission.js) so the period
-         column here and the all-time global balance can never diverge. */
-      ${EARNED_COMMISSION_SQL}                                          AS earned_commission
+         column here and the all-time global balance can never diverge. Counts
+         the commission rows this agent EARNED on orders in the period — even
+         ones since transferred to someone else. */
+      ${earnedSql}                                                      AS earned_commission
 
     FROM  users u
     LEFT  JOIN orders o ON (
@@ -468,7 +475,12 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
      commission attributed to THEM. Their orders (orders."AssignedTo" = their email)
      are never touched by a role change, so without this they'd silently fall into
      the "غير محدد" bucket below and look "lost". Admins/media-buyers stay excluded. */
-  const sql = buildAgentSql(joinOn, `WHERE u.role IN ('agent', 'supervisor') AND u.business_id = $${bizIdx}::integer`) + `
+  const commRange = buildCreatedRange(params, startDate, endDate, 'co."createdAt"').map((p) => `AND ${p}`).join(' ');
+  const sql = buildAgentSql(
+    joinOn,
+    `WHERE u.role IN ('agent', 'supervisor') AND u.business_id = $${bizIdx}::integer`,
+    earnedCommissionSql(`$${bizIdx}::integer`, commRange),
+  ) + `
     ORDER BY
       COUNT(o.id) FILTER (WHERE o."Status" IN (
         'تم التأكيد', 'تم الشحن', 'تم التوصيل',
@@ -488,11 +500,9 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
   const lifetimeSql = `
     SELECT
       u.id                                      AS agent_id,
-      ${EARNED_COMMISSION_SQL}                  AS lifetime_commission,
+      ${earnedCommissionSql('$1::integer')}     AS lifetime_commission,
       COALESCE(pay.total_paid, 0)               AS total_paid
     FROM users u
-    LEFT JOIN orders o
-      ON LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email)) AND o.business_id = $1::integer
     LEFT JOIN (
       SELECT user_id, SUM(amount) AS total_paid
       FROM employee_payouts
@@ -500,8 +510,6 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
       GROUP BY user_id
     ) pay ON pay.user_id = u.id
     WHERE u.role IN ('agent', 'supervisor') AND u.business_id = $1::integer
-    GROUP BY u.id, u.comm_confirmed, u.comm_delivered,
-             u.comm_rejected, u.comm_no_answer, pay.total_paid
   `;
 
   try {
@@ -933,7 +941,12 @@ router.get('/my-performance', authenticate, async (req, res) => {
   const bizIdx = params.length;
   const joinOn = buildJoinOn(params, startDate, endDate, bizIdx);
 
-  const sql = buildAgentSql(joinOn, `WHERE u.email = $1 AND u.business_id = $${bizIdx}::integer`);
+  const commRange = buildCreatedRange(params, startDate, endDate, 'co."createdAt"').map((p) => `AND ${p}`).join(' ');
+  const sql = buildAgentSql(
+    joinOn,
+    `WHERE u.email = $1 AND u.business_id = $${bizIdx}::integer`,
+    earnedCommissionSql(`$${bizIdx}::integer`, commRange),
+  );
 
   /* ── All-time Employee-Ledger balance (date-INDEPENDENT) ────────────────────
      `earned_commission` above is the SELECTED PERIOD's earnings. But a payout
@@ -946,11 +959,9 @@ router.get('/my-performance', authenticate, async (req, res) => {
      only $1 (email) + $2 (tenant) — never the date params.                     */
   const lifetimeSql = `
     SELECT
-      ${EARNED_COMMISSION_SQL}         AS lifetime_commission,
+      ${earnedCommissionSql('$2::integer')} AS lifetime_commission,
       COALESCE(pay.total_paid, 0)      AS total_paid
     FROM users u
-    LEFT JOIN orders o
-      ON LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email)) AND o.business_id = $2::integer
     LEFT JOIN (
       SELECT user_id, SUM(amount) AS total_paid
       FROM employee_payouts
@@ -958,8 +969,6 @@ router.get('/my-performance', authenticate, async (req, res) => {
       GROUP BY user_id
     ) pay ON pay.user_id = u.id
     WHERE u.email = $1 AND u.business_id = $2::integer
-    GROUP BY u.id, u.comm_confirmed, u.comm_delivered,
-             u.comm_rejected, u.comm_no_answer, pay.total_paid
   `;
 
   try {

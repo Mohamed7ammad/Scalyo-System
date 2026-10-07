@@ -42,6 +42,9 @@ export interface Order {
   is_resend?: boolean;
   resend_note?: string | null;
   resend_at?: string | null;
+  /* When the CURRENT holder got the order (set on every reassignment). Only
+     no-answer attempts logged after it count toward HER commission. */
+  assigned_at?: string | null;
   /* Customer frequency — per-phone history computed locally by GET /api/orders
      (digits-only phone match, scoped to the tenant; zero Bosta calls).
      Cancellations and returns are separate: a confirmation-call cancellation

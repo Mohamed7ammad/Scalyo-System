@@ -2,32 +2,46 @@
 
 /* ── Single source of truth for the EARNED-commission formula ─────────────────
    Used by every place that must agree on "how much has an agent earned":
-     • analytics buildAgentSql        — period view (date-filtered join)
-     • analytics /agents lifetime sum  — all-time global balance
-     • staff payout validation         — one agent, all-time
+     • analytics buildAgentSql          — period view (order createdAt window)
+     • analytics /agents + /my-performance lifetime — all-time global balance
+     • staff payout validation          — one agent, all-time
    Keeping it in ONE place means the period column and the global balance can
    never diverge (Employee-Ledger requirement #2).
 
-   The expression assumes the surrounding query exposes:
-     • u  → the users row  (u.comm_confirmed / comm_delivered / comm_rejected / comm_no_answer)
-     • o  → the joined orders row (o."Status", o."no_answer_logs")
-   and that the query GROUPs BY the user.
-
    ─────────────────────────────────────────────────────────────────────────────
    FROZEN-RATE MODEL (fixes the retroactive-repricing bug):
-   Earned commission is NO LONGER  COUNT(status) × the agent's CURRENT rate — that
+   Earned commission is NOT  COUNT(status) × the agent's CURRENT rate — that
    re-priced an agent's ENTIRE history the instant their profile rate changed
    (e.g. raising Dina 5→7 EGP retroactively inflated all 390 past confirmations to
-   2 730 instead of the 2 030 actually earned). Instead each order carries its own
-   frozen `earned_commission`, stamped at the exact rate in force when its status
-   changed (maintained from the treasury commission ledger by the status-change
-   hooks in orders.js). Total earnings = SUM of those frozen per-order amounts, so
-   changing an agent's rate in the future NEVER moves past earnings.
+   2 730 instead of the 2 030 actually earned). Each commission is a treasury
+   ledger row stamped at the exact rate in force when it was earned, so changing
+   a rate never moves past earnings.
 
-   The expression still assumes the surrounding query joins the agent's orders as
-   `o` and GROUPs BY the user, so SUM aggregates that agent's frozen commissions
-   (date-filtered by the join for the period view; unfiltered for the lifetime
-   sum) — same shape as before, so every call-site keeps working unchanged.       */
-const EARNED_COMMISSION_SQL = `ROUND(COALESCE(SUM(o.earned_commission), 0), 2)`;
+   OWNERSHIP MODEL (fixes «commission lost after transfer»):
+   The total is the SUM of the ledger rows the agent OWNS — not of the orders she
+   currently holds. A row's owner is its agent_email (stamped at award time, or
+   frozen to the outgoing agent by trg_orders_commission_owner when the order is
+   reassigned — see treasury.js); legacy rows never reassigned since have no
+   agent_email and belong to the order's current holder. So a transferred order's
+   commission stays with whoever earned it, and the new holder earns her own.
 
-module.exports = { EARNED_COMMISSION_SQL };
+   earnedCommissionSql(bizRef, rangeSql) returns a scalar SQL expression. The
+   surrounding query must expose the agent as `u` (users row). `bizRef` is the
+   tenant bind ref (e.g. '$1::integer'); `rangeSql` optionally restricts to
+   commissions on orders in a window, written against the order alias `co`
+   (e.g. 'AND co."createdAt" >= $2::timestamptz').                              */
+const COMMISSION_SOURCES = ['comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer'];
+
+function earnedCommissionSql(bizRef, rangeSql = '') {
+  return `ROUND(COALESCE((
+      SELECT SUM(ct.amount::numeric)
+        FROM treasury_transactions ct
+        JOIN orders co ON co.id = ct.order_id
+       WHERE co.business_id = ${bizRef}
+         AND ct.source IN (${COMMISSION_SOURCES.map((s) => `'${s}'`).join(', ')})
+         AND LOWER(TRIM(COALESCE(ct.agent_email, co."AssignedTo"))) = LOWER(TRIM(u.email))
+         ${rangeSql}
+    ), 0), 2)`;
+}
+
+module.exports = { earnedCommissionSql, COMMISSION_SOURCES };

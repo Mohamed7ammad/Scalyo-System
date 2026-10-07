@@ -92,10 +92,59 @@ pool.query(`
     ON treasury_transactions (order_id)
     WHERE source = 'comm_rejected'
 `))
+/* ── Commission OWNERSHIP — who EARNED each commission row ──────────────────
+   Agent balances used to be SUM(orders.earned_commission) over the orders an
+   agent CURRENTLY holds. So transferring an order carried its commission to the
+   new holder, and the new holder's next status change could void it — the
+   «عمولة عدم الرد disappears after transfer» bug. Now every commission row has
+   an owner:
+     agent_email  — stamped when the commission is awarded. NULL on legacy rows,
+                    which keep the old meaning: owned by the order's current
+                    holder (so nobody's balance moved when this shipped).
+     trigger      — BEFORE any "AssignedTo" change, stamps the order's still-
+                    unowned commission rows with the OUTGOING agent: ownership is
+                    frozen at hand-over whichever path moved the order (transfer,
+                    bulk, distribute, attendance, inline dropdown, webhook…), and
+                    orders.assigned_at records when the new holder got it.
+   Readers: utils/commission.js (balances), orders.js (award + void hooks).  */
+.then(() => pool.query(`ALTER TABLE treasury_transactions ADD COLUMN IF NOT EXISTS agent_email TEXT`))
+.then(() => pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ`))
+/* No-answer commission is ONE PER (order, agent): each agent who logs her OWN
+   5 attempts on a transferred order earns her own. Replaces the old
+   one-per-order index, which blocked the second agent entirely. */
 .then(() => pool.query(`
-  CREATE UNIQUE INDEX IF NOT EXISTS treasury_comm_na_uidx
-    ON treasury_transactions (order_id)
+  CREATE UNIQUE INDEX IF NOT EXISTS treasury_comm_na_agent_uidx
+    ON treasury_transactions (order_id, agent_email)
     WHERE source = 'comm_no_answer'
+`))
+.then(() => pool.query(`DROP INDEX IF EXISTS treasury_comm_na_uidx`))
+/* Commission rows by order — used by the owner-stamping trigger and balances. */
+.then(() => pool.query(`
+  CREATE INDEX IF NOT EXISTS treasury_comm_order_idx
+    ON treasury_transactions (order_id)
+    WHERE source IN ('comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer')
+`))
+.then(() => pool.query(`
+  CREATE OR REPLACE FUNCTION orders_commission_owner() RETURNS trigger AS $fn$
+  BEGIN
+    IF NEW."AssignedTo" IS DISTINCT FROM OLD."AssignedTo" THEN
+      IF COALESCE(TRIM(OLD."AssignedTo"), '') <> '' THEN
+        UPDATE treasury_transactions
+           SET agent_email = OLD."AssignedTo"
+         WHERE order_id = OLD.id
+           AND agent_email IS NULL
+           AND source IN ('comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer');
+      END IF;
+      NEW.assigned_at := NOW();
+    END IF;
+    RETURN NEW;
+  END
+  $fn$ LANGUAGE plpgsql
+`))
+.then(() => pool.query(`
+  CREATE OR REPLACE TRIGGER trg_orders_commission_owner
+    BEFORE UPDATE OF "AssignedTo" ON orders
+    FOR EACH ROW EXECUTE FUNCTION orders_commission_owner()
 `))
 /* Link to the inventory supply batch (purchase_orders.id is a UUID). Auto-
    generated INVENTORY_PURCHASE rows carry this so the UI/API can LOCK them
@@ -234,10 +283,19 @@ async function backfillTreasury() {
     {
       source:    'comm_no_answer',
       rateCol:   'comm_no_answer',
-      /* 'لا يرد' earns this ONLY after 5 logged call attempts (anti-abuse rule).
-         'مؤجل' grants NO automatic commission. Mirrors orders.js. */
-      predicate: `(o."Status" = 'لا يرد' AND COALESCE(jsonb_array_length(o."no_answer_logs"), 0) >= 5)`,
+      /* 'لا يرد' earns this ONLY after 5 logged call attempts (anti-abuse rule),
+         counting only the CURRENT holder's own attempts (logged after she got the
+         order) — and once per agent per order. 'مؤجل' grants NO automatic
+         commission. Mirrors POST /api/orders/:id/no-answer-attempt. */
+      predicate: `(o."Status" = 'لا يرد'
+        AND (SELECT COUNT(*) FROM jsonb_array_elements_text(COALESCE(o."no_answer_logs", '[]'::jsonb)) a(ts)
+              WHERE o.assigned_at IS NULL
+                 OR CASE WHEN a.ts ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN a.ts::timestamptz > o.assigned_at ELSE false END) >= 5
+        AND NOT EXISTS (SELECT 1 FROM treasury_transactions x
+                         WHERE x.order_id = o.id AND x.source = 'comm_no_answer'
+                           AND LOWER(TRIM(COALESCE(x.agent_email, o."AssignedTo"))) = LOWER(TRIM(o."AssignedTo"))))`,
       label:     'لا يرد',
+      conflict:  '(order_id, agent_email)',
     },
   ];
 
@@ -245,7 +303,7 @@ async function backfillTreasury() {
     try {
       const r = await pool.query(`
         INSERT INTO treasury_transactions
-          (order_id, amount, type, source, description, transaction_date)
+          (order_id, amount, type, source, description, transaction_date, agent_email)
         SELECT
           o.id,
           COALESCE(u."${c.rateCol}"::numeric, 0)                        AS amount,
@@ -256,7 +314,8 @@ async function backfillTreasury() {
             || ' — طلب #' || o.id
             || COALESCE(' | ' || NULLIF(TRIM(o."ProductName"), ''), '')  AS description,
           COALESCE(o."updatedAt"::date, o."createdAt"::date, CURRENT_DATE)
-                                                                         AS transaction_date
+                                                                         AS transaction_date,
+          o."AssignedTo"                                                 AS agent_email
         FROM   orders o
         JOIN   users  u
           ON   LOWER(TRIM(u.email)) = LOWER(TRIM(o."AssignedTo"))
@@ -264,7 +323,7 @@ async function backfillTreasury() {
           AND  o."AssignedTo" IS NOT NULL
           AND  TRIM(o."AssignedTo") <> ''
           AND  COALESCE(u."${c.rateCol}"::numeric, 0) > 0
-        ON CONFLICT (order_id) WHERE source = '${c.source}' DO NOTHING
+        ON CONFLICT ${c.conflict || '(order_id)'} WHERE source = '${c.source}' DO NOTHING
       `);
       commissionsInserted += (r.rowCount || 0);
     } catch (err) {

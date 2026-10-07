@@ -13,7 +13,10 @@ const COMMISSION_SOURCES = ['comm_confirmed', 'comm_delivered', 'comm_rejected',
 /* Re-freeze one order's earned_commission = the SUM of its CURRENT valid frozen
    commission ledger rows. Called after any hook that adds/voids a commission txn,
    so the denormalised column always mirrors the (already rate-frozen, funnel-aware)
-   treasury ledger. Best-effort: never throws into the request path. */
+   treasury ledger. Best-effort: never throws into the request path.
+   NOTE: this is the order's TOTAL across every agent who earned on it. Agent
+   balances are NOT derived from it — they sum the ledger rows each agent owns
+   (utils/commission.js), so a transferred order's commission stays with its earner. */
 async function syncEarnedCommission(orderId, businessId) {
   try {
     await pool.query(
@@ -518,7 +521,7 @@ router.get('/', authenticate, async (req, res) => {
       o."quantity", o."AssignedTo", o."PostponedDate", o."BostaTrackingCode",
       o."rejectionReason", o."sku", o."hasDeposit", o."depositAmount",
       o."unit_cost_price", o.no_answer_logs, o.is_lost_order, o.shipped_at,
-      o.is_resend, o.resend_note, o.resend_at`;
+      o.is_resend, o.resend_note, o.resend_at, o.assigned_at`;
 
     let cursorClause = '';
     if (typeof req.query.cursor === 'string' && req.query.cursor.includes('|')) {
@@ -2109,11 +2112,11 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
            into the ON CONFLICT WHERE clause (cannot use a bind parameter there) */
         return pool.query(
           `INSERT INTO treasury_transactions
-             (order_id, amount, type, source, description, transaction_date, business_id)
-           VALUES ($1, $2, 'expense', $3, $4, CURRENT_DATE, $5)
+             (order_id, amount, type, source, description, transaction_date, business_id, agent_email)
+           VALUES ($1, $2, 'expense', $3, $4, CURRENT_DATE, $5, $6)
            ON CONFLICT (order_id) WHERE source = '${commInfo.source}'
            DO NOTHING`,
-          [id, rate.toFixed(2), commInfo.source, commDesc, businessId]
+          [id, rate.toFixed(2), commInfo.source, commDesc, businessId, assignedTo]
         );
       })
         /* Re-freeze the order's earned_commission from the ledger AFTER the insert. */
@@ -2158,11 +2161,17 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
 
     if (toVoid.length > 0) {
       /* Excludes the source(s) the commission hook may be inserting concurrently,
-         so the just-earned commission is never deleted — safe regardless of order. */
+         so the just-earned commission is never deleted — safe regardless of order.
+         OWNERSHIP LOCK: only rows owned by the order's CURRENT holder (or unowned
+         rows, which mean the same thing) are voided. A commission a PREVIOUS agent
+         earned before the order was transferred — e.g. her 5-attempt عمولة عدم الرد
+         — is her completed work and survives whatever the new holder does next. */
       pool.query(
         `DELETE FROM treasury_transactions
-          WHERE order_id = $1 AND business_id = $2 AND source = ANY($3::text[])`,
-        [id, businessId, toVoid]
+          WHERE order_id = $1 AND business_id = $2 AND source = ANY($3::text[])
+            AND (agent_email IS NULL
+                 OR LOWER(TRIM(agent_email)) = LOWER(TRIM(COALESCE($4::text, ''))))`,
+        [id, businessId, toVoid, updatedOrder.AssignedTo ?? null]
       ).then((r) => {
         if (r.rowCount > 0) {
           console.log(`[Treasury] 🧹 Voided ${r.rowCount} stale txn(s) for order ${id} → "${updates.Status}" (removed sources: ${toVoid.join(', ')})`);
@@ -2196,19 +2205,26 @@ router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
       `UPDATE orders
           SET "no_answer_logs" = COALESCE("no_answer_logs", '[]'::jsonb) || to_jsonb(NOW())
         WHERE id = $1 AND business_id = $2
-        RETURNING "no_answer_logs", "Status", "AssignedTo", "ProductName"`,
+        RETURNING "no_answer_logs", "Status", "AssignedTo", "ProductName", assigned_at`,
       [id, businessId]
     );
     if (!upd.rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
 
     const order = upd.rows[0];
     const logs  = Array.isArray(order.no_answer_logs) ? order.no_answer_logs : [];
-    const count = logs.length;
+    /* Only the CURRENT holder's own attempts count toward HER commission: a
+       transferred order's log still holds the previous agent's calls, and
+       assigned_at (set by trg_orders_commission_owner) marks the hand-over. */
+    const since = order.assigned_at ? new Date(order.assigned_at).getTime() : null;
+    const count = since == null
+      ? logs.length
+      : logs.filter((ts) => new Date(ts).getTime() > since).length;
     let commissionAwarded = false;
 
-    /* Award the no-answer commission once the threshold is reached, but only
-       while the order is actually in 'لا يرد'. Idempotent via the partial
-       unique index (treasury_comm_na_uidx). */
+    /* Award the no-answer commission once the holder's OWN attempts reach the
+       threshold, but only while the order is actually in 'لا يرد'. ONE per agent
+       per order (treasury_comm_na_agent_uidx + the NOT EXISTS below, which also
+       counts a legacy unowned row as already credited to the current holder). */
     if (count >= NO_ANSWER_REQUIRED_ATTEMPTS && order.Status === 'لا يرد' && order.AssignedTo) {
       const uRes = await pool.query(
         `SELECT comm_no_answer AS rate FROM users
@@ -2222,12 +2238,16 @@ router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
           (order.ProductName ? ` | ${order.ProductName}` : '');
         const ins = await pool.query(
           `INSERT INTO treasury_transactions
-             (order_id, amount, type, source, description, transaction_date, business_id)
-           VALUES ($1, $2, 'expense', 'comm_no_answer', $3, CURRENT_DATE, $4)
-           ON CONFLICT (order_id) WHERE source = 'comm_no_answer'
+             (order_id, amount, type, source, description, transaction_date, business_id, agent_email)
+           SELECT $1, $2, 'expense', 'comm_no_answer', $3, CURRENT_DATE, $4, $5
+            WHERE NOT EXISTS (
+              SELECT 1 FROM treasury_transactions
+               WHERE order_id = $1 AND source = 'comm_no_answer'
+                 AND LOWER(TRIM(COALESCE(agent_email, $5))) = LOWER(TRIM($5)))
+           ON CONFLICT (order_id, agent_email) WHERE source = 'comm_no_answer'
            DO NOTHING
            RETURNING id`,
-          [id, rate.toFixed(2), desc, businessId]
+          [id, rate.toFixed(2), desc, businessId, order.AssignedTo]
         );
         commissionAwarded = ins.rows.length > 0;
         if (commissionAwarded) {

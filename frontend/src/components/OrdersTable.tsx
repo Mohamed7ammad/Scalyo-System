@@ -26,6 +26,17 @@ import { GOVERNORATES, resolveGovernorate, computeLostOrderTotal } from '@/lib/s
 
 const NO_ANSWER_REQUIRED = 5;
 
+/* No-answer attempts that count for the CURRENT holder: a transferred order's
+   log still holds the previous agent's calls (kept as history), but only calls
+   logged after `assigned_at` count toward this agent's commission — mirrors
+   POST /api/orders/:id/no-answer-attempt. Returns { own, prior }. */
+function splitAttempts(logs: string[], assignedAt?: string | null) {
+  const since = assignedAt ? new Date(assignedAt).getTime() : NaN;
+  if (Number.isNaN(since)) return { own: logs.length, prior: 0 };
+  const own = logs.filter((ts) => new Date(ts).getTime() > since).length;
+  return { own, prior: logs.length - own };
+}
+
 /* Normalise a status string for comparison. Statuses set via the UI dropdown are
    clean literals, but statuses arriving from imports / Taager sync / webhooks can
    differ in Unicode form (NFC vs NFD) or carry stray whitespace. Comparing the
@@ -242,6 +253,8 @@ function OrdersTable({
   const [noAnswerLogs,  setNoAnswerLogs]  = useState<string[]>([]);
   const [loggingAttempt, setLoggingAttempt] = useState(false);
   const [attemptMsg,    setAttemptMsg]    = useState<string>('');
+  /* assigned_at of the order open in a modal — see splitAttempts. */
+  const [attemptsSince, setAttemptsSince] = useState<string | null>(null);
   /* Inline (in-table) no-answer button: per-order optimistic override of the
      attempt log + which row is mid-request, so the row updates without a modal. */
   const [attemptOverrides, setAttemptOverrides] = useState<Record<number, string[]>>({});
@@ -259,6 +272,7 @@ function OrdersTable({
         ? String(order.depositAmount) : '',
     });
     setNoAnswerLogs(Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+    setAttemptsSince(order.assigned_at ?? null);
     setAttemptMsg('');
     setQuickEdit(order);
   };
@@ -397,6 +411,7 @@ function OrdersTable({
   const openEditModal = (order: Order) => {
     setEditForm({ ...order });
     setNoAnswerLogs(Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+    setAttemptsSince(order.assigned_at ?? null);
     setAttemptMsg('');
     setEditModal(order);
   };
@@ -753,10 +768,13 @@ function OrdersTable({
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-gray-700 dark:text-slate-300">محاولات الاتصال</span>
                 <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full
-                  ${noAnswerLogs.length >= NO_ANSWER_REQUIRED
+                  ${splitAttempts(noAnswerLogs, attemptsSince).own >= NO_ANSWER_REQUIRED
                     ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
                     : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
-                  محاولة {noAnswerLogs.length} من {NO_ANSWER_REQUIRED}
+                  محاولة {splitAttempts(noAnswerLogs, attemptsSince).own} من {NO_ANSWER_REQUIRED}
+                  {splitAttempts(noAnswerLogs, attemptsSince).prior > 0 && (
+                    <span className="font-medium opacity-75"> (+{splitAttempts(noAnswerLogs, attemptsSince).prior} لموظف سابق)</span>
+                  )}
                 </span>
               </div>
 
@@ -1016,10 +1034,13 @@ function OrdersTable({
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-semibold text-gray-700 dark:text-slate-300">محاولات الاتصال (لا يرد)</span>
                   <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full
-                    ${noAnswerLogs.length >= NO_ANSWER_REQUIRED
+                    ${splitAttempts(noAnswerLogs, attemptsSince).own >= NO_ANSWER_REQUIRED
                       ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
                       : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
-                    محاولة {noAnswerLogs.length} من {NO_ANSWER_REQUIRED}
+                    محاولة {splitAttempts(noAnswerLogs, attemptsSince).own} من {NO_ANSWER_REQUIRED}
+                  {splitAttempts(noAnswerLogs, attemptsSince).prior > 0 && (
+                    <span className="font-medium opacity-75"> (+{splitAttempts(noAnswerLogs, attemptsSince).prior} لموظف سابق)</span>
+                  )}
                   </span>
                 </div>
 
@@ -1871,14 +1892,15 @@ const OrderRow = memo(function OrderRow({
 
         {normStatus(order.Status) === 'لا يرد' && (() => {
           const logs  = attemptLogs ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
-          const count = logs.length;
+          /* Only this holder's own attempts count (see splitAttempts). */
+          const { own: count, prior } = splitAttempts(logs, order.assigned_at);
           const done  = count >= NO_ANSWER_REQUIRED;
           return (
             <button
               type="button"
               onClick={() => onInlineAttempt(order.id)}
               disabled={inlineLogging}
-              title="تسجيل محاولة اتصال"
+              title={prior > 0 ? `تسجيل محاولة اتصال — و${prior} محاولات سابقة لموظف آخر لا تُحتسب لك` : 'تسجيل محاولة اتصال'}
               className={`mt-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
                 transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
                 ${done
