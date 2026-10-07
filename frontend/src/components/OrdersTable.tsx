@@ -1462,6 +1462,32 @@ function CustomerFrequencyBadge({ order }: { order: Order }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   ResendBadge — the returns team sent this returned order back (إعادة إرسال).
+   ═══════════════════════════════════════════════════════════════════════════
+   Solid orange so the agent can't miss it before calling, plus the returns
+   feedback in FULL: the same text is appended to the Note cell, but that cell
+   is a one-line input that would clip it. Permanent — stays after the order
+   is re-confirmed, shipped or delivered.                                     */
+function ResendBadge({ order }: { order: Order }) {
+  if (!order.is_resend) return null;
+  return (
+    <div className="mt-1 max-w-[240px]">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold
+        bg-orange-600 text-white shadow-sm dark:bg-orange-500">
+        🔁 إعادة إرسال
+      </span>
+      {order.resend_note && (
+        <p className="mt-1 px-2 py-1 rounded-md text-xs leading-relaxed whitespace-pre-wrap break-words
+          bg-orange-50 border border-orange-200 text-orange-900
+          dark:bg-orange-900/20 dark:border-orange-800/50 dark:text-orange-200">
+          <span className="font-bold">ملاحظة المرتجعات: </span>{order.resend_note}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    OrderRow — one table row, strictly memoised.
    ═══════════════════════════════════════════════════════════════════════════
    The parent OrdersTable still re-renders & re-maps the array on a status edit,
@@ -1617,6 +1643,9 @@ const OrderRow = memo(function OrderRow({
 
         {/* Customer frequency — local delivery-history breakdown (see component) */}
         <CustomerFrequencyBadge order={order} />
+
+        {/* Sent back by the returns team — badge + their note (see component) */}
+        <ResendBadge order={order} />
 
         {/* Product badge */}
         {order.ProductName && (
@@ -1964,6 +1993,7 @@ const OrderRow = memo(function OrderRow({
           key={`${order.id}-${order.Note}`}
           type="text"
           defaultValue={order.Note ?? ''}
+          title={order.Note ?? ''}
           onBlur={(e) => onNoteBlur(order, e.target.value)}
           placeholder="أضف ملاحظة..."
           className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg

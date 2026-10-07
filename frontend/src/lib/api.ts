@@ -37,6 +37,11 @@ export interface Order {
   unit_cost_price?: number;     // WAC locked at confirmation — used for accurate historical COGS
   no_answer_logs?: string[];    // ISO timestamps of logged call attempts (لا يرد)
   is_lost_order?: boolean;      // true = bulk-imported lost/historical order, isolated from the live queue
+  /* Resend (إعادة إرسال) — the returns team sent this returned order back to its
+     confirmation agent. Permanent flag; resend_note is the returns feedback. */
+  is_resend?: boolean;
+  resend_note?: string | null;
+  resend_at?: string | null;
   /* Customer frequency — per-phone history computed locally by GET /api/orders
      (digits-only phone match, scoped to the tenant; zero Bosta calls).
      Cancellations and returns are separate: a confirmation-call cancellation
@@ -142,6 +147,7 @@ export interface OrderListQuery {
   dateFrom?:  string;   // YYYY-MM-DD inclusive
   dateTo?:    string;   // YYYY-MM-DD inclusive
   reconfirm?: boolean;  // postponed orders due for re-confirmation within 3 days
+  resend?:    boolean;  // orders the returns team sent back (is_resend)
 }
 
 /** Fetch a page of the tenant's orders (keyset pagination + server-side
@@ -168,6 +174,7 @@ export const getOrders = (q: OrderListQuery) =>
       ...(q.dateFrom  ? { dateFrom: q.dateFrom } : {}),
       ...(q.dateTo    ? { dateTo: q.dateTo }     : {}),
       ...(q.reconfirm ? { reconfirm: true }      : {}),
+      ...(q.resend    ? { resend: true }         : {}),
     },
   }).then((res) => {
     if (Array.isArray(res.data)) {
@@ -181,12 +188,15 @@ export const getOrders = (q: OrderListQuery) =>
  *  stay exact no matter how many order rows have been paged in.
  *  - named counters + byStatus: scoped by agent/product/date (NOT status/search)
  *  - byAgent/agentTotal: whole queue, ignoring all filters (team-pill counts)
- *  - reconfirm: postponed orders due for re-confirmation within 3 days       */
+ *  - reconfirm: postponed orders due for re-confirmation within 3 days
+ *  - resend / resendPending: resent orders (all) / still awaiting a call ('جديد') */
 export interface OrderStats {
   total: number; new: number; confirmed: number; rejected: number;
   postponed: number; noAnswer: number; shipped: number; confirmedCumulative: number;
   shippedCumulative: number;
   reconfirm: number;
+  resend: number;
+  resendPending: number;
   byStatus: Record<string, number>;
   byAgent: Record<string, number>;
   agentTotal: number;
@@ -1650,8 +1660,9 @@ export const saveFollowUpAction = (
   );
 
 /* ── Return Collection Management (إدارة تحصيل المرتجعات) ───────────────────── */
-/* 'reason_known' (تم معرفة السبب) replaced the legacy 'follow_up' bucket. */
-export type ReturnCollectionStatus = 'pending' | 'no_answer' | 'reason_known' | 'paid' | 'refused';
+/* 'reason_known' (تم معرفة السبب) replaced the legacy 'follow_up' bucket.
+   'resend' is set only by resendReturnCollection (never via PATCH). */
+export type ReturnCollectionStatus = 'pending' | 'no_answer' | 'reason_known' | 'paid' | 'refused' | 'resend';
 
 export interface ReturnCollection {
   id:                  number;
@@ -1670,6 +1681,8 @@ export interface ReturnCollection {
   /* When the customer originally placed the order (orders."createdAt"). Shown to
      everyone (incl. reviewers) as 'تاريخ الطلب'. Null for unmatched parcels. */
   order_created_at?:         string | null;
+  /* LIVE status of the original order — tracks what happened to a resent order. */
+  order_status?:             string | null;
   /* Accountability — the agent who ORIGINALLY confirmed the returned order
      (orders."AssignedTo"). Present for ADMINS ONLY; undefined for reviewers. */
   confirmation_agent_name?:  string | null;
@@ -1714,13 +1727,21 @@ export const getReturnCollections = (
 /** Move a record through pending → no_answer → follow_up and/or edit notes. */
 export const updateReturnCollection = (
   id: number,
-  data: { status?: Exclude<ReturnCollectionStatus, 'paid'>; notes?: string; unconfirmed_claim?: boolean; team_leader_reply?: string },
+  data: { status?: Exclude<ReturnCollectionStatus, 'paid' | 'resend'>; notes?: string; unconfirmed_claim?: boolean; team_leader_reply?: string },
 ) =>
   api.patch<ReturnCollection>(`/api/return-collections/${id}`, data);
 
 /** Mark a return collected: 100% → treasury, 40% accrued as agent commission. */
 export const payReturnCollection = (id: number, collected_amount: number) =>
   api.post<ReturnCollection>(`/api/return-collections/${id}/pay`, { collected_amount });
+
+/** Send a returned order back to its original confirmation agent (إعادة إرسال):
+ *  the order returns to 'جديد' flagged is_resend with `notes` appended; the
+ *  return row moves to 'resend'. `unassigned` → the order has no agent. */
+export const resendReturnCollection = (id: number, notes: string) =>
+  api.post<{ record: ReturnCollection; order: { id: number; Status: string; AssignedTo: string | null }; unassigned: boolean }>(
+    `/api/return-collections/${id}/resend`, { notes },
+  );
 
 /** Pull/refresh returned parcels from the Bosta returning bucket. */
 export const syncReturnCollections = () =>

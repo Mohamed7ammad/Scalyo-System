@@ -10,12 +10,12 @@
  * ════════════════════════════════════════════════════════════════════
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   getReturnCollections, updateReturnCollection, payReturnCollection,
   syncReturnCollections, getReturnAnalytics, settleAgentCommission,
-  deleteReturnCollection, userRoles, userHasRole,
+  deleteReturnCollection, resendReturnCollection, userRoles, userHasRole,
   ReturnCollection, ReturnCollectionStatus, ReturnAnalytics, ReturnAnalyticsRow,
 } from '@/lib/api';
 
@@ -31,8 +31,31 @@ const TABS: { key: ReturnCollectionStatus; label: string; accent: string }[] = [
   { key: 'pending',      label: 'بانتظار المتابعة', accent: 'amber'   },
   { key: 'no_answer',    label: 'لا يرد',           accent: 'slate'   },
   { key: 'reason_known', label: 'تم معرفة السبب',   accent: 'indigo'  },
+  /* Orders sent back to their confirmation agent — kept here for tracking. */
+  { key: 'resend',       label: 'طلبات إعادة الإرسال', accent: 'orange' },
   { key: 'paid',         label: 'تم الدفع',         accent: 'emerald' },
 ];
+
+/* Order states the backend accepts a resend from (mirrors RESENDABLE_ORDER_STATUSES
+   in returnCollections.js) — used to disable the button with a reason. */
+const RESENDABLE_ORDER_STATUSES = ['جاري الإعادة', 'تم الإرجاع', 'تم الشحن'];
+
+/* Colour for the original order's LIVE status in the «طلبات إعادة الإرسال» tab —
+   shows at a glance whether a resend got confirmed, shipped, delivered or lost. */
+const orderStatusChip = (st: string | null | undefined): string => {
+  switch ((st ?? '').trim()) {
+    case 'تم التوصيل': return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400';
+    case 'تم التأكيد':
+    case 'تم الشحن':   return 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400';
+    case 'جديد':
+    case 'لا يرد':
+    case 'مؤجل':       return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400';
+    case 'تم الرفض':
+    case 'جاري الإعادة':
+    case 'تم الإرجاع': return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+    default:           return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+  }
+};
 /* Admin-only extra tab for the refusal archive. */
 const REFUSED_TAB: { key: ReturnCollectionStatus; label: string; accent: string } =
   { key: 'refused', label: 'تم الرفض', accent: 'red' };
@@ -102,9 +125,11 @@ const STATUS_BADGE: Record<ReturnCollectionStatus, string> = {
   reason_known: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
   paid:         'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
   refused:      'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
+  resend:       'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
 };
 const STATUS_LABEL: Record<ReturnCollectionStatus, string> = {
   pending: 'بانتظار المتابعة', no_answer: 'لا يرد', reason_known: 'تم معرفة السبب', paid: 'تم الدفع', refused: 'تم الرفض',
+  resend: 'أُعيد الإرسال',
 };
 
 /* ══════════════════════════════════════════════════════════════════════════ */
@@ -146,6 +171,15 @@ export default function ReturnsCollectionPage() {
   const [payTarget, setPayTarget] = useState<ReturnCollection | null>(null);
   const [payAmount, setPayAmount] = useState('');
   const [paySaving, setPaySaving] = useState(false);
+
+  /* Resend modal — sends the order back to its confirmation agent. */
+  const [resendTarget, setResendTarget] = useState<ReturnCollection | null>(null);
+  const [resendNote,   setResendNote]   = useState('');
+  const [resendSaving, setResendSaving] = useState(false);
+  /* Unsaved text in each row's notes textarea (it saves on blur). Clicking
+     «إعادة إرسال» right after typing blurs the textarea, but its PATCH hasn't
+     come back yet — this keeps the modal from opening with the stale note. */
+  const draftNotes = useRef<Record<number, string>>({});
 
   /* Settle modal (admin) */
   const [settleTarget, setSettleTarget] = useState<ReturnAnalyticsRow | null>(null);
@@ -248,7 +282,7 @@ export default function ReturnsCollectionPage() {
 
   /* ── Derived: bucket records by status for tab counts ────────────────────── */
   const counts = useMemo(() => {
-    const c: Record<ReturnCollectionStatus, number> = { pending: 0, no_answer: 0, reason_known: 0, paid: 0, refused: 0 };
+    const c: Record<ReturnCollectionStatus, number> = { pending: 0, no_answer: 0, reason_known: 0, paid: 0, refused: 0, resend: 0 };
     /* Counts honour the agent + product filters so the tab badges match the table. */
     for (const r of records) if (passesFilters(r)) c[r.status] = (c[r.status] ?? 0) + 1;
     return c;
@@ -269,7 +303,7 @@ export default function ReturnsCollectionPage() {
   }, [records, activeTab, search, passesFilters]);
 
   /* ── Actions ─────────────────────────────────────────────────────────────── */
-  const handleStatus = async (row: ReturnCollection, status: Exclude<ReturnCollectionStatus, 'paid'>) => {
+  const handleStatus = async (row: ReturnCollection, status: Exclude<ReturnCollectionStatus, 'paid' | 'resend'>) => {
     setBusyRow(row.id);
     try {
       const res = await updateReturnCollection(row.id, { status });
@@ -337,6 +371,39 @@ export default function ReturnsCollectionPage() {
       setTimeout(() => setCopied(false), 1800);
     } catch {
       showToast('فشل في نسخ الأرقام', 'error');
+    }
+  };
+
+  /* Open the resend modal, pre-filled with the row's latest note (unsaved draft
+     first) — the confirmation agent reads it before calling the customer. */
+  const openResend = (row: ReturnCollection) => {
+    setResendTarget(row);
+    setResendNote(draftNotes.current[row.id] ?? row.notes ?? '');
+  };
+
+  /* Send the order back to its ORIGINAL confirmation agent ('جديد' + resend
+     badge + the note). The row moves to «طلبات إعادة الإرسال» and stays there. */
+  const handleResend = async () => {
+    if (!resendTarget) return;
+    setResendSaving(true);
+    try {
+      const res = await resendReturnCollection(resendTarget.id, resendNote);
+      delete draftNotes.current[resendTarget.id];
+      /* Merge (see handleStatus) and reflect the order's new live status. */
+      setRecords((prev) => prev.map((r) => (r.id === resendTarget.id
+        ? { ...r, ...res.data.record, order_status: res.data.order.Status }
+        : r)));
+      setResendTarget(null);
+      if (res.data.unassigned) {
+        showToast('تمت إعادة الإرسال، لكن الطلب غير مُسند لموظف تأكيد — يحتاج إسناد من المدير', 'error');
+      } else {
+        showToast('تمت إعادة الإرسال — الطلب الآن في «جديد» لدى موظف التأكيد', 'success');
+      }
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'تعذّر إعادة إرسال الطلب';
+      showToast(msg, 'error');
+    } finally {
+      setResendSaving(false);
     }
   };
 
@@ -679,6 +746,7 @@ export default function ReturnsCollectionPage() {
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">تاريخ الطلب</th>
                     <th className="text-right font-semibold px-4 py-3">ملاحظات</th>
                     {seesAccountability && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">موظف التأكيد</th>}
+                    {activeTab === 'resend' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">حالة الطلب الآن</th>}
                     {showMoney && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">المُحصّل</th>}
                     {showMoney && activeTab === 'paid' && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">العمولة</th>}
                     <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">الإجراءات</th>
@@ -701,7 +769,7 @@ export default function ReturnsCollectionPage() {
                             read-only Team Leaders see the wrapped text instead. The row grows
                             to fit either way. */}
                         <td className="px-4 py-3 min-w-[13rem] max-w-[20rem]">
-                          {(r.status === 'paid' || !canWrite) ? (
+                          {(r.status === 'paid' || r.status === 'resend' || !canWrite) ? (
                             <p className="text-xs leading-relaxed text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-words">
                               {r.notes || '—'}
                             </p>
@@ -710,6 +778,7 @@ export default function ReturnsCollectionPage() {
                               rows={2}
                               defaultValue={r.notes ?? ''}
                               placeholder="أضف ملاحظة…"
+                              onChange={(e) => { draftNotes.current[r.id] = e.target.value; }}
                               onBlur={(e) => handleNotesBlur(r, e.target.value)}
                               className="w-full min-h-[60px] resize-y px-2 py-1.5 rounded-lg text-xs leading-relaxed
                                 whitespace-pre-wrap break-words bg-slate-50 dark:bg-slate-800
@@ -778,6 +847,13 @@ export default function ReturnsCollectionPage() {
                               : <span className="text-slate-300 dark:text-slate-600">—</span>}
                           </td>
                         )}
+                        {activeTab === 'resend' && (
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            {r.order_status
+                              ? <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${orderStatusChip(r.order_status)}`}>{r.order_status}</span>
+                              : <span className="text-slate-300 dark:text-slate-600">—</span>}
+                          </td>
+                        )}
                         {showMoney && activeTab === 'paid' && <td className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{fmt(r.collected_amount)} ج.م</td>}
                         {showMoney && activeTab === 'paid' && (
                           <td className="px-4 py-3 font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">
@@ -786,7 +862,7 @@ export default function ReturnsCollectionPage() {
                         )}
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            {(!canWrite || r.status === 'paid' || r.status === 'refused') ? (
+                            {(!canWrite || r.status === 'paid' || r.status === 'refused' || r.status === 'resend') ? (
                               /* Terminal states, or a read-only Team Leader — status badge only. */
                               <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_BADGE[r.status]}`}>
                                 {STATUS_LABEL[r.status]}
@@ -809,6 +885,26 @@ export default function ReturnsCollectionPage() {
                                   className="px-2.5 py-1.5 text-xs rounded-lg font-semibold transition bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
                                   تم الدفع
                                 </button>
+                                {/* Customer wants the order again → back to its confirmation agent. */}
+                                {(() => {
+                                  const blockReason = !r.order_id
+                                    ? 'هذا المرتجع غير مرتبط بطلب في النظام'
+                                    : r.order_status && !RESENDABLE_ORDER_STATUSES.includes(r.order_status)
+                                      ? `حالة الطلب «${r.order_status}» لا تسمح بإعادة الإرسال`
+                                      : '';
+                                  return (
+                                    <button onClick={() => openResend(r)} disabled={busy || !!blockReason}
+                                      title={blockReason || 'إرجاع الطلب لموظف التأكيد الأصلي'}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg font-semibold transition
+                                        bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed">
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                      </svg>
+                                      إعادة إرسال
+                                    </button>
+                                  );
+                                })()}
                                 {/* Refuse / archive — reviewers don't have this action. */}
                                 {!isReviewer && (
                                   <button onClick={() => handleRefused(r)} disabled={busy} title="نقل إلى قائمة الرفض"
@@ -892,6 +988,50 @@ export default function ReturnsCollectionPage() {
               {paySaving ? 'جارٍ التسجيل…' : 'تأكيد التحصيل'}
             </button>
             <button onClick={() => setPayTarget(null)} disabled={paySaving}
+              className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 disabled:opacity-50">
+              إلغاء
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ══ Resend modal ═══════════════════════════════════════════════════ */}
+      {resendTarget && (
+        <Modal onClose={() => !resendSaving && setResendTarget(null)}>
+          <h2 className="text-base font-bold text-slate-800 dark:text-slate-100 mb-1">إعادة إرسال الطلب لموظف التأكيد</h2>
+          <p className="text-xs text-slate-400 dark:text-slate-500 mb-4">
+            {resendTarget.customer_name || '—'}{resendTarget.tracking_number ? ` · ${resendTarget.tracking_number}` : ''}
+          </p>
+
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+            ملاحظة لموظف التأكيد (سبب الإرجاع وطلب العميل)
+          </label>
+          <textarea
+            rows={4}
+            autoFocus
+            value={resendNote}
+            onChange={(e) => setResendNote(e.target.value)}
+            placeholder="مثال: العميل كان مسافر وقت التوصيل، عايز الطلب يوصل الأسبوع الجاي على نفس العنوان"
+            className="w-full resize-y px-3 py-2.5 rounded-xl text-sm leading-relaxed outline-none border border-slate-300 dark:border-slate-700
+              bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-200 focus:ring-2 focus:ring-orange-400 focus:border-transparent"
+          />
+
+          <div className="mt-4 rounded-xl bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800/50 p-3 text-xs leading-relaxed text-slate-600 dark:text-slate-300 space-y-1">
+            <p>
+              • يرجع الطلب إلى قائمة <strong>«جديد»</strong> عند موظف التأكيد الأصلي
+              {seesAccountability && resendTarget.confirmation_agent_name ? <> (<strong>{resendTarget.confirmation_agent_name}</strong>)</> : null}
+              {' '}مع علامة <strong className="text-orange-700 dark:text-orange-400">إعادة إرسال</strong>.
+            </p>
+            <p>• تُضاف الملاحظة لملاحظات الطلب بعنوان «[ملاحظة المرتجعات]».</p>
+            <p>• يبقى السجل هنا في تبويب «طلبات إعادة الإرسال» للمتابعة.</p>
+          </div>
+
+          <div className="flex gap-3 mt-6">
+            <button onClick={handleResend} disabled={resendSaving}
+              className="flex-1 bg-orange-500 hover:bg-orange-600 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50">
+              {resendSaving ? 'جارٍ الإرسال…' : 'تأكيد إعادة الإرسال'}
+            </button>
+            <button onClick={() => setResendTarget(null)} disabled={resendSaving}
               className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 disabled:opacity-50">
               إلغاء
             </button>

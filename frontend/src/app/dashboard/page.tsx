@@ -56,12 +56,18 @@ const RETURNS_AUDIT_STATUSES = ['جاري الإعادة', 'تم الإرجاع'
    "Status" value). */
 const RECONFIRM_FILTER = 'مؤجلات تستحق التأكيد';
 
+/* Virtual tab for orders the returns team sent back (is_resend). Maps to
+   `resend=true` on the API — not a Status value, so it spans every status
+   (the agent can see what became of each resend, not only the pending ones). */
+const RESEND_FILTER = 'طلبات إعادة الإرسال';
+
 /* All-zero placeholder backing `stats` until the first /stats response lands
    (the card grid shows skeletons instead of these zeros). Stat cards and pill
    counts are STRICTLY server-hydrated — never derived from loaded rows.     */
 const EMPTY_STATS: OrderStats = {
   total: 0, new: 0, confirmed: 0, rejected: 0, postponed: 0, noAnswer: 0,
   shipped: 0, confirmedCumulative: 0, shippedCumulative: 0, reconfirm: 0,
+  resend: 0, resendPending: 0,
   byStatus: {}, byAgent: {}, agentTotal: 0,
 };
 
@@ -258,9 +264,10 @@ export default function DashboardPage() {
        return statuses (comma list → btrim(Status) = ANY on the server); the
        reconfirm tab maps to its own flag, not a Status value. */
     status:    activeFilter === RETURNS_AUDIT_FILTER ? RETURNS_AUDIT_STATUSES.join(',')
-             : activeFilter !== 'الكل' && activeFilter !== RECONFIRM_FILTER ? activeFilter
+             : activeFilter !== 'الكل' && activeFilter !== RECONFIRM_FILTER && activeFilter !== RESEND_FILTER ? activeFilter
              : undefined,
     reconfirm: activeFilter === RECONFIRM_FILTER ? true : undefined,
+    resend:    activeFilter === RESEND_FILTER ? true : undefined,
     agent:     activeAgent !== 'كل الفريق' ? activeAgent : undefined,
     product:   activeProduct !== 'كل المنتجات' ? activeProduct : undefined,
     dateFrom:  startDate || undefined,
@@ -1173,6 +1180,9 @@ export default function DashboardPage() {
   // exact over the whole history; loaded-rows count is the fallback until the
   // first /stats response lands.
   const reconfirmCount = serverStats?.reconfirm ?? 0;   // strictly server-hydrated
+  /* Resend tab: total resent orders in scope; pulses while any still await a call. */
+  const resendCount        = serverStats?.resend ?? 0;
+  const resendPendingCount = serverStats?.resendPending ?? 0;
 
   // 3b. Status + date — final display set
   const filtered = (() => {
@@ -1180,6 +1190,13 @@ export default function DashboardPage() {
       // Special path: ignore date range; sort closest postponed date first
       return [...productFiltered.filter(needsReconfirmation)].sort(
         (a, b) => new Date(a.PostponedDate!).getTime() - new Date(b.PostponedDate!).getTime()
+      );
+    }
+    if (activeFilter === RESEND_FILTER) {
+      // Resent orders, any status. Their createdAt is the ORIGINAL order date
+      // (often weeks old), so sort by when they were sent back instead.
+      return [...dateScoped.filter((o) => o.is_resend === true)].sort(
+        (a, b) => new Date(b.resend_at ?? 0).getTime() - new Date(a.resend_at ?? 0).getTime()
       );
     }
     if (activeFilter === RETURNS_AUDIT_FILTER) {
@@ -3124,6 +3141,36 @@ export default function DashboardPage() {
                     : 'bg-amber-500 text-white animate-pulse'}`}
             >
               {reconfirmCount}
+            </span>
+          </button>
+
+          {/* ── Resend tab — orders the returns team sent back ───────────── */}
+          <button
+            onClick={() => setActiveFilter(RESEND_FILTER)}
+            title="الطلبات التي أعادها فريق المرتجعات للتأكيد مرة أخرى"
+            className={`relative flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all duration-150
+              ${activeFilter === RESEND_FILTER
+                ? 'bg-orange-600 text-white shadow-sm'
+                : 'bg-orange-50 text-orange-700 border border-orange-300 hover:bg-orange-100 dark:bg-orange-900/30 dark:text-orange-400 dark:border-orange-700/50 dark:hover:bg-orange-900/50'}`}
+          >
+            <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            {RESEND_FILTER}
+            <span
+              title={`${resendPendingCount} بانتظار الاتصال`}
+              className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full
+                text-xs font-bold leading-none
+                ${resendCount === 0
+                  ? 'bg-orange-200 text-orange-600'
+                  : activeFilter === RESEND_FILTER
+                    ? 'bg-white text-orange-600'
+                    : resendPendingCount > 0
+                      ? 'bg-orange-600 text-white animate-pulse'
+                      : 'bg-orange-500 text-white'}`}
+            >
+              {serverStats === null ? '…' : resendCount}
             </span>
           </button>
 

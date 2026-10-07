@@ -276,6 +276,24 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "rejectionReason" VARCHA
   .then(() => console.log('✅  Orders: "rejectionReason" column ready'))
   .catch((err) => console.warn('⚠️   Orders rejectionReason column check:', err.message));
 
+/* ── Resend (إعادة إرسال) — set by POST /api/return-collections/:id/resend ────
+   A returned order the customer asked to receive again goes back to its
+   ORIGINAL confirmation agent's 'جديد' queue:
+     is_resend                 → permanent flag (badge + «طلبات إعادة الإرسال» filter)
+     resend_note               → the returns agent's feedback, shown in full on the row
+                                 (also appended to "Note", but that cell is one line)
+     resend_at                 → when it was sent back
+     resend_previous_tracking  → the bounced parcel's tracking code. Cleared from
+                                 "BostaTrackingCode" so Bosta webhooks for the OLD
+                                 parcel can't overwrite the new status, and so the
+                                 re-confirmed order is dispatchable again.        */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_resend BOOLEAN NOT NULL DEFAULT FALSE`)
+  .then(() => pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS resend_note TEXT`))
+  .then(() => pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS resend_at TIMESTAMPTZ`))
+  .then(() => pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS resend_previous_tracking VARCHAR(100)`))
+  .then(() => console.log('✅  Orders: resend columns ready'))
+  .catch((err) => console.warn('⚠️   Orders resend columns check:', err.message));
+
 /* ── Server-side filter builder for GET / and GET /stats ─────────────────────
    Composes a WHERE clause + params array from the request's query-string
    filters, so the DB does the filtering (over the FULL tenant history) instead
@@ -294,6 +312,7 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "rejectionReason" VARCHA
      status    — btrim'd "Status" equality (webhook/import rows can carry stray whitespace)
      reconfirm — postponed orders whose follow-up date is within the next 3 days
                  (mirrors the frontend's needsReconfirmation window)
+     resend    — orders flagged is_resend (sent back by the returns team)
      product   — ILIKE containment on "ProductName": the UI passes the 3-word
                  "short name" (see getShortName in page.tsx), which appears
                  contiguously inside the raw name in practice
@@ -323,6 +342,7 @@ function buildOrderScope(req, include = {}) {
   const {
     agent: incAgent = true, status: incStatus = true, search: incSearch = true,
     product: incProduct = true, dates: incDates = true, reconfirm: incReconfirm = true,
+    resend: incResend = true,
   } = include;
 
   const lostOnly = String(req.query.lost).toLowerCase() === 'true';
@@ -365,6 +385,11 @@ function buildOrderScope(req, include = {}) {
 
   if (incReconfirm && String(req.query.reconfirm).toLowerCase() === 'true') {
     where.push(`(${RECONFIRM_PREDICATE})`);
+  }
+
+  /* «طلبات إعادة الإرسال» — orders the returns team sent back for re-confirmation. */
+  if (incResend && String(req.query.resend).toLowerCase() === 'true') {
+    where.push('is_resend = TRUE');
   }
 
   if (incProduct && typeof req.query.product === 'string' && req.query.product.trim()) {
@@ -492,7 +517,8 @@ router.get('/', authenticate, async (req, res) => {
       o."Note", o."ShippingNotes", o."createdAt", o."ProductName", o."ProductPrice",
       o."quantity", o."AssignedTo", o."PostponedDate", o."BostaTrackingCode",
       o."rejectionReason", o."sku", o."hasDeposit", o."depositAmount",
-      o."unit_cost_price", o.no_answer_logs, o.is_lost_order, o.shipped_at`;
+      o."unit_cost_price", o.no_answer_logs, o.is_lost_order, o.shipped_at,
+      o.is_resend, o.resend_note, o.resend_at`;
 
     let cursorClause = '';
     if (typeof req.query.cursor === 'string' && req.query.cursor.includes('|')) {
@@ -622,6 +648,7 @@ router.get('/delayed', authenticate, async (req, res) => {
   try {
     const scope = buildOrderScope(req, {
       agent: false, status: false, search: false, product: false, dates: false, reconfirm: false,
+      resend: false,
     });
     const { rows } = await pool.query(
       `SELECT id,
@@ -667,13 +694,14 @@ router.get('/stats', authenticate, async (req, res) => {
     /* Main scope: honors agent/product/date filters but NOT status/search/
        reconfirm — the stat cards + status-pill counts break down BY status,
        and (matching the old client behavior) search never affected the cards. */
-    const main = buildOrderScope(req, { status: false, search: false, reconfirm: false });
+    const main = buildOrderScope(req, { status: false, search: false, reconfirm: false, resend: false });
 
     /* Agent-pill scope: whole tenant queue, ignoring every UI filter — the
        team-filter pill for agent B must keep its real count while agent A is
        selected (matching the old client counts over the full array). */
     const agentScope = buildOrderScope(req, {
       agent: false, status: false, search: false, product: false, dates: false, reconfirm: false,
+      resend: false,
     });
 
     const [counters, byStatusRows, byAgentRows] = await Promise.all([
@@ -692,7 +720,9 @@ router.get('/stats', authenticate, async (req, res) => {
            COUNT(*) FILTER (
              WHERE "Status" IN ('تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع')
            )                                                                            AS "shippedCumulative",
-           COUNT(*) FILTER (WHERE ${RECONFIRM_PREDICATE})                               AS reconfirm
+           COUNT(*) FILTER (WHERE ${RECONFIRM_PREDICATE})                               AS reconfirm,
+           COUNT(*) FILTER (WHERE is_resend = TRUE)                                     AS resend,
+           COUNT(*) FILTER (WHERE is_resend = TRUE AND "Status" = 'جديد')              AS "resendPending"
           FROM orders
          WHERE ${main.where}`,
         main.params
@@ -730,6 +760,8 @@ router.get('/stats', authenticate, async (req, res) => {
       confirmedCumulative: Number(row.confirmedCumulative),
       shippedCumulative:   Number(row.shippedCumulative),
       reconfirm:           Number(row.reconfirm),
+      resend:              Number(row.resend),
+      resendPending:       Number(row.resendPending),
       byStatus,
       byAgent,
       agentTotal,

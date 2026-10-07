@@ -45,8 +45,10 @@ const RETURN_SYNC_MIN_ORDER_DATE = new Date('2026-09-01T00:00:00Z');
 /* Workflow states the queue is bucketed into. 'paid' is terminal; 'refused'
    is an archive state for customers who refuse to pay (kept for CRM/accounting
    history instead of hard-deleting). 'reason_known' (تم معرفة السبب) replaced the
-   old 'follow_up' bucket — legacy rows are migrated in the schema bootstrap. */
-const VALID_STATUSES   = ['pending', 'no_answer', 'reason_known', 'paid', 'refused'];
+   old 'follow_up' bucket — legacy rows are migrated in the schema bootstrap.
+   'resend' is set ONLY by POST /:id/resend (the order went back to its
+   confirmation agent); the row stays here permanently for tracking. */
+const VALID_STATUSES   = ['pending', 'no_answer', 'reason_known', 'paid', 'refused', 'resend'];
 /* Statuses set via PATCH (paid goes through POST /:id/pay). Reverting a paid row
    back to one of these is allowed and unwinds its financials (see PATCH). */
 const PATCHABLE_STATUSES = ['pending', 'no_answer', 'reason_known', 'refused'];
@@ -207,7 +209,8 @@ router.get('/', authenticate, allowReturns, async (req, res) => {
       `SELECT rc.*,
               ${AGENT_NAME_SQL} AS handler_name,
               u.email           AS handler_email,
-              o."createdAt"     AS order_created_at${confCols}
+              o."createdAt"     AS order_created_at,
+              btrim(o."Status") AS order_status${confCols}
        FROM   return_collections rc
        LEFT   JOIN users  u  ON u.id = rc.handled_by
        LEFT   JOIN orders o  ON o.id = rc.order_id AND o.business_id = rc.business_id
@@ -281,6 +284,12 @@ router.patch('/:id', authenticate, allowReturns, async (req, res) => {
     );
     if (!cur.rows.length) return res.status(404).json({ error: 'السجل غير موجود' });
     const row = cur.rows[0];
+
+    /* A resent row is locked: its order already went back to the confirmation
+       queue, so moving the row to another bucket would desync the two. */
+    if (hasStatus && row.status === 'resend' && String(req.body.status) !== 'resend') {
+      return res.status(400).json({ error: 'تمت إعادة إرسال هذا الطلب لموظف التأكيد — لا يمكن تغيير حالته من هنا' });
+    }
 
     const isRevert = hasStatus && row.status === 'paid' && String(req.body.status) !== 'paid';
     if (isRevert) {
@@ -488,6 +497,144 @@ router.post('/:id/pay', authenticate, allowReturns, requireWrite, async (req, re
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[return-collections pay]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  } finally {
+    client.release();
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════════════
+   POST /api/return-collections/:id/resend   { notes? }
+   The customer asked for the order again (إعادة إرسال). In ONE transaction:
+     • the ORDER goes back to 'جديد' — the confirmation queue — with its
+       "AssignedTo" untouched (same confirmation agent), is_resend = TRUE, and
+       the returns note appended to "Note" as «[ملاحظة المرتجعات]: …» (full text
+       also kept in resend_note for the row's prominent display);
+     • the RETURN row moves to 'resend' and stays in this module permanently.
+
+   Deliberately a direct UPDATE, NOT the orders PATCH route: that route's
+   status hooks would VOID the agent's original confirmation commission on the
+   move to 'جديد' and could move stock. Here nothing financial changes:
+     • commission — the original comm_confirmed stays; re-confirming later can't
+       double it (unique index per order + source).
+     • stock — stock_deducted is kept as-is, which is right either way:
+         'تم الإرجاع'   → already restocked (false) → re-confirming deducts again;
+         'جاري الإعادة' → unit still out (true) and comes back to be re-sent, so
+                          re-confirming must NOT deduct again.
+   The bounced parcel's tracking code is moved to resend_previous_tracking and
+   cleared: otherwise Bosta webhooks for that OLD parcel would overwrite the new
+   status, and shipping skips orders that already carry a tracking code.
+   ════════════════════════════════════════════════════════════════════════════ */
+/* Order states a resend may start from. 'تم الشحن' is included because Bosta can
+   list a parcel as returning before our own status catches up. */
+const RESENDABLE_ORDER_STATUSES = ['جاري الإعادة', 'تم الإرجاع', 'تم الشحن'];
+const RESEND_NOTE_PREFIX = '[ملاحظة المرتجعات]:';
+
+router.post('/:id/resend', authenticate, allowReturns, requireWrite, async (req, res) => {
+  const businessId = req.user.business_id;
+  const { id }     = req.params;
+  const body       = req.body || {};
+  const hasNotes   = Object.prototype.hasOwnProperty.call(body, 'notes');
+
+  if (hasNotes && body.notes != null && typeof body.notes !== 'string') {
+    return res.status(400).json({ error: 'قيمة غير صالحة للملاحظة' });
+  }
+  if (hasNotes && String(body.notes ?? '').length > 2000) {
+    return res.status(400).json({ error: 'الملاحظة طويلة جدًا (الحد 2000 حرف)' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const cur = await client.query(
+      `SELECT * FROM return_collections WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      [id, businessId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'السجل غير موجود' });
+    }
+    const row = cur.rows[0];
+    if (row.status === 'resend') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'تمت إعادة إرسال هذا الطلب لموظف التأكيد بالفعل' });
+    }
+    if (row.status === 'paid' || row.status === 'refused') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'لا يمكن إعادة إرسال مرتجع مغلق (تم الدفع / تم الرفض)' });
+    }
+    if (!row.order_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'هذا المرتجع غير مرتبط بطلب في النظام — لا يمكن إعادة إرساله' });
+    }
+
+    const ord = await client.query(
+      `SELECT id, btrim("Status") AS status, "AssignedTo"
+         FROM orders WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      [row.order_id, businessId]
+    );
+    if (!ord.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'الطلب الأصلي غير موجود' });
+    }
+    const order = ord.rows[0];
+    if (!RESENDABLE_ORDER_STATUSES.includes(order.status)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `حالة الطلب الحالية «${order.status}» لا تسمح بإعادة الإرسال` });
+    }
+
+    /* The note the confirmation agent will read. The order's "Note" cell is a
+       single-line input, so the appended copy is flattened onto one line. */
+    const rawNotes = hasNotes ? String(body.notes ?? '') : String(row.notes ?? '');
+    const note     = rawNotes.trim();
+    const noteLine = note ? `${RESEND_NOTE_PREFIX} ${note.replace(/\s*\n+\s*/g, ' — ')}` : '';
+
+    const updOrder = await client.query(
+      `UPDATE orders
+          SET "Status"                 = 'جديد',
+              is_resend                = TRUE,
+              resend_at                = NOW(),
+              resend_note              = NULLIF($1, ''),
+              resend_previous_tracking = COALESCE("BostaTrackingCode", resend_previous_tracking),
+              "BostaTrackingCode"      = NULL,
+              shipped_at               = NULL,
+              delivered_at             = NULL,
+              bosta_action_required    = FALSE,
+              is_bosta_delayed         = FALSE,
+              "Note" = CASE
+                         WHEN $2 = ''                          THEN "Note"
+                         WHEN COALESCE(btrim("Note"), '') = '' THEN $2
+                         ELSE "Note" || ' | ' || $2
+                       END
+        WHERE id = $3 AND business_id = $4
+        RETURNING id, "Status", "AssignedTo", is_resend`,
+      [note, noteLine, order.id, businessId]
+    );
+
+    const updRc = await client.query(
+      `UPDATE return_collections
+          SET status     = 'resend',
+              notes      = $1,
+              handled_by = COALESCE(handled_by, $2),
+              updated_at = NOW()
+        WHERE id = $3 AND business_id = $4
+        RETURNING *`,
+      [rawNotes, req.user.id, id, businessId]
+    );
+
+    await client.query('COMMIT');
+    console.log(`[return-collections resend] rc ${id} → order ${order.id} back to 'جديد' for ${order.AssignedTo || '(unassigned)'} (was "${order.status}")`);
+    res.json({
+      record:     updRc.rows[0],
+      order:      updOrder.rows[0],
+      /* No confirmation agent on the order (e.g. their account was deleted) — an
+         admin must assign it, or it sits unseen in the queue. */
+      unassigned: !order.AssignedTo,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[return-collections resend]', err);
     res.status(500).json({ error: 'خطأ في الخادم' });
   } finally {
     client.release();
