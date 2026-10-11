@@ -72,6 +72,8 @@ export interface ShippingResult {
   total_pending?: number;
   processed?:     number;
   remaining?:     number;
+  /* Distinct product names Bosta rejected for a missing image (open-package on). */
+  blocked_products?: string[];
 }
 
 export type PlanType = 'affiliate' | 'ecommerce';

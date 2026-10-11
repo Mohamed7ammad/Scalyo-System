@@ -2617,6 +2617,19 @@ export default function DashboardPage() {
                     </div>
                   </div>
 
+                  {/* Products Bosta blocked for a missing image (open-package is
+                      mandatory) — one list instead of N repeated row errors. */}
+                  {!!shippingResult.blocked_products?.length && (
+                    <div className="mb-5 p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-800">
+                      <p className="font-semibold mb-1.5">
+                        تم إيقاف الإرسال — هذه المنتجات تحتاج صورة في لوحة تحكم بوسطة (خاصية «فتح الشحنة» مفعّلة):
+                      </p>
+                      <ul className="list-disc pr-5 space-y-0.5 text-xs leading-relaxed">
+                        {shippingResult.blocked_products.map((p) => <li key={p} className="break-words">{p}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
                   {/* Batch cap: more orders were pending than shipped this run. */}
                   {!!shippingResult.remaining && shippingResult.remaining > 0 && (
                     <div className="mb-5 flex items-center justify-between gap-3 p-3 rounded-xl
@@ -2654,17 +2667,21 @@ export default function DashboardPage() {
                     ))}
 
                     {/* Failures */}
+                    {/* Failures — the error is shown IN FULL (wrapped): it names the
+                        exact product that needs an image in Bosta, so it must never
+                        be cut off. */}
                     {shippingResult.failed.map((row) => (
                       <div key={row.orderId}
-                        className="flex items-center justify-between gap-3 p-3 bg-red-50
-                          border border-red-100 rounded-xl text-sm">
-                        <div className="min-w-0">
-                          <p className="font-semibold text-gray-800 truncate">{row.name}</p>
-                          <p className="text-xs text-gray-500 mt-0.5" dir="ltr">{row.phone}</p>
+                        className="p-3 bg-red-50 border border-red-100 rounded-xl text-sm">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <p className="font-semibold text-gray-800 truncate min-w-0">{row.name}</p>
+                          <p className="shrink-0 text-xs text-gray-500" dir="ltr">{row.phone}</p>
                         </div>
-                        <div className="shrink-0 text-right max-w-[150px]">
-                          <p className="text-xs text-red-500 truncate" title={row.error}>{row.error}</p>
-                        </div>
+                        {row.error && (
+                          <p className="mt-1.5 text-xs leading-relaxed text-red-600 whitespace-normal break-words">
+                            {row.error}
+                          </p>
+                        )}
                       </div>
                     ))}
                   </div>
