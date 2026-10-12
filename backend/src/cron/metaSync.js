@@ -13,10 +13,9 @@
  * Safety guarantees
  * ─────────────────
  * • If Meta credentials are not configured the first run logs a 400 and skips.
- * • If the Meta API returns any error (blocked account, expired token,
- *   rate-limit) a 2-hour cooldown is automatically activated by runMetaSync.
- *   The cron checks isCronCoolingDown() BEFORE calling the API so it never
- *   hammers a restricted endpoint.
+ * • If the Meta API returns an error for an ad account (blocked account,
+ *   expired token, revoked permission, rate-limit) runMetaSync pauses THAT
+ *   account for 2 hours; the other accounts keep syncing every tick.
  * • The expenses DB table is NEVER touched when an API error occurs — all
  *   data fetching completes before any DB write begins, and the DELETE has
  *   been permanently disabled.  Existing historical data is always safe.
@@ -26,7 +25,7 @@
  */
 
 const cron = require('node-cron');
-const { runMetaSync, isCronCoolingDown } = require('../routes/meta');
+const { runMetaSync } = require('../routes/meta');
 
 /* ── Date helpers (server local time) ─────────────────────────────────────── */
 
@@ -50,15 +49,8 @@ function startMetaSyncCron() {
     /* Prominent fire marker — confirms in PM2 logs that the tick actually ran. */
     console.log(`[CRON] 🔔 Meta Sync TICK firing — ${new Date().toISOString()}`);
 
-    /* ── Cooldown gate ──────────────────────────────────────────────────────
-       If the previous sync hit an API error (blocked account, expired token,
-       rate-limit) runMetaSync activates a 2-hour cooldown.  We skip this
-       tick entirely so we never hammer a restricted endpoint.  The dashboard
-       continues serving historical data from the DB during the cooldown.   */
-    if (isCronCoolingDown()) {
-      console.warn('[CRON] ⏸️  Meta sync skipped — API-error cooldown is active. Dashboard serving historical data. Will retry after cooldown expires.');
-      return;
-    }
+    /* Cooldown is PER AD ACCOUNT (inside runMetaSync): an account that just hit
+       an API error is skipped for 2 h while every other account keeps syncing. */
 
     const yesterday = localDateStr(-1);
     const today     = localDateStr(0);
@@ -81,8 +73,7 @@ function startMetaSyncCron() {
          The cooldown was already set inside runMetaSync before this throw,
          so the next N ticks will be silently skipped until it expires.      */
       if (err.isCooldown) {
-        /* Shouldn't reach here (we check isCronCoolingDown above) but just
-           in case of a race between two concurrent syncs.                   */
+        console.warn('[CRON] ⏸️  Meta sync skipped — every ad account is cooling down after an API error. Dashboard serving historical data.');
         return;
       }
       console.error(`[CRON] ⚠️  Meta sync failed (${err.statusCode ?? 'ERR'}): ${err.message}`);

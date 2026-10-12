@@ -17,22 +17,36 @@ const META_GRAPH = 'https://graph.facebook.com/v19.0';
    The flag is in-process memory only — a backend restart clears it, which
    is the natural action an admin takes after fixing credentials/permissions.
    Manual syncs (POST /api/meta/sync) are NOT gated by this flag so admins
-   can always test a fresh token immediately from the UI.                    */
-let _cronCooldownUntil = 0;   // epoch-ms; 0 = no cooldown active
+   can always test a fresh token immediately from the UI.
+   PER ACCOUNT (meta_accounts.id → epoch-ms): one account's error pauses ONLY
+   that account. It used to be ONE global timestamp, so another tenant's expired
+   token froze every other account's cron sync for 2 h at a time.            */
+const _cronCooldownUntil = new Map();
 
-function setCronCooldown(durationMs = 2 * 60 * 60 * 1000 /* 2 h default */) {
-  _cronCooldownUntil = Date.now() + durationMs;
+function setCronCooldown(accountId, durationMs = 2 * 60 * 60 * 1000 /* 2 h default */) {
+  const until = Date.now() + durationMs;
+  _cronCooldownUntil.set(accountId, until);
   console.warn(
-    `[meta] ⏸️  Cron sync paused for 2 h after API error. ` +
-    `Cooldown expires at ${new Date(_cronCooldownUntil).toISOString()}. ` +
-    `Manual sync from the UI is still available.`
+    `[meta] ⏸️  Cron sync paused for account #${accountId} (2 h) after API error. ` +
+    `Cooldown expires at ${new Date(until).toISOString()}. ` +
+    `Other accounts keep syncing; manual sync from the UI is still available.`
   );
 }
 
-/** Called by the cron job before each tick to avoid hammering a blocked API. */
-function isCronCoolingDown() {
-  return Date.now() < _cronCooldownUntil;
+/** True while this account's cron sync is paused after an API error. */
+function isCronCoolingDown(accountId) {
+  return Date.now() < (_cronCooldownUntil.get(accountId) || 0);
 }
+
+/* A newly added ad account has no synced history, but the cron only fetches
+   yesterday → today. Its first successful sync therefore reaches back this many
+   days so the spend it ran before being connected is not silently missing. */
+const FIRST_SYNC_BACKFILL_DAYS = 30;
+const shiftDate = (ymd, days) => {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
 
 /* ── Idempotent migration: settings table ────────────────────────────────────
    Generic key-value store for integration credentials.  All values are TEXT
@@ -611,12 +625,7 @@ async function runMetaSync(startDate, endDate, { ignoreCooldown = false, account
      cron doesn't hammer a blocked/rate-limited endpoint.  Manual syncs from
      the UI always pass ignoreCooldown = true so they bypass this and let the
      admin test a fresh token immediately.                                    */
-  if (!ignoreCooldown && isCronCoolingDown()) {
-    const e = new Error('API_COOLDOWN');
-    e.statusCode  = 400;
-    e.isCooldown  = true;
-    throw e;
-  }
+  /* (Cooldown is now evaluated PER ACCOUNT inside the loop below.) */
 
   /* ── Load the active Meta accounts to sync ──────────────────────────────────
      Multi-account: we sync every active account (or a single one when accountId
@@ -659,10 +668,30 @@ async function runMetaSync(startDate, endDate, { ignoreCooldown = false, account
      lacks access to that ad account). Cooldown, if the failure was API-side, was
      already set inside syncSingleAccount. */
   const acctErrors = [];
+  const cooling    = [];
   for (const acct of accounts) {
+    /* Cron only: an account paused after its own API error is skipped — the
+       others still sync. Manual UI syncs (ignoreCooldown) always try every one. */
+    if (!ignoreCooldown && isCronCoolingDown(acct.id)) {
+      cooling.push(acct.id);
+      console.log(`[meta/runSync] ⏸️  Account #${acct.id} "${acct.accountName}" skipped — cooling down after an API error`);
+      continue;
+    }
     console.log(`[meta/runSync] ▶ Account #${acct.id} "${acct.accountName}" (act_${acct.adAccountId})`);
     try {
-      const r = await syncSingleAccount(acct, startDate, endDate);
+      /* First successful sync of a newly connected account → backfill. */
+      let acctStart = startDate;
+      const { rows: hasHistory } = await pool.query(
+        `SELECT 1 FROM expenses WHERE meta_sync = TRUE AND meta_account_id = $1 LIMIT 1`, [acct.id]
+      );
+      if (!hasHistory.length) {
+        const backfillStart = shiftDate(endDate, -FIRST_SYNC_BACKFILL_DAYS);
+        if (backfillStart < startDate) {
+          acctStart = backfillStart;
+          console.log(`[meta/runSync]   account #${acct.id} has no synced history → backfilling from ${acctStart}`);
+        }
+      }
+      const r = await syncSingleAccount(acct, acctStart, endDate);
       agg.totalSpend           += r.totalSpend;
       agg.campaignRowsInserted += r.campaignRowsInserted;
       r.insertedDates.forEach((d) => agg.insertedDates.add(d));
@@ -685,9 +714,17 @@ async function runMetaSync(startDate, endDate, { ignoreCooldown = false, account
     }
   }
 
-  /* Every account failed → surface a hard error (cooldown already set if API-side). */
-  if (accounts.length > 0 && acctErrors.length === accounts.length) {
-    const e = new Error(`فشلت مزامنة جميع حسابات Meta (${accounts.length}). أول خطأ: ${acctErrors[0].error}`);
+  /* Every account paused (cron) → nothing attempted this tick. */
+  if (cooling.length === accounts.length) {
+    const e = new Error('API_COOLDOWN');
+    e.statusCode = 400;
+    e.isCooldown = true;
+    throw e;
+  }
+  /* Every ATTEMPTED account failed → surface a hard error (cooldown already set if API-side). */
+  const attempted = accounts.length - cooling.length;
+  if (attempted > 0 && acctErrors.length === attempted) {
+    const e = new Error(`فشلت مزامنة جميع حسابات Meta (${attempted}). أول خطأ: ${acctErrors[0].error}`);
     e.statusCode    = acctErrors[0].metaCode ? 502 : 400;
     if (acctErrors[0].metaCode) e.metaCode = acctErrors[0].metaCode;
     e.accountErrors = acctErrors;
@@ -784,7 +821,7 @@ async function syncSingleAccount(acct, startDate, endDate) {
       const metaErr = e.response?.data?.error;
       if (metaErr) {
         /* Activate cooldown — DB is untouched; existing data is safe.        */
-        setCronCooldown();
+        setCronCooldown(acct.id);
         const msg = classifyMetaError(metaErr);
         console.error(`[meta/runSync] Meta API HTTP error (page ${pagesFetched + 1}):`, metaErr);
         const err      = new Error(msg);
@@ -806,7 +843,7 @@ async function syncSingleAccount(acct, startDate, endDate) {
     if (body?.error) {
       console.log('[RAW META ERROR]:', JSON.stringify(body.error, null, 2));
       /* Activate cooldown — DB is untouched; existing data is safe.          */
-      setCronCooldown();
+      setCronCooldown(acct.id);
       const msg      = classifyMetaError(body.error);
       console.error(`[meta/runSync] Meta API error-in-200 (page ${pagesFetched + 1}):`, body.error);
       const err      = new Error(msg);
@@ -976,12 +1013,11 @@ async function syncSingleAccount(acct, startDate, endDate) {
             `INSERT INTO expenses
                (expense_date, campaign_name, amount, meta_purchases, meta_sync, sku, meta_account_id, business_id, category)
              VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, 'إعلانات ميتا وتيك توك')
-             ON CONFLICT (expense_date, campaign_name, business_id)
+             ON CONFLICT (expense_date, campaign_name, business_id, meta_account_id)
              DO UPDATE SET
                amount          = EXCLUDED.amount,
                meta_purchases  = EXCLUDED.meta_purchases,
                sku             = EXCLUDED.sku,
-               meta_account_id = EXCLUDED.meta_account_id,
                category        = EXCLUDED.category`,
             [r.date, r.name, r.spend, r.purchases, r.sku, metaAccountId, businessId]
           );

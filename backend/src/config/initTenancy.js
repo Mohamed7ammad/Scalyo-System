@@ -277,16 +277,22 @@ async function phase3Enforce() {
     console.warn('⚠️   Phase 3: settings composite PK skipped:', err.message)
   );
 
-  /* ── 3f. Tenant-aware UPSERT arbiter for synced Meta expenses ──────────
-     Replaces the old 2-column (expense_date, campaign_name) unique index so
-     two tenants can hold the same campaign-day without colliding. */
+  /* ── 3f. UPSERT arbiter for synced Meta expenses — per tenant AND ad account ─
+     One row per (day, campaign name, tenant, ad account). meta_account_id is in
+     the key so the SAME campaign name running in two ad accounts on the same day
+     is stored as two rows and SUMmed by every report. The previous 3-column key
+     (expense_date, campaign_name, business_id) made the second account's sync
+     OVERWRITE the first account's spend for that campaign-day. The old index is
+     dropped only after the new one exists, so the arbiter is never missing. */
   await pool.query(`DROP INDEX IF EXISTS expenses_campaign_unique_idx`).catch(() => {});
   await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS expenses_campaign_tenant_uidx
-      ON expenses (expense_date, campaign_name, business_id)
-  `).catch((err) =>
-    console.warn('⚠️   Phase 3: expenses_campaign_tenant_uidx skipped:', err.message)
-  );
+    CREATE UNIQUE INDEX IF NOT EXISTS expenses_campaign_acct_uidx
+      ON expenses (expense_date, campaign_name, business_id, meta_account_id)
+  `)
+    .then(() => pool.query(`DROP INDEX IF EXISTS expenses_campaign_tenant_uidx`))
+    .catch((err) =>
+      console.warn('⚠️   Phase 3: expenses_campaign_acct_uidx skipped:', err.message)
+    );
 
   /* ── 3g. Tenant-aware ad-account uniqueness ──────────────────────────── */
   await pool.query(`DROP INDEX IF EXISTS meta_accounts_adacct_uidx`).catch(() => {});
