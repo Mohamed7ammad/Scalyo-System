@@ -2622,7 +2622,7 @@ export default function DashboardPage() {
                   {!!shippingResult.blocked_products?.length && (
                     <div className="mb-5 p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-800">
                       <p className="font-semibold mb-1.5">
-                        تم إيقاف الإرسال — هذه المنتجات تحتاج صورة في لوحة تحكم بوسطة (خاصية «فتح الشحنة» مفعّلة):
+                        تم إيقاف الإرسال — هذه المنتجات تحتاج صورة (خاصية «فتح الشحنة» مفعّلة). أضف «رابط صورة المنتج» في صفحة المخزون:
                       </p>
                       <ul className="list-disc pr-5 space-y-0.5 text-xs leading-relaxed">
                         {shippingResult.blocked_products.map((p) => <li key={p} className="break-words">{p}</li>)}

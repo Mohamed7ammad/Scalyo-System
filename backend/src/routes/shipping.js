@@ -252,16 +252,117 @@ const isMissingImageError = (err) =>
     String(err?.response?.data?.message ?? err?.response?.data?.error ?? err?.message ?? '')
   );
 
+/* ── Open-package delivery images — Bosta's real contract (verified 2026-10-12) ─
+   Since Oct 2026 Bosta rejects allowToOpenPackage without product photos.
+   Taken from Bosta's own merchant dashboard code (business.bosta.co create-order
+   flow) and probed live on api.bosta.co with our API key:
+     1. POST /deliveries/delivery-images/signed-url {type:'ALLOW_TO_OPEN_THE_PACKAGE'}
+        → { signedUrl, path }
+     2. PUT the image bytes to signedUrl (cloud storage — not the Bosta API)
+     3. send  deliveryImages: [{ type:'ALLOW_TO_OPEN_THE_PACKAGE', images:[path] }]
+        with the ROOT allowToOpenPackage:true.
+   Bosta checks the path really exists ("Invalid delivery image url" otherwise).
+   Image URLs / catalogue ids / SKUs in the payload do NOT satisfy the rule, and
+   flags set only inside specs are silently ignored (stored as false).        */
+const OPEN_PACKAGE_IMAGE_TYPE = 'ALLOW_TO_OPEN_THE_PACKAGE';
+const MAX_PRODUCT_IMAGE_BYTES = 10 * 1024 * 1024;
+const normKey = (v) => String(v ?? '').trim().toLowerCase();
+
+/* Per-dispatch-run helper: finds each order's product photo and uploads it to
+   Bosta ONCE per distinct image (every order of that product reuses the path).
+   Photo source, in order:
+     • our products.image_url (صفحة المخزون — matched like resolveProductForOrder:
+       SKU, then name, then aliases);
+     • Bosta's own product catalogue image, matched by referenceId = SKU (or name).
+   pathFor(order) → { path } | { path:null, reason:'no_image'|'upload_failed', detail } */
+function createOpenPackageImages(businessId, apiKey) {
+  let catalogue = null;            // Map 'sku:…'/'name:…' → Bosta defaultImage (fetched lazily, once)
+  const uploads = new Map();       // image URL → Promise<path>
+
+  async function bostaCatalogue() {
+    if (catalogue) return catalogue;
+    catalogue = new Map();
+    try {
+      const r = await enqueueBosta(
+        () => axios.get(`${BOSTA_BASE}/products`, { headers: { Authorization: apiKey }, timeout: 15_000 }),
+        'open-package catalogue'
+      );
+      const d = r.data?.data ?? r.data;
+      const list = Array.isArray(d) ? d : (d?.products ?? d?.list ?? d?.items ?? []);
+      for (const p of list) {
+        if (!p?.defaultImage) continue;
+        if (p.referenceId) catalogue.set(`sku:${normKey(p.referenceId)}`, p.defaultImage);
+        if (p.name)        catalogue.set(`name:${normKey(p.name)}`, p.defaultImage);
+      }
+    } catch (e) {
+      console.warn('[open-package] Bosta catalogue unavailable:', e.response?.status ?? '', e.message);
+    }
+    return catalogue;
+  }
+
+  async function imageUrlFor(order) {
+    const { rows } = await pool.query(
+      `SELECT name, sku, NULLIF(TRIM(image_url), '') AS image_url
+         FROM products
+        WHERE business_id = $3
+          AND (LOWER(TRIM(sku)) = LOWER(NULLIF(TRIM($1), ''))
+            OR LOWER(TRIM(name)) = LOWER(NULLIF(TRIM($2), ''))
+            OR EXISTS (SELECT 1 FROM unnest(COALESCE(aliases, '{}'::text[])) a
+                        WHERE LOWER(TRIM(a)) = LOWER(NULLIF(TRIM($1), ''))
+                           OR LOWER(TRIM(a)) = LOWER(NULLIF(TRIM($2), ''))))
+        ORDER BY CASE WHEN LOWER(TRIM(sku)) = LOWER(NULLIF(TRIM($1), '')) THEN 1
+                      WHEN LOWER(TRIM(name)) = LOWER(NULLIF(TRIM($2), '')) THEN 2 ELSE 3 END
+        LIMIT 1`,
+      [order.sku ?? '', order.ProductName ?? '', businessId]
+    );
+    const prod = rows[0];
+    if (prod?.image_url) return prod.image_url;
+    const cat = await bostaCatalogue();
+    for (const key of [`sku:${normKey(order.sku)}`, `sku:${normKey(prod?.sku)}`,
+                       `name:${normKey(prod?.name)}`, `name:${normKey(order.ProductName)}`]) {
+      if (!key.endsWith(':') && cat.has(key)) return cat.get(key);
+    }
+    return null;
+  }
+
+  async function upload(url) {
+    const img = await axios.get(url, {
+      responseType: 'arraybuffer', timeout: 20_000, maxContentLength: MAX_PRODUCT_IMAGE_BYTES,
+    });
+    const type = String(img.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (!type.startsWith('image/')) throw new Error(`الرابط لا يشير إلى صورة (${type || 'نوع غير معروف'})`);
+    const signedRes = await enqueueBosta(
+      () => axios.post(`${BOSTA_BASE}/deliveries/delivery-images/signed-url`, { type: OPEN_PACKAGE_IMAGE_TYPE },
+        { headers: { Authorization: apiKey, 'Content-Type': 'application/json' }, timeout: 15_000 }),
+      'open-package image signed-url'
+    );
+    const { signedUrl, path } = signedRes.data?.data ?? signedRes.data ?? {};
+    if (!signedUrl || !path) throw new Error('بوسطة لم تُرجع رابط رفع الصورة');
+    const put = await fetch(signedUrl, { method: 'PUT', body: Buffer.from(img.data), headers: { 'Content-Type': type } });
+    if (!put.ok) throw new Error(`فشل رفع الصورة إلى بوسطة (HTTP ${put.status})`);
+    console.log(`[open-package] uploaded product image → ${path}`);
+    return path;
+  }
+
+  return {
+    async pathFor(order) {
+      const url = await imageUrlFor(order);
+      if (!url) return { path: null, reason: 'no_image' };
+      if (!uploads.has(url)) uploads.set(url, upload(url));   // failures stay cached for this run
+      try {
+        return { path: await uploads.get(url) };
+      } catch (e) {
+        return { path: null, reason: 'upload_failed', detail: e.response?.status ? `HTTP ${e.response.status}` : e.message };
+      }
+    },
+  };
+}
+
 /** Map one DB order row to a Bosta delivery payload.
- *  NOTE (verified against the live Bosta API, Oct 2026): product images CANNOT be
- *  supplied here. Bosta rejects a delivery with HTTP 400 "Product images are
- *  required when allowToOpenPackage is enabled." unless the product carries an
- *  image INSIDE Bosta's own catalogue (uploaded in their dashboard) — sending
- *  image URLs in this payload (root or specs.packageDetails, under images /
- *  productImages / productImage) does NOT satisfy it; all variants were probed
- *  and still 400'd. So open-package is simply requested or not, and the dispatch
- *  loop retries without it when Bosta objects. */
-function toBosta(order, allowOpen = false, payWithPoints = false) {
+ *  Open-package needs product photos UPLOADED to Bosta first — pass the uploaded
+ *  `deliveryImagePath` (see createOpenPackageImages). Raw image URLs here are
+ *  rejected by Bosta. */
+function toBosta(order, allowOpen = false, payWithPoints = false, deliveryImagePath = null) {
   const { firstName, lastName } = splitName(order.FullName);
   const gov     = resolveBostaCity(order.City || order.Governorate);
   const isAllowed = allowOpen === true;
@@ -300,6 +401,10 @@ function toBosta(order, allowOpen = false, payWithPoints = false) {
     isAllowedToOpenPackage: isAllowed, // root-level v2 alternate B
     openPackage:            isAllowed, // v2 alternate C
     allowInspection:        isAllowed, // v2 alternate D
+    /* Product photo uploaded via Bosta's signed URL — mandatory with open-package. */
+    ...(isAllowed && deliveryImagePath
+      ? { deliveryImages: [{ type: OPEN_PACKAGE_IMAGE_TYPE, images: [deliveryImagePath] }] }
+      : {}),
 
     // ── Pay shipping fee from Bosta points/credits (exact dashboard key) ──
     payWithBostaCredits: useWallet,
@@ -506,9 +611,11 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
     const success = [];
     const failed  = [];
 
-    /* Distinct products blocked by Bosta's missing-image rule this run — surfaced
-       in the response so the admin knows exactly what to fix in Bosta. */
+    /* Distinct products blocked for a missing / unusable photo this run —
+       surfaced in the response so the admin knows exactly what to fix. */
     const blockedProducts = new Set();
+    /* Open-package photos: resolved + uploaded once per product per run. */
+    const openPackageImages = allowOpen === true ? createOpenPackageImages(businessId, apiKey) : null;
 
     console.log(`[shipping/forward] dispatching ${orders.length} order(s) via the throttled Bosta queue…`);
     for (const order of orders) {
@@ -532,7 +639,24 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
            Bosta rejects for a missing product image we do NOT silently ship
            without it — the order is left unshipped and reported, so the parcel
            always carries the feature the business sells on. */
-        const bostaRes = await postIt(toBosta(order, allowOpen, payWithPoints));
+        let deliveryImagePath = null;
+        if (openPackageImages) {
+          const img = await openPackageImages.pathFor(order);
+          if (!img.path) {
+            /* No usable photo → block here, before spending a Bosta call. */
+            const pName = (order.ProductName || '').trim() || 'غير محدد';
+            blockedProducts.add(pName);
+            const msg = img.reason === 'no_image'
+              ? `فشل الإرسال: لا توجد صورة للمنتج «${pName}» — أضف «رابط صورة المنتج» في صفحة المخزون (خاصية "فتح الشحنة" تتطلب صورة).`
+              : `فشل الإرسال: تعذّر رفع صورة المنتج «${pName}» إلى بوسطة (${img.detail}) — راجع «رابط صورة المنتج» في صفحة المخزون.`;
+            failed.push({ orderId: order.id, name: order.FullName, phone: order.Phone, error: msg, product: pName,
+              reason: img.reason === 'no_image' ? 'missing_product_image' : 'product_image_upload_failed' });
+            console.error(`❌  Bosta: order ${order.id} BLOCKED — ${img.reason} for "${pName}"${img.detail ? ' (' + img.detail + ')' : ''}`);
+            continue;
+          }
+          deliveryImagePath = img.path;
+        }
+        const bostaRes = await postIt(toBosta(order, allowOpen, payWithPoints, deliveryImagePath));
 
         /* Log full Bosta response so we can inspect every returned field */
         console.log('✅ Bosta Success Response Data:', JSON.stringify(bostaRes.data, null, 2));
@@ -582,7 +706,7 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
         if (isMissingImageError(err)) {
           const pName = (order.ProductName || '').trim() || 'غير محدد';
           blockedProducts.add(pName);
-          const msg = `فشل الإرسال: يجب رفع صورة للمنتج «${pName}» في لوحة تحكم بوسطة أولاً (خاصية "فتح الشحنة" مفعّلة).`;
+          const msg = `فشل الإرسال: رفضت بوسطة صورة المنتج «${pName}» (خاصية "فتح الشحنة" مفعّلة) — راجع «رابط صورة المنتج» في صفحة المخزون.`;
           failed.push({ orderId: order.id, name: order.FullName, phone: order.Phone, error: msg, product: pName, reason: 'missing_product_image' });
           console.error(`❌  Bosta: order ${order.id} BLOCKED — no product image for "${pName}"`);
           continue;
@@ -625,7 +749,7 @@ router.post('/forward', authenticate, requireAdmin, async (req, res) => {
         ? `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length}. متبقٍ ${remaining} طلب — اضغط "إرسال للشحن" مرة أخرى لإكمالها.`
         : `تم إرسال ${success.length} طلب بنجاح، فشل ${failed.length} طلب`)
         + (blocked.length > 0
-          ? ` — تم إيقاف الإرسال لمنتجات بدون صورة في بوسطة: ${blocked.join('، ')}. ارفع صورة كل منتج من لوحة تحكم بوسطة ثم أعد المحاولة.`
+          ? ` — تم إيقاف الإرسال لمنتجات بدون صورة صالحة: ${blocked.join('، ')}. أضف «رابط صورة المنتج» لكل منتج في صفحة المخزون ثم أعد المحاولة.`
           : ''),
       success,
       failed,
@@ -997,3 +1121,4 @@ module.exports = router;
 /* Exported for tests/scripts — payload shaping must stay verifiable offline. */
 module.exports.toBosta = toBosta;
 module.exports.isMissingImageError = isMissingImageError;
+module.exports.createOpenPackageImages = createOpenPackageImages;
