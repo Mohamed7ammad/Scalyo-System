@@ -31,4 +31,31 @@ function agentAllowsProduct(allowedProducts, productName) {
   });
 }
 
-module.exports = { normalizeProduct, agentAllowsProduct };
+/* ── Product-aware weighted assignment ───────────────────────────────────────
+   `agents` = [{ email, weight, allowed }]; each `order` = { id, product }.
+   For every order, among the agents ALLOWED to handle that product, picks the
+   one furthest behind their weighted pace ((count+1)/weight is lowest) — a smooth
+   weighted round-robin that also honours per-agent product restrictions. Orders
+   with NO eligible agent are left unassigned (never force-routed to an untrained
+   agent). With no restrictions this reproduces the old balanced distribution.
+   Returns { byAgent: Map email→[orderIds], counts: Map email→n, unassigned:[] }. */
+function assignProductAware(orders, agents) {
+  const counts  = new Map(agents.map((a) => [a.email, 0]));
+  const byAgent = new Map(agents.map((a) => [a.email, []]));
+  const unassigned = [];
+  for (const ord of orders) {
+    let best = null, bestScore = Infinity;
+    for (const a of agents) {
+      if (!agentAllowsProduct(a.allowed, ord.product)) continue;
+      const w = a.weight > 0 ? a.weight : 0.0001;
+      const score = (counts.get(a.email) + 1) / w;
+      if (score < bestScore) { bestScore = score; best = a; }
+    }
+    if (!best) { unassigned.push(ord.id); continue; }
+    byAgent.get(best.email).push(ord.id);
+    counts.set(best.email, counts.get(best.email) + 1);
+  }
+  return { byAgent, counts, unassigned };
+}
+
+module.exports = { normalizeProduct, agentAllowsProduct, assignProductAware };

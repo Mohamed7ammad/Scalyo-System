@@ -9,6 +9,7 @@ const { startStaffAlertsCron } = require('./cron/staffAlerts');
 const { startGhostPurgeCron } = require('./cron/ghostPurge');
 const { startSafqaReconcileCron } = require('./cron/safqaReconcile');
 const { startDeliveryRateBackfillCron } = require('./cron/deliveryRateBackfill');
+const { startAgentDisciplineCron } = require('./cron/agentDiscipline');
 const pool                    = require('./config/db');
 const { initTenancy }         = require('./config/initTenancy');
 
@@ -63,6 +64,8 @@ const easyorderRoutes       = require('./routes/easyorder');
 const returnCollectionsRoutes = require('./routes/returnCollections');
 const afterSalesRoutes        = require('./routes/afterSales');
 const exchangeReturnsRoutes   = require('./routes/exchangeReturns');
+const disciplineRoutes        = require('./routes/discipline');
+const trackAction             = require('./middleware/trackAction');
 
 const app = express();
 
@@ -79,7 +82,7 @@ app.use(cors({
 app.use(express.json());
 
 app.use('/api/auth',             authRoutes);
-app.use('/api/orders',           ordersRoutes);
+app.use('/api/orders',           trackAction, ordersRoutes); // trackAction → discipline action clock
 app.use('/api/webhooks',         webhookRoutes);
 app.use('/api/webhooks',         shippingWebhookRoutes); // POST /api/webhooks/bosta
 app.use('/api/returns',          returnsRoutes);
@@ -99,6 +102,7 @@ app.use('/api/integrations/easyorder', easyorderRoutes); // EasyOrder per-tenant
 app.use('/api/return-collections', returnCollectionsRoutes); // returned-parcel fee collection + agent commission settlement
 app.use('/api/after-sales',      afterSalesRoutes); // post-delivery customer issue tracking (خدمة ما بعد البيع)
 app.use('/api/exchange-returns', exchangeReturnsRoutes); // exchange/return requests with video evidence (الاستبدال والاسترجاع)
+app.use('/api/discipline',       disciplineRoutes); // confirmation-team checkpoints, check-in, breaks (Stage 1)
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
@@ -128,6 +132,9 @@ app.listen(PORT, async () => {
        "forget the past"), ≥4s hard floor between calls (default 5s), batch 5,
        sweep every 15 min → ≤20 calls/hour. See cron/deliveryRateBackfill.js. */
     startDeliveryRateBackfillCron();
+    /* Confirmation-team discipline: seeding, breaks, 15-min auto-withdrawal.
+       Inert until an agent is enrolled (users.agent_track). */
+    startAgentDisciplineCron();
   } else {
     console.log(`⚠️ [CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" (not "production") → ALL cron jobs DISABLED (Sheets sync, Bosta enrich/reconcile, Meta, Taager, staff alerts). This is the safe local-dev default — set NODE_ENV=production ONLY on the server.`);
   }
