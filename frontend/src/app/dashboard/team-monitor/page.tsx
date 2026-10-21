@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  getDisciplineLive, setDisciplineTrack, reinstateDisciplineAgent, userHasRole,
+  getDisciplineLive, setDisciplineTrack, reinstateDisciplineAgent, userHasRole, trackCovers,
   DisciplineBoard, DisciplineBoardAgent, DisciplineTrack,
 } from '@/lib/api';
 
@@ -25,7 +25,7 @@ const CAIRO_HM = new Intl.DateTimeFormat('ar-EG-u-nu-latn', {
   timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit', hour12: true,
 });
 const hm = (iso: string | null | undefined) => (iso ? CAIRO_HM.format(new Date(iso)) : '');
-const TRACK_LABEL: Record<DisciplineTrack, string> = { confirmation: 'تأكيد', review: 'مراجعة' };
+const TRACK_LABEL: Record<DisciplineTrack, string> = { confirmation: 'تأكيد', review: 'مراجعة', both: 'تأكيد ومراجعة' };
 const errMsg = (e: unknown, fallback: string) =>
   (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback;
 
@@ -185,7 +185,7 @@ export default function TeamMonitorPage() {
         {enrolled.map((a) => {
           const tone = tones.get(a.id) ?? 'grey';
           const idle = idleSec(a);
-          const defs = (board?.checkpoints ?? []).filter((d) => a.track && d.tracks.includes(a.track));
+          const defs = (board?.checkpoints ?? []).filter((d) => d.tracks.some((t) => trackCovers(a.track, t)));
           const withdrawnLabel = board?.checkpoints.find((d) => d.code === a.withdrawn_checkpoint)?.label_ar ?? a.withdrawn_checkpoint;
           return (
             <div key={a.id} className={`rounded-2xl border border-slate-200 dark:border-slate-800 border-r-4 ${TONE[tone].border} bg-white dark:bg-slate-900 p-4 shadow-sm`}>
@@ -264,8 +264,9 @@ export default function TeamMonitorPage() {
                   <select value={a.track ?? ''} disabled={busyId === a.id} onChange={(e) => changeTrack(a, e.target.value)}
                     className="px-2 py-1.5 rounded-lg text-sm border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200">
                     <option value="">غير مسجّلة</option>
-                    <option value="confirmation">تأكيد</option>
-                    <option value="review">مراجعة</option>
+                    <option value="confirmation">تأكيد فقط</option>
+                    <option value="review">مراجعة فقط</option>
+                    <option value="both">تأكيد ومراجعة</option>
                   </select>
                 </div>
               ))}

@@ -2025,7 +2025,11 @@ export const deleteExchangeReturnRequest = (id: number) =>
    an ISO instant; render in Africa/Cairo. */
 export type DisciplineDayStatus = 'pending' | 'active' | 'break' | 'withdrawn' | 'off';
 export type CheckpointOutcome  = 'open' | 'on_time' | 'late' | 'missed';
-export type DisciplineTrack    = 'confirmation' | 'review';
+export type DisciplineTrack    = 'confirmation' | 'review' | 'both';
+/** Does an agent on `track` do `needed` work? 'both' covers each. Gate every
+    track-specific UI (e.g. the review follow-up queue tab) with this. */
+export const trackCovers = (track: DisciplineTrack | null | undefined, needed: 'confirmation' | 'review') =>
+  track === needed || track === 'both';
 
 export interface DisciplineCheckpoint {
   code:          string;
@@ -2115,7 +2119,7 @@ export interface DisciplineBoard {
   server_time:  string;
   enforce_from: string;
   idle_minutes: number;
-  checkpoints:  { code: string; label_ar: string; due_time: string; grace_minutes: number; tracks: DisciplineTrack[] }[];
+  checkpoints:  { code: string; label_ar: string; due_time: string; grace_minutes: number; tracks: ('confirmation' | 'review')[] }[];
   agents:       DisciplineBoardAgent[];
 }
 export const getDisciplineLive = () =>

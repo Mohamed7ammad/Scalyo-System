@@ -4,8 +4,10 @@
    Confirmation-team discipline — Stage 1
    (checkpoints · check-in · breaks · daily seeding · 15-minute auto-withdrawal)
    ════════════════════════════════════════════════════════════════════════════
-   • Agents in the program carry users.agent_track ('confirmation' | 'review').
-     NULL = not monitored. Roles are untouched on purpose: routing, commission
+   • Agents in the program carry users.agent_track: 'confirmation' | 'review' |
+     'both' (does both jobs). NULL = not monitored. A 'both' agent gets every
+     active checkpoint, and anything gated to a track (e.g. the review
+     follow-up queue) must use trackCovers()/trackCoversSql(), never "= 'review'". Roles are untouched on purpose: routing, commission
      and analytics all select role 'agent', so new roles would silently drop
      people out of them.
    • Every time below is Cairo local time (the server and DB run in UTC).
@@ -34,7 +36,15 @@ const IDLE_WARNING_MINUTES = 13;   // client "هل ما زلتِ هنا؟" promp
 const IDLE_MINUTES         = 15;   // shown as idle on the Team Leader grid
 const IDLE_WATCH_END_LOCAL = '21:00';
 
-const TRACKS                = ['confirmation', 'review'];
+const AGENT_TRACKS          = ['confirmation', 'review', 'both'];   // users.agent_track
+const CHECKPOINT_TRACKS     = ['confirmation', 'review'];           // discipline_checkpoints.tracks
+/* Does an agent on `track` do `needed` work? 'both' covers each track. Use
+   these for EVERY track-gated feature (routing, the follow-up queue tab, …). */
+const trackCovers    = (track, needed) => track === needed || (track === 'both' && CHECKPOINT_TRACKS.includes(needed));
+const trackCoversSql = (col, needed) => {
+  if (!CHECKPOINT_TRACKS.includes(needed)) throw new Error(`unknown track ${needed}`);
+  return `(${col} = '${needed}' OR ${col} = 'both')`;
+};
 const EARLY_CHECKIN_MINUTES = 30;            // check-in opens 30 min before due
 const BREAK_MAX_SESSIONS    = 2;             // at most 2 break sessions a day
 const BREAK_ALLOWANCE_SEC   = 30 * 60;       // 30 minutes a day in total
@@ -63,11 +73,15 @@ class DisciplineError extends Error {
 const schemaReady = (async () => {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_track VARCHAR(20)`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMPTZ`);
+  /* (Re)create the CHECK whenever it is missing or predates 'both'. */
   await pool.query(`
     DO $$ BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_agent_track_chk') THEN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                      WHERE conrelid = 'users'::regclass AND conname = 'users_agent_track_chk'
+                        AND pg_get_constraintdef(oid) LIKE '%both%') THEN
+        ALTER TABLE users DROP CONSTRAINT IF EXISTS users_agent_track_chk;
         ALTER TABLE users ADD CONSTRAINT users_agent_track_chk
-          CHECK (agent_track IS NULL OR agent_track IN ('confirmation', 'review'));
+          CHECK (agent_track IS NULL OR agent_track IN ('confirmation', 'review', 'both'));
       END IF;
     END $$`);
 
@@ -212,7 +226,7 @@ async function updateCheckpoint(businessId, code, body) {
   }
   if (body.tracks !== undefined) {
     const v = Array.isArray(body.tracks) ? [...new Set(body.tracks.map(String))] : null;
-    if (!v || !v.length || v.some((t) => !TRACKS.includes(t))) throw new DisciplineError(400, 'المسارات المسموحة: confirmation و/أو review');
+    if (!v || !v.length || v.some((t) => !CHECKPOINT_TRACKS.includes(t))) throw new DisciplineError(400, 'المسارات المسموحة: confirmation و/أو review');
     add('tracks', v);
   }
   if (body.is_active !== undefined) {
@@ -233,7 +247,7 @@ async function updateCheckpoint(businessId, code, body) {
 }
 
 async function setAgentTrack(businessId, userId, track) {
-  if (track !== null && !TRACKS.includes(track)) throw new DisciplineError(400, 'المسار يجب أن يكون confirmation أو review أو null');
+  if (track !== null && !AGENT_TRACKS.includes(track)) throw new DisciplineError(400, 'المسار يجب أن يكون confirmation أو review أو both أو null');
   const { rows } = await pool.query(
     `UPDATE users SET agent_track = $1
       WHERE id = $2 AND business_id = $3 AND 'agent' = ANY(COALESCE(roles, ARRAY[role]))
@@ -275,7 +289,7 @@ async function seedToday({ userId = null, db = pool } = {}) {
        FROM agent_daily_logs d
        JOIN users u                  ON u.id = d.user_id
        JOIN discipline_checkpoints k ON k.business_id = d.business_id AND k.is_active
-                                    AND u.agent_track = ANY(k.tracks)
+                                    AND (u.agent_track = 'both' OR u.agent_track = ANY(k.tracks))
       WHERE d.work_date = ${CAIRO_TODAY}
         AND ((d.work_date + k.due_time) AT TIME ZONE 'Africa/Cairo')
               + make_interval(mins => k.grace_minutes + 1) > NOW()
@@ -776,7 +790,7 @@ async function listAgents(businessId) {
 }
 
 module.exports = {
-  schemaReady, DisciplineError, TRACKS, DEFAULT_CHECKPOINTS,
+  schemaReady, DisciplineError, AGENT_TRACKS, CHECKPOINT_TRACKS, trackCovers, trackCoversSql, DEFAULT_CHECKPOINTS,
   listCheckpoints, updateCheckpoint, setAgentTrack, listAgents,
   seedToday, getAgentState, checkIn, startBreak, endBreak, reinstate, stillHere, liveBoard,
   closeExpiredBreaks, enforceCheckpoints,
