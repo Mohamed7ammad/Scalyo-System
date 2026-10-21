@@ -3490,6 +3490,7 @@ export default function DashboardPage() {
             canDelete={isAdmin}
             canEditPrice={canEditPrice}
             canEditFullOrder={canEditFullOrder}
+            exactOrderTime={isAdmin || isSupervisor}
             lostMode={lostMode}
             resolveBasePrice={resolveBasePrice}
             onUpdate={handleUpdate}

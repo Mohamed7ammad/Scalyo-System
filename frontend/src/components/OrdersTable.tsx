@@ -98,6 +98,25 @@ const timeAgoArabic = (iso: string | null | undefined, now: number): string => {
   return `منذ ${toArabicNum(day)} ${unit(day, 'يوم', 'يومين', 'أيام', 'يوم')}`;
 };
 
+/* Exact order-creation stamp for admins / team-leaders, in Egypt local time
+   (Africa/Cairo — independent of the viewer's device timezone), Latin digits:
+     today      → "10:30 ص"
+     yesterday  → "أمس 10:30 ص"
+     older      → "15 أكتوبر 10:30 ص"   (no year, keeps the cell compact)
+   "Today"/"yesterday" are Cairo calendar days, compared against `now` (ms). */
+const CAIRO_TIME      = new Intl.DateTimeFormat('ar-EG-u-nu-latn', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit', hour12: true });
+const CAIRO_DAY_MONTH = new Intl.DateTimeFormat('ar-EG-u-nu-latn', { timeZone: 'Africa/Cairo', day: 'numeric', month: 'long' });
+const CAIRO_YMD       = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit' });
+const formatOrderTimeArabic = (iso: string | null | undefined, now: number): string => {
+  const d = iso ? new Date(iso) : null;
+  if (!d || !Number.isFinite(d.getTime())) return '';
+  const time = CAIRO_TIME.format(d);
+  const day  = CAIRO_YMD.format(d);
+  if (day === CAIRO_YMD.format(new Date(now)))            return time;
+  if (day === CAIRO_YMD.format(new Date(now - 86400000))) return `أمس ${time}`;
+  return `${CAIRO_DAY_MONTH.format(d)} ${time}`;
+};
+
 // All possible statuses — used in the admin full-edit modal only.
 // INVARIANT: this list must contain EVERY status the system can ever write
 // (including the webhook-set return states). A <select> whose value is missing
@@ -183,6 +202,10 @@ interface Props {
   /* The full "تعديل الطلب" edit modal (product/price/status override). Admin-only
      by default; granted to team-leaders via this flag. */
   canEditFullOrder?: boolean;
+  /* Show the order's exact creation time ("أمس 10:30 ص") under the status
+     instead of the relative "منذ ساعتين". Admins + team-leaders; agents keep
+     the relative time. */
+  exactOrderTime?:  boolean;
   /* MISSING/lost-orders mode: turns the City cell into a strict governorate
      <select> and enables dynamic base+shipping repricing (the backend recompute
      on save is authoritative). Never set for the normal live queue. */
@@ -216,6 +239,7 @@ function OrdersTable({
   canDelete   = role === 'admin',
   canEditPrice     = role === 'admin',
   canEditFullOrder = role === 'admin',
+  exactOrderTime   = false,
   lostMode = false,
   resolveBasePrice,
   onUpdate, onDelete, onPriceChange,
@@ -583,6 +607,7 @@ function OrdersTable({
                     canDelete={canDelete}
                     canEditPrice={canEditPrice}
                     canEditFullOrder={canEditFullOrder}
+                    exactTime={exactOrderTime}
                     lostMode={lostMode}
                     now={now}
                     selected={selectedIds.includes(order.id)}
@@ -1528,6 +1553,7 @@ interface OrderRowProps {
   canDelete:            boolean;   // full edit modal + hard-delete action (admin)
   canEditPrice:         boolean;   // inline total-price editor (admin + team-leader)
   canEditFullOrder:     boolean;   // "تعديل الطلب" full edit modal (admin + team-leader)
+  exactTime:            boolean;   // exact creation time instead of relative (admin + team-leader)
   lostMode:             boolean;   // City → strict governorate <select> + repricing
   now:                  number;    // ticking clock (ms) for elapsed-time + cooldown
   selected:             boolean;
@@ -1564,6 +1590,7 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
     prev.canDelete === next.canDelete &&
     prev.canEditPrice === next.canEditPrice &&
     prev.canEditFullOrder === next.canEditFullOrder &&
+    prev.exactTime === next.exactTime &&
     prev.lostMode === next.lostMode &&
     prev.selected === next.selected &&
     prev.saving === next.saving &&
@@ -1575,7 +1602,7 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
 }
 
 const OrderRow = memo(function OrderRow({
-  order, index, rowRef, role, canReassign, canDelete, canEditPrice, canEditFullOrder, lostMode, now, selected, saving, agents, attemptLogs, inlineLogging,
+  order, index, rowRef, role, canReassign, canDelete, canEditPrice, canEditFullOrder, exactTime, lostMode, now, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onCityChange, onShippingNotesBlur, onInlineAttempt,
   onQuickEdit, onEditModal, onDelete, onPriceChange,
@@ -1605,7 +1632,10 @@ const OrderRow = memo(function OrderRow({
   const elapsedMin   = minutesSince(order.createdAt, now);
   const inCooldown   = isNewOrder && elapsedMin < NEW_ORDER_COOLDOWN_MIN;
   const remainingMin = Math.max(0, NEW_ORDER_COOLDOWN_MIN - elapsedMin);
-  const elapsedLabel = timeAgoArabic(order.createdAt, now);
+  /* Admins / team-leaders see the exact creation time; agents the relative one. */
+  const elapsedLabel = exactTime
+    ? formatOrderTimeArabic(order.createdAt, now)
+    : timeAgoArabic(order.createdAt, now);
 
   return (
     <tr
