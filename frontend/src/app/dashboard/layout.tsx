@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
+import DisciplinePanel from '@/components/DisciplinePanel';
 import { getBusinessProfile, sendHeartbeat } from '@/lib/api';
 
 /** How often the presence heartbeat pings the backend (ms). */
@@ -119,6 +120,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Main scrollable content area */}
         <main className="flex-1 overflow-y-auto min-w-0 bg-slate-50 dark:bg-slate-950">
+          {/* Enrolled agents' check-in strip (renders nothing for everyone else). */}
+          <DisciplinePanel />
           {children}
         </main>
       </div>

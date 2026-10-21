@@ -2019,4 +2019,110 @@ export const updateExchangeReturnRequest = (id: number, data: UpdateExchangeRetu
 export const deleteExchangeReturnRequest = (id: number) =>
   api.delete<{ message: string; id: number }>(`/api/exchange-returns/${id}`);
 
+/* ── Confirmation-team discipline (/api/discipline) ───────────────────────────
+   Checkpoint check-in, breaks and the 13-minute "still here" prompt (agents);
+   live board, enrolment and reinstatement (admin / Team Leader). Every time is
+   an ISO instant; render in Africa/Cairo. */
+export type DisciplineDayStatus = 'pending' | 'active' | 'break' | 'withdrawn' | 'off';
+export type CheckpointOutcome  = 'open' | 'on_time' | 'late' | 'missed';
+export type DisciplineTrack    = 'confirmation' | 'review';
+
+export interface DisciplineCheckpoint {
+  code:          string;
+  label_ar:      string;
+  due_at:        string;
+  grace_minutes: number;
+  opens_at:      string;          // check-in opens (30 min before due)
+  deadline_at:   string;          // last moment to check in (due + grace + 1 min)
+  checked_in_at: string | null;
+  outcome:       CheckpointOutcome;
+  late_minutes:  number;
+}
+
+export interface DisciplineBreak {
+  max_sessions:      number;
+  sessions_used:     number;
+  sessions_left:     number;
+  allowance_minutes: number;
+  used_seconds:      number;
+  remaining_seconds: number;
+  remaining_minutes: number;
+  active:            { started_at: string; ends_at: string } | null;
+  can_start:         boolean;
+  blocked_reason:    string | null;
+}
+
+export interface DisciplineState {
+  enrolled:              boolean;
+  track?:                DisciplineTrack;
+  scheduled_today?:      boolean;
+  is_absent?:            boolean;
+  work_date?:            string;
+  status?:               DisciplineDayStatus;
+  started_at?:           string | null;
+  withdrawn_at?:         string | null;
+  withdrawn_checkpoint?: string | null;
+  orders_withdrawn?:     number;
+  reinstated_at?:        string | null;
+  checkpoints?:          DisciplineCheckpoint[];
+  next_checkpoint?:      DisciplineCheckpoint | null;
+  enforce_from?:         string;          // 'YYYY-MM-DD HH:MM' Cairo
+  seconds_since_action?: number | null;   // server-side action clock
+  idle_watch?:           boolean;         // show the inactivity prompt at all?
+  idle_warning_minutes?: number;
+  break?:                DisciplineBreak;
+  server_time?:          string;
+}
+
+export const getDisciplineMe = () =>
+  api.get<DisciplineState>('/api/discipline/me');
+export const disciplineCheckIn = (code?: string) =>
+  api.post<{ checkpoint: string; outcome: CheckpointOutcome; state: DisciplineState }>(
+    '/api/discipline/checkin', code ? { code } : {});
+export const disciplineBreak = (action: 'start' | 'end') =>
+  api.post<{ state: DisciplineState; session_no?: number; ends_at?: string }>('/api/discipline/break', { action });
+export const disciplineStillHere = () =>
+  api.post<DisciplineState>('/api/discipline/still-here');
+
+export interface DisciplineBoardCheckpoint {
+  code:          string;
+  due_at:        string;
+  grace_minutes: number;
+  checked_in_at: string | null;
+  outcome:       CheckpointOutcome;
+  late_minutes:  number;
+}
+export interface DisciplineBoardAgent {
+  id:                   string;
+  name:                 string;
+  email:                string;
+  track:                DisciplineTrack | null;
+  is_absent:            boolean;
+  scheduled_today:      boolean;
+  status:               DisciplineDayStatus | null;
+  started_at:           string | null;
+  withdrawn_at:         string | null;
+  withdrawn_checkpoint: string | null;
+  orders_withdrawn:     number;
+  reinstated_at:        string | null;
+  reinstated_by:        string | null;
+  seconds_since_action: number | null;
+  still_here_today:     number;
+  checkpoints:          DisciplineBoardCheckpoint[];
+  break:                { sessions_used: number; used_minutes: number; active_until: string | null };
+}
+export interface DisciplineBoard {
+  server_time:  string;
+  enforce_from: string;
+  idle_minutes: number;
+  checkpoints:  { code: string; label_ar: string; due_time: string; grace_minutes: number; tracks: DisciplineTrack[] }[];
+  agents:       DisciplineBoardAgent[];
+}
+export const getDisciplineLive = () =>
+  api.get<DisciplineBoard>('/api/discipline/live');
+export const setDisciplineTrack = (userId: string, track: DisciplineTrack | null) =>
+  api.patch(`/api/discipline/agents/${userId}/track`, { track });
+export const reinstateDisciplineAgent = (userId: string) =>
+  api.post<DisciplineState>('/api/discipline/reinstate', { user_id: userId });
+
 export default api;

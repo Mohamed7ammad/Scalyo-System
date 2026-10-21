@@ -259,6 +259,17 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    /* Confirmation-team live board: admins (adminOnly) + Team Leaders (allowRoles). */
+    href: '/dashboard/team-monitor', label: 'متابعة فريق التأكيد',
+    subLabel: 'Team Monitor', adminOnly: true, allowRoles: ['supervisor'],
+    icon: (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+    ),
+  },
+  {
     href: '/dashboard/staff', label: 'إدارة الموظفين',
     subLabel: 'Team', requiredPermission: 'manage_staff',
     icon: (

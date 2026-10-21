@@ -354,7 +354,7 @@ async function getAgentState(userId, businessId, db = pool) {
       allowance_minutes: BREAK_ALLOWANCE_SEC / 60,
       used_seconds:      usedSeconds,
       remaining_seconds: remainingSeconds,
-      remaining_minutes: Math.floor(remainingSeconds / 60),
+      remaining_minutes: Math.round(remainingSeconds / 60),   // a 3-second break must not read as "29 min left"
       active:            br.open_started_at ? { started_at: br.open_started_at, ends_at: br.open_ends_at } : null,
       can_start:         !breakBlock,
       blocked_reason:    breakBlock,
@@ -554,6 +554,7 @@ async function enforceCheckpoints() {
         AND c.due_at >= ${ENFORCE_FROM_SQL}
         AND d.work_date = ${CAIRO_TODAY}
         AND d.status <> 'withdrawn'
+        AND u.agent_track IS NOT NULL      -- un-enrolled mid-day → today's rows no longer enforced
         AND COALESCE(u.is_active, TRUE) AND NOT COALESCE(u.is_absent, FALSE)
       RETURNING d.id AS daily_log_id, d.business_id, d.user_id, c.checkpoint_code, c.label_ar`);
   if (!missed.length) return [];
