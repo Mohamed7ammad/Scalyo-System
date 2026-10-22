@@ -10,7 +10,6 @@ const { startGhostPurgeCron } = require('./cron/ghostPurge');
 const { startSafqaReconcileCron } = require('./cron/safqaReconcile');
 const { startDeliveryRateBackfillCron } = require('./cron/deliveryRateBackfill');
 const { startAgentDisciplineCron } = require('./cron/agentDiscipline');
-const { startNoAnswerRolloverCron } = require('./cron/noAnswerRollover');
 const pool                    = require('./config/db');
 const { initTenancy }         = require('./config/initTenancy');
 
@@ -136,8 +135,6 @@ app.listen(PORT, async () => {
     /* Confirmation-team discipline: seeding, breaks, 15-min auto-withdrawal.
        Inert until an agent is enrolled (users.agent_track). */
     startAgentDisciplineCron();
-    /* «لا يرد» loop: nightly 23:30 hand-off (owner 2d → review 2d → closed). */
-    startNoAnswerRolloverCron();
   } else {
     console.log(`⚠️ [CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" (not "production") → ALL cron jobs DISABLED (Sheets sync, Bosta enrich/reconcile, Meta, Taager, staff alerts). This is the safe local-dev default — set NODE_ENV=production ONLY on the server.`);
   }
