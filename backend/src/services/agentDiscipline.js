@@ -632,7 +632,9 @@ async function getAgentState(userId, businessId, db = pool) {
        work to do (see idleFacts). The clock is the SERVER's. */
     seconds_since_action: u.seconds_since_action,
     idle_seconds:         idle?.idle_seconds ?? null,
-    idle_paused_reason:   d.status !== 'active' ? d.status : (idle?.paused_reason ?? 'outside_window'),
+    /* null = the clock is running. (A `??` fallback here used to turn "running"
+       into 'outside_window', so the strip said «خارج فترات العمل» mid-window.) */
+    idle_paused_reason:   d.status !== 'active' ? d.status : (idle ? idle.paused_reason : 'outside_window'),
     idle_watch:           d.status === 'active' && idle?.idle_seconds != null,
     idle_warning_minutes: IDLE_WARNING_MINUTES,
     idle_minutes:         IDLE_MINUTES,
