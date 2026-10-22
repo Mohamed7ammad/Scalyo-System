@@ -76,6 +76,25 @@ const DEFAULT_CHECKPOINTS = [
   { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '21:00', sort_order: 5 },
 ];
 
+/* Fridays (owner, 2026-10-22): no shipping, so only two checkpoints and two
+   windows. Every checkpoint / window row carries a day_type; a Cairo Friday
+   uses the 'friday' rows, every other day the 'regular' ones. Friday codes are
+   distinct (codes are unique per business). */
+const DAY_TYPES = ['regular', 'friday'];
+const dayTypeSql = (dateExpr) => `(CASE WHEN EXTRACT(ISODOW FROM ${dateExpr}) = 5 THEN 'friday' ELSE 'regular' END)`;
+const DEFAULT_FRIDAY_CHECKPOINTS = [
+  { code: 'friday_review', label_ar: 'مراجعة الجمعة',      due_time: '15:00', sort_order: 1 },
+  { code: 'friday_final',  label_ar: 'المراجعة النهائية',   due_time: '21:00', sort_order: 2 },
+];
+const DEFAULT_FRIDAY_WINDOWS = [
+  { start: '14:30', end: '15:30' },
+  { start: '20:30', end: '21:30' },
+];
+const assertDayType = (t) => {
+  if (!DAY_TYPES.includes(t)) throw new DisciplineError(400, 'نوع اليوم يجب أن يكون regular أو friday');
+  return t;
+};
+
 /* Active WORK WINDOWS (Cairo). Agents are not expected to work continuously:
    outside these windows they are off duty, so the idle tracker sleeps entirely
    (no orange, no «هل ما زلتِ هنا؟», no chime) whatever orders are pending.
@@ -135,7 +154,21 @@ const schemaReady = (async () => {
       sort_order  INTEGER     NOT NULL DEFAULT 0,
       updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
-  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS discipline_work_windows_biz_start_uq ON discipline_work_windows (business_id, start_time)`);
+  /* Regular vs Friday schedule (see DAY_TYPES). */
+  for (const t of ['discipline_checkpoints', 'discipline_work_windows']) {
+    await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS day_type VARCHAR(10) NOT NULL DEFAULT 'regular'
+                        CHECK (day_type IN ('regular', 'friday'))`);
+  }
+  /* The old (business, start) uniqueness can't hold once Friday shares start
+     times. Dropped only in this table's own schema (current_schema). */
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = current_schema()
+                  AND indexname = 'discipline_work_windows_biz_start_uq') THEN
+        EXECUTE format('DROP INDEX %I.%I', current_schema(), 'discipline_work_windows_biz_start_uq');
+      END IF;
+    END $$`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS discipline_work_windows_biz_day_start_uq ON discipline_work_windows (business_id, day_type, start_time)`);
 
   /* One row per agent per Cairo work day. */
   await pool.query(`
@@ -223,39 +256,48 @@ const BREAK_USED_SQL = `
 /* ── Checkpoint settings ─────────────────────────────────────────────────────── */
 async function ensureDefaultCheckpoints(businessId, db = pool) {
   await ensureDefaultWorkWindows(businessId, db);
-  for (const c of DEFAULT_CHECKPOINTS) {
-    await db.query(
-      `INSERT INTO discipline_checkpoints (business_id, code, label_ar, due_time, sort_order)
-       VALUES ($1, $2, $3, $4::time, $5)
-       ON CONFLICT (business_id, code) DO NOTHING`,
-      [businessId, c.code, c.label_ar, c.due_time, c.sort_order]
-    );
+  for (const [dayType, list] of [['regular', DEFAULT_CHECKPOINTS], ['friday', DEFAULT_FRIDAY_CHECKPOINTS]]) {
+    for (const c of list) {
+      await db.query(
+        `INSERT INTO discipline_checkpoints (business_id, code, label_ar, due_time, sort_order, day_type)
+         VALUES ($1, $2, $3, $4::time, $5, $6)
+         ON CONFLICT (business_id, code) DO NOTHING`,
+        [businessId, c.code, c.label_ar, c.due_time, c.sort_order, dayType]
+      );
+    }
   }
 }
 
-/* Seed the default work windows for a tenant that has none yet. */
+/* Seed the default work windows of each day type a tenant has none of yet. */
 async function ensureDefaultWorkWindows(businessId, db = pool) {
-  const { rows } = await db.query(`SELECT 1 FROM discipline_work_windows WHERE business_id = $1 LIMIT 1`, [businessId]);
-  if (rows.length) return;
-  for (const [i, w] of DEFAULT_WORK_WINDOWS.entries()) {
-    await db.query(
-      `INSERT INTO discipline_work_windows (business_id, start_time, end_time, sort_order) VALUES ($1, $2::time, $3::time, $4)
-       ON CONFLICT (business_id, start_time) DO NOTHING`,
-      [businessId, w.start, w.end, i + 1]);
+  for (const [dayType, list] of [['regular', DEFAULT_WORK_WINDOWS], ['friday', DEFAULT_FRIDAY_WINDOWS]]) {
+    const { rows } = await db.query(
+      `SELECT 1 FROM discipline_work_windows WHERE business_id = $1 AND day_type = $2 LIMIT 1`, [businessId, dayType]);
+    if (rows.length) continue;
+    for (const [i, w] of list.entries()) {
+      await db.query(
+        `INSERT INTO discipline_work_windows (business_id, start_time, end_time, sort_order, day_type)
+         VALUES ($1, $2::time, $3::time, $4, $5)
+         ON CONFLICT (business_id, day_type, start_time) DO NOTHING`,
+        [businessId, w.start, w.end, i + 1, dayType]);
+    }
   }
 }
 
-async function listWorkWindows(businessId, db = pool) {
+/* dayType: 'regular' | 'friday' | 'today' (whichever applies to today in Cairo). */
+async function listWorkWindows(businessId, db = pool, dayType = 'regular') {
   await ensureDefaultWorkWindows(businessId, db);
+  const typeSql = dayType === 'today' ? dayTypeSql(CAIRO_TODAY) : `'${assertDayType(dayType)}'`;
   const { rows } = await db.query(
     `SELECT to_char(start_time, 'HH24:MI') AS start, to_char(end_time, 'HH24:MI') AS "end"
-       FROM discipline_work_windows WHERE business_id = $1 ORDER BY start_time`, [businessId]);
+       FROM discipline_work_windows WHERE business_id = $1 AND day_type = ${typeSql} ORDER BY start_time`, [businessId]);
   return rows;
 }
 
-/* Replace the whole list (validated: HH:MM, start < end, no overlaps, 1–10).
-   Takes effect immediately — the idle clock is computed live. */
-async function setWorkWindows(businessId, windows) {
+/* Replace one day type's list (validated: HH:MM, start < end, no overlaps,
+   1–10). Takes effect immediately — the idle clock is computed live. */
+async function setWorkWindows(businessId, windows, dayType = 'regular') {
+  assertDayType(dayType);
   const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
   if (!Array.isArray(windows) || windows.length < 1 || windows.length > 10) {
     throw new DisciplineError(400, 'أدخلي من فترة عمل واحدة إلى 10 فترات');
@@ -272,11 +314,12 @@ async function setWorkWindows(businessId, windows) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(`DELETE FROM discipline_work_windows WHERE business_id = $1`, [businessId]);
+    await client.query(`DELETE FROM discipline_work_windows WHERE business_id = $1 AND day_type = $2`, [businessId, dayType]);
     for (const [i, w] of list.entries()) {
       await client.query(
-        `INSERT INTO discipline_work_windows (business_id, start_time, end_time, sort_order) VALUES ($1, $2::time, $3::time, $4)`,
-        [businessId, w.start, w.end, i + 1]);
+        `INSERT INTO discipline_work_windows (business_id, start_time, end_time, sort_order, day_type)
+         VALUES ($1, $2::time, $3::time, $4, $5)`,
+        [businessId, w.start, w.end, i + 1, dayType]);
     }
     await client.query('COMMIT');
   } catch (e) {
@@ -285,14 +328,14 @@ async function setWorkWindows(businessId, windows) {
   } finally {
     client.release();
   }
-  return listWorkWindows(businessId);
+  return listWorkWindows(businessId, pool, dayType);
 }
 
 async function listCheckpoints(businessId) {
   await ensureDefaultCheckpoints(businessId);
   const { rows } = await pool.query(
-    `SELECT code, label_ar, to_char(due_time, 'HH24:MI') AS due_time, grace_minutes, tracks, sort_order, is_active, updated_at
-       FROM discipline_checkpoints WHERE business_id = $1 ORDER BY sort_order, due_time`,
+    `SELECT code, label_ar, to_char(due_time, 'HH24:MI') AS due_time, grace_minutes, tracks, sort_order, is_active, day_type, updated_at
+       FROM discipline_checkpoints WHERE business_id = $1 ORDER BY day_type DESC, sort_order, due_time`,
     [businessId]
   );
   return rows;
@@ -413,19 +456,23 @@ async function setAgentTrack(businessId, userId, track) {
    agent). A checkpoint whose deadline has ALREADY passed when the agent is seeded
    (track assigned mid-day, or marked present mid-day) is not created — nobody is
    withdrawn for a checkpoint that didn't apply to them yet. */
-async function seedToday({ userId = null, db = pool } = {}) {
+async function seedToday({ userId = null, db = pool, workDate = null } = {}) {
   const params = [];
   let userFilter = '';
   if (userId != null) { params.push(String(userId)); userFilter = `AND u.id = $${params.length}`; }
 
   const { rows: bizRows } = await db.query(
     `SELECT DISTINCT u.business_id FROM users u
-      WHERE u.agent_track IS NOT NULL AND u.business_id IS NOT NULL ${userFilter}`, params);
+      WHERE u.agent_track IS NOT NULL AND u.business_id IS NOT NULL ${userFilter}`, [...params]);
+
+  /* workDate ('YYYY-MM-DD') seeds another Cairo day — tests / previews only. */
+  let daySql = CAIRO_TODAY;
+  if (workDate) { params.push(workDate); daySql = `$${params.length}::date`; }
   for (const b of bizRows) await ensureDefaultCheckpoints(b.business_id, db);
 
   await db.query(
     `INSERT INTO agent_daily_logs (business_id, user_id, work_date)
-     SELECT u.business_id, u.id, ${CAIRO_TODAY}
+     SELECT u.business_id, u.id, ${daySql}
        FROM users u
       WHERE u.agent_track IS NOT NULL AND u.business_id IS NOT NULL
         AND COALESCE(u.is_active, TRUE) AND NOT COALESCE(u.is_absent, FALSE)
@@ -439,8 +486,9 @@ async function seedToday({ userId = null, db = pool } = {}) {
        FROM agent_daily_logs d
        JOIN users u                  ON u.id = d.user_id
        JOIN discipline_checkpoints k ON k.business_id = d.business_id AND k.is_active
+                                    AND k.day_type = ${dayTypeSql('d.work_date')}
                                     AND (u.agent_track = 'both' OR u.agent_track = ANY(k.tracks))
-      WHERE d.work_date = ${CAIRO_TODAY}
+      WHERE d.work_date = ${daySql}
         AND ((d.work_date + k.due_time) AT TIME ZONE 'Africa/Cairo')
               + make_interval(mins => k.grace_minutes + 1) > NOW()
         AND ((d.work_date + k.due_time) AT TIME ZONE 'Africa/Cairo') >= ${ENFORCE_FROM_SQL}
@@ -487,7 +535,7 @@ async function idleFacts(businessId, userId = null, db = pool) {
          SELECT (${CAIRO_TODAY} + ww.start_time) AT TIME ZONE 'Africa/Cairo' AS win_start,
                 (${CAIRO_TODAY} + ww.end_time)   AT TIME ZONE 'Africa/Cairo' AS win_end
            FROM discipline_work_windows ww
-          WHERE ww.business_id = u.business_id
+          WHERE ww.business_id = u.business_id AND ww.day_type = ${dayTypeSql(CAIRO_TODAY)}
             AND NOW() >= (${CAIRO_TODAY} + ww.start_time) AT TIME ZONE 'Africa/Cairo'
             AND NOW() <  (${CAIRO_TODAY} + ww.end_time)   AT TIME ZONE 'Africa/Cairo'
           ORDER BY ww.start_time LIMIT 1) s ON TRUE
@@ -581,7 +629,7 @@ async function getAgentState(userId, businessId, db = pool) {
     idle_minutes:         IDLE_MINUTES,
     new_orders:           idle?.workable ?? 0,
     current_window:       idle?.within_window ? { start: idle.window_start_local, end: idle.window_end_local } : null,
-    work_windows:         await listWorkWindows(businessId, db),
+    work_windows:         await listWorkWindows(businessId, db, 'today'),
     break: {
       max_sessions:      BREAK_MAX_SESSIONS,
       sessions_used:     br.sessions_used,
@@ -1032,7 +1080,8 @@ async function liveBoard(businessId) {
   const [{ rows: defs }, { rows: agents }, { rows: cps }, { rows: brk }, { rows: pings }] = await Promise.all([
     pool.query(
       `SELECT code, label_ar, to_char(due_time, 'HH24:MI') AS due_time, grace_minutes, tracks
-         FROM discipline_checkpoints WHERE business_id = $1 AND is_active ORDER BY sort_order, due_time`, [businessId]),
+         FROM discipline_checkpoints WHERE business_id = $1 AND is_active AND day_type = ${dayTypeSql(CAIRO_TODAY)}
+        ORDER BY sort_order, due_time`, [businessId]),
     pool.query(
       `SELECT u.id, COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '@', 1)) AS name, u.email,
               u.agent_track, COALESCE(u.is_absent, FALSE) AS is_absent,
@@ -1151,6 +1200,7 @@ async function listAgents(businessId) {
 module.exports = {
   schemaReady, DisciplineError, AGENT_TRACKS, CHECKPOINT_TRACKS, trackCovers, trackCoversSql, DEFAULT_CHECKPOINTS,
   listCheckpoints, updateCheckpoint, setAgentTrack, listAgents, listWorkWindows, setWorkWindows, DEFAULT_WORK_WINDOWS,
+  DAY_TYPES, DEFAULT_FRIDAY_CHECKPOINTS, DEFAULT_FRIDAY_WINDOWS,
   seedToday, getAgentState, checkIn, autoCheckInFromWork, startBreak, endBreak, reinstate, stillHere, liveBoard, alertSnapshot,
   closeExpiredBreaks, enforceCheckpoints,
 };

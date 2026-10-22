@@ -10,7 +10,7 @@
                       whole next day (agents re-dial from their bulk-copied list
                       without touching the system, so nothing may move mid-day);
      • REVIEW stage — 2 review days, each night re-dealt to a DIFFERENT
-                      review/both-track agent (never the owner, never last
+                      review-account agent (REVIEW_ROUTING_TRACKS; never the owner, never last
                       night's reviewer: a new voice / phone number);
      • then CLOSED  — status «ملغي - عدم رد نهائي», reopenable only by an admin,
                       a Team Leader, or the last agent holding it.
@@ -43,6 +43,11 @@ const CAIRO_TODAY = `(NOW() AT TIME ZONE 'Africa/Cairo')::date`;
 /* Backlog rule (owner, 2026-10-22): close only «لا يرد» created AND last
    updated before this Cairo moment; everything since stays in the cycle. */
 const BACKLOG_CUTOFF_LOCAL = '2026-10-15 00:00';
+
+/* Who may receive review-stage orders. Two-account mode (owner, 2026-10-22):
+   review work stays on the dedicated review accounts (track 'review') until the
+   agents' «محاولاتي» / «مراجعة» split view ships — then add 'both'. */
+const REVIEW_ROUTING_TRACKS = ['review'];
 
 const norm = (e) => String(e ?? '').trim().toLowerCase();
 
@@ -125,8 +130,8 @@ async function reviewerPool(db, businessId) {
       WHERE u.business_id = $1
         AND 'agent' = ANY(COALESCE(u.roles, ARRAY[u.role]))
         AND COALESCE(u.is_active, TRUE) AND NOT COALESCE(u.is_absent, FALSE)
-        AND (u.agent_track = 'review' OR u.agent_track = 'both')
-      ORDER BY u.email`, [businessId]);
+        AND u.agent_track = ANY($2::text[])
+      ORDER BY u.email`, [businessId, REVIEW_ROUTING_TRACKS]);
   return rows;
 }
 

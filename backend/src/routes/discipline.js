@@ -15,8 +15,8 @@
                                            → { checkpoint, today: { retimed, removed, kept } }
                                            (today's not-yet-due rows follow the edit; see updateCheckpoint)
      GET  /agents                          agents, their track and today's status
-     GET  /work-windows                    active work windows (idle tracking only runs inside)
-     PUT  /work-windows { windows: [{start,end}] }  replace them (validated, no overlaps)
+     GET  /work-windows?day_type=regular|friday   active work windows (idle tracking only runs inside)
+     PUT  /work-windows { windows: [{start,end}], day_type? }  replace that day type's list
      GET  /live                            live board for the Team Leader grid
      GET  /alerts                          tiny snapshot for the dashboard-wide alert toasts
      PATCH /agents/:id/track               { track: 'confirmation' | 'review' | null }
@@ -83,10 +83,10 @@ router.put('/checkpoints/:code', authenticate, requireAdminOrTeamLeader, handle(
   svc.updateCheckpoint(req.user.business_id, req.params.code, req.body || {})));
 
 router.get('/work-windows', authenticate, requireAdminOrTeamLeader, handle((req) =>
-  svc.listWorkWindows(req.user.business_id)));
+  svc.listWorkWindows(req.user.business_id, undefined, req.query.day_type || 'regular')));
 
 router.put('/work-windows', authenticate, requireAdminOrTeamLeader, handle((req) =>
-  svc.setWorkWindows(req.user.business_id, req.body?.windows)));
+  svc.setWorkWindows(req.user.business_id, req.body?.windows, req.body?.day_type || 'regular')));
 
 router.get('/agents', authenticate, requireAdminOrTeamLeader, handle((req) =>
   svc.listAgents(req.user.business_id)));

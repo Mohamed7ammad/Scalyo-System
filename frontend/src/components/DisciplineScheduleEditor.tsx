@@ -8,12 +8,14 @@
      • work windows   → the idle tracker runs only inside them (computed live);
      • checkpoint times → every future day AND today's checkpoints that are not
        due yet; a new time that has already passed today applies from tomorrow.
+   Two schedules: «أيام الأسبوع» and «الجمعة» (no shipping → its own, shorter
+   set). The switch at the top picks which one is shown and saved.
    Checked-in / missed checkpoints never change. The API re-validates all of it. */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   getDisciplineCheckpointDefs, updateDisciplineCheckpoint, getDisciplineWorkWindows, setDisciplineWorkWindows,
-  DisciplineCheckpointDef, DisciplineWorkWindow,
+  DisciplineCheckpointDef, DisciplineWorkWindow, DisciplineDayType,
 } from '@/lib/api';
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -85,10 +87,11 @@ export default function DisciplineScheduleEditor({ onSaved }: { onSaved?: () => 
   const [tDraft,  setTDraft]  = useState<Record<string, string>>({});    // code → due_time
   const [cBusy,   setCBusy]   = useState(false);
   const [cMsg,    setCMsg]    = useState<Msg>(null);
+  const [dayType, setDayType] = useState<DisciplineDayType>('regular');
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (t: DisciplineDayType) => {
     try {
-      const [w, c] = await Promise.all([getDisciplineWorkWindows(), getDisciplineCheckpointDefs()]);
+      const [w, c] = await Promise.all([getDisciplineWorkWindows(t), getDisciplineCheckpointDefs()]);
       setWindows(w.data);
       setWDraft(w.data.map((x) => ({ ...x })));
       setDefs(c.data);
@@ -101,8 +104,17 @@ export default function DisciplineScheduleEditor({ onSaved }: { onSaved?: () => 
   }, []);
 
   useEffect(() => {
-    if (open && !loaded) load();
-  }, [open, loaded, load]);
+    if (open && !loaded) load(dayType);
+  }, [open, loaded, load, dayType]);
+
+  /* Switching schedules reloads it (unsaved edits of the other one are dropped). */
+  const switchDay = (t: DisciplineDayType) => {
+    if (t === dayType || wBusy || cBusy) return;
+    setDayType(t);
+    setWMsg(null);
+    setCMsg(null);
+    load(t);
+  };
 
   /* ── Work windows ─────────────────────────────────────────────────────────── */
   const wCheck = useMemo(() => validateWindows(wDraft), [wDraft]);
@@ -130,7 +142,7 @@ export default function DisciplineScheduleEditor({ onSaved }: { onSaved?: () => 
     setWBusy(true);
     setWMsg(null);
     try {
-      const { data } = await setDisciplineWorkWindows(byStart(wDraft));
+      const { data } = await setDisciplineWorkWindows(byStart(wDraft), dayType);
       setWindows(data);
       setWDraft(data.map((x) => ({ ...x })));
       setWMsg({ ok: true, text: 'تم حفظ فترات العمل — تسري فوراً على عداد عدم النشاط' });
@@ -143,7 +155,8 @@ export default function DisciplineScheduleEditor({ onSaved }: { onSaved?: () => 
   };
 
   /* ── Checkpoints ──────────────────────────────────────────────────────────── */
-  const changed = defs.filter((d) => (tDraft[d.code] ?? d.due_time) !== d.due_time);
+  const shownDefs = defs.filter((d) => (d.day_type ?? 'regular') === dayType);
+  const changed = shownDefs.filter((d) => (tDraft[d.code] ?? d.due_time) !== d.due_time);
   const cValid  = changed.every((d) => HHMM.test(tDraft[d.code] ?? ''));
   /* Hint only: a checkpoint outside every (draft) window is legal, but the idle
      tracker is asleep then — usually a typo. */
@@ -200,11 +213,24 @@ export default function DisciplineScheduleEditor({ onSaved }: { onSaved?: () => 
           {loadErr && (
             <div className="flex items-center gap-2">
               <Note msg={{ ok: false, text: loadErr }} />
-              <button onClick={load} className={BTN_GHOST}>إعادة المحاولة</button>
+              <button onClick={() => load(dayType)} className={BTN_GHOST}>إعادة المحاولة</button>
             </div>
           )}
           {!loaded && !loadErr && <p className="text-xs text-slate-500 dark:text-slate-400">جارٍ التحميل…</p>}
 
+          {loaded && (
+            <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="الجدول">
+              {([['regular', 'أيام الأسبوع'], ['friday', 'الجمعة (بدون شحن)']] as const).map(([t, label]) => (
+                <button key={t} role="tab" aria-selected={dayType === t} onClick={() => switchDay(t)} disabled={wBusy || cBusy}
+                  className={`px-3 py-1.5 rounded-full text-sm font-medium transition disabled:opacity-50 ${dayType === t
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'bg-slate-50 text-slate-600 border border-slate-200 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-700'}`}>
+                  {label}
+                </button>
+              ))}
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">يُطبَّق جدول الجمعة تلقائياً كل يوم جمعة.</span>
+            </div>
+          )}
           {loaded && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {/* Work windows */}
@@ -270,7 +296,7 @@ export default function DisciplineScheduleEditor({ onSaved }: { onSaved?: () => 
                 </div>
 
                 <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {defs.map((d) => {
+                  {shownDefs.map((d) => {
                     const value = tDraft[d.code] ?? d.due_time;
                     const dirty = value !== d.due_time;
                     const bad = dirty && !HHMM.test(value);
