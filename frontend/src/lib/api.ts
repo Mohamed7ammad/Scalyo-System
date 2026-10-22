@@ -2071,9 +2071,16 @@ export interface DisciplineState {
   checkpoints?:          DisciplineCheckpoint[];
   next_checkpoint?:      DisciplineCheckpoint | null;
   enforce_from?:         string;          // 'YYYY-MM-DD HH:MM' Cairo
-  seconds_since_action?: number | null;   // server-side action clock
+  seconds_since_action?: number | null;   // since her last real action (display only)
+  /* Idle clock: accrues only inside her shift AND while she has workable 'جديد'
+     orders. null = paused (no new orders / outside shift / not active). */
+  idle_seconds?:         number | null;
+  idle_paused_reason?:   string | null;   // 'no_new_orders' | 'outside_shift' | day status
   idle_watch?:           boolean;         // show the inactivity prompt at all?
-  idle_warning_minutes?: number;
+  idle_warning_minutes?: number;          // prompt + sound (18)
+  idle_minutes?:         number;          // idle on the Team Leader board (20)
+  new_orders?:           number;          // workable 'جديد' orders right now
+  shift?:                { start: string; end: string } | null;
   break?:                DisciplineBreak;
   server_time?:          string;
 }
@@ -2111,6 +2118,9 @@ export interface DisciplineBoardAgent {
   reinstated_at:        string | null;
   reinstated_by:        string | null;
   seconds_since_action: number | null;
+  idle_seconds:         number | null;    // null = clock paused
+  idle_paused_reason:   string | null;    // 'no_new_orders' | 'outside_shift'
+  new_orders:           number;           // workable 'جديد' orders right now
   still_here_today:     number;
   checkpoints:          DisciplineBoardCheckpoint[];
   break:                { sessions_used: number; used_minutes: number; active_until: string | null };

@@ -32,9 +32,12 @@ const ENFORCE_FROM_LOCAL = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(process.env.DI
   ? process.env.DISCIPLINE_ENFORCE_FROM
   : '2026-10-22 11:00';
 const ENFORCE_FROM_SQL = `('${ENFORCE_FROM_LOCAL}'::timestamp AT TIME ZONE 'Africa/Cairo')`;
-const IDLE_WARNING_MINUTES = 13;   // client "هل ما زلتِ هنا؟" prompt
-const IDLE_MINUTES         = 15;   // shown as idle on the Team Leader grid
-const IDLE_WATCH_END_LOCAL = '21:00';
+/* Idle (rescue patch, launch day 2026-10-22): agents on long customer calls make
+   no DB writes, so the thresholds are generous and the clock only runs while
+   there is NEW work she can act on, inside her shift. */
+const IDLE_WARNING_MINUTES   = 18;   // client «هل ما زلتِ هنا؟» prompt (+ sound)
+const IDLE_MINUTES           = 20;   // shown as idle (orange) on the Team Leader board
+const NEW_ORDER_LOCK_MINUTES = 15;   // a 'جديد' order can't be confirmed in its first 15 min (OrdersTable cooldown)
 
 const AGENT_TRACKS          = ['confirmation', 'review', 'both'];   // users.agent_track
 const CHECKPOINT_TRACKS     = ['confirmation', 'review'];           // discipline_checkpoints.tracks
@@ -298,12 +301,69 @@ async function seedToday({ userId = null, db = pool } = {}) {
      ON CONFLICT (daily_log_id, checkpoint_code) DO NOTHING`, params);
 }
 
+/* ── Idle clock ──────────────────────────────────────────────────────────────────
+   Per enrolled agent. Idle time accrues ONLY while:
+     • it is inside her shift — her first checkpoint's due time → her last one's
+       (11:00 → 19:00 by default, from discipline_checkpoints for her track); and
+     • she has at least one live 'جديد' order she can work (past its 15-minute
+       new-order lock). 0 such orders → paused: she is waiting for work.
+   The clock starts at the LATEST of: her last real action, the moment that work
+   became available, the shift start, the end of her last break — so waiting
+   with an empty queue, or a break, never counts against her.
+   Returns Map(userId → { new_total, workable, within_shift, shift_start_local,
+   shift_end_local, idle_seconds (null when paused), paused_reason }).          */
+async function idleFacts(businessId, userId = null, db = pool) {
+  const params = [businessId];
+  let userFilter = '';
+  if (userId != null) { params.push(String(userId)); userFilter = 'AND u.id = $2'; }
+  const lock = `make_interval(mins => ${NEW_ORDER_LOCK_MINUTES})`;
+  const { rows } = await db.query(
+    `SELECT u.id, w.new_total, w.workable,
+            COALESCE(NOW() BETWEEN s.shift_start AND s.shift_end, FALSE) AS within_shift,
+            to_char(s.shift_start AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS shift_start_local,
+            to_char(s.shift_end   AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS shift_end_local,
+            FLOOR(EXTRACT(EPOCH FROM (NOW() - GREATEST(u.last_action_at, w.work_since, s.shift_start, b.last_break_end))))::int
+              AS raw_idle_seconds
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS new_total,
+                COUNT(*) FILTER (WHERE o."createdAt" + ${lock} <= NOW())::int AS workable,
+                MIN(GREATEST(COALESCE(o.assigned_at, o."createdAt"), o."createdAt" + ${lock}))
+                  FILTER (WHERE o."createdAt" + ${lock} <= NOW()) AS work_since
+           FROM orders o
+          WHERE o.business_id = u.business_id AND o."AssignedTo" = u.email
+            AND o.is_lost_order = FALSE AND btrim(o."Status") = 'جديد') w ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT (${CAIRO_TODAY} + MIN(k.due_time)) AT TIME ZONE 'Africa/Cairo' AS shift_start,
+                (${CAIRO_TODAY} + MAX(k.due_time)) AT TIME ZONE 'Africa/Cairo' AS shift_end
+           FROM discipline_checkpoints k
+          WHERE k.business_id = u.business_id AND k.is_active
+            AND (u.agent_track = 'both' OR u.agent_track = ANY(k.tracks))) s ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT MAX(LEAST(COALESCE(bs.ended_at, NOW()), bs.max_end_at)) AS last_break_end
+           FROM agent_break_sessions bs JOIN agent_daily_logs dl ON dl.id = bs.daily_log_id
+          WHERE dl.user_id = u.id AND dl.work_date = ${CAIRO_TODAY}) b ON TRUE
+      WHERE u.business_id = $1 AND u.agent_track IS NOT NULL ${userFilter}`,
+    params
+  );
+  const out = new Map();
+  for (const r of rows) {
+    const paused_reason = !r.within_shift ? 'outside_shift' : r.workable === 0 ? 'no_new_orders' : null;
+    out.set(String(r.id), {
+      new_total: r.new_total, workable: r.workable, within_shift: r.within_shift,
+      shift_start_local: r.shift_start_local, shift_end_local: r.shift_end_local,
+      idle_seconds: paused_reason ? null : Math.max(0, r.raw_idle_seconds ?? 0),
+      paused_reason,
+    });
+  }
+  return out;
+}
+
 /* ── Agent state (powers the check-in panel; returned by every agent action) ── */
 async function getAgentState(userId, businessId, db = pool) {
   const { rows: [u] } = await db.query(
     `SELECT id, agent_track, COALESCE(is_absent, FALSE) AS is_absent,
-            FLOOR(EXTRACT(EPOCH FROM (NOW() - last_action_at)))::int AS seconds_since_action,
-            (NOW() AT TIME ZONE 'Africa/Cairo')::time < TIME '${IDLE_WATCH_END_LOCAL}' AS within_hours
+            FLOOR(EXTRACT(EPOCH FROM (NOW() - last_action_at)))::int AS seconds_since_action
        FROM users WHERE id = $1 AND business_id = $2`,
     [String(userId), businessId]
   );
@@ -338,6 +398,8 @@ async function getAgentState(userId, businessId, db = pool) {
   const remainingSeconds = Math.max(0, BREAK_ALLOWANCE_SEC - usedSeconds);
   const breakBlock       = await breakBlockReason(d, br.sessions_used, remainingSeconds, db);
 
+  const idle = (await idleFacts(businessId, userId, db)).get(String(userId));
+
   const now = Date.now();
   const nextCheckpoint = checkpoints.find((c) => c.outcome === 'open' && new Date(c.deadline_at).getTime() > now) || null;
 
@@ -355,12 +417,16 @@ async function getAgentState(userId, businessId, db = pool) {
     checkpoints,
     next_checkpoint: nextCheckpoint,
     enforce_from: ENFORCE_FROM_LOCAL,
-    /* Inactivity prompt: only while working (checked in, not on a break, before
-       the end of the working day). The clock is the SERVER's — a wrong phone
-       clock can't skew it. */
+    /* Inactivity prompt: only while checked in, inside her shift, AND with new
+       work to do (see idleFacts). The clock is the SERVER's. */
     seconds_since_action: u.seconds_since_action,
-    idle_watch: d.status === 'active' && u.within_hours,
+    idle_seconds:         idle?.idle_seconds ?? null,
+    idle_paused_reason:   d.status !== 'active' ? d.status : (idle?.paused_reason ?? 'outside_shift'),
+    idle_watch:           d.status === 'active' && idle?.idle_seconds != null,
     idle_warning_minutes: IDLE_WARNING_MINUTES,
+    idle_minutes:         IDLE_MINUTES,
+    new_orders:           idle?.workable ?? 0,
+    shift:                idle ? { start: idle.shift_start_local, end: idle.shift_end_local } : null,
     break: {
       max_sessions:      BREAK_MAX_SESSIONS,
       sessions_used:     br.sessions_used,
@@ -747,6 +813,7 @@ async function liveBoard(businessId) {
   }
   const brkByLog = new Map(brk.map((b) => [b.daily_log_id, b]));
   const pingBy   = new Map(pings.map((p) => [String(p.user_id), p.n]));
+  const idleBy   = await idleFacts(businessId);
   return {
     server_time:  new Date().toISOString(),
     enforce_from: ENFORCE_FROM_LOCAL,
@@ -761,6 +828,9 @@ async function liveBoard(businessId) {
         started_at: a.started_at, withdrawn_at: a.withdrawn_at, withdrawn_checkpoint: a.withdrawn_checkpoint,
         orders_withdrawn: a.orders_withdrawn ?? 0, reinstated_at: a.reinstated_at, reinstated_by: a.reinstated_by,
         seconds_since_action: a.seconds_since_action,
+        idle_seconds:       idleBy.get(String(a.id))?.idle_seconds ?? null,      // null = paused
+        idle_paused_reason: idleBy.get(String(a.id))?.paused_reason ?? null,
+        new_orders:         idleBy.get(String(a.id))?.workable ?? 0,
         still_here_today: pingBy.get(String(a.id)) ?? 0,
         checkpoints: a.daily_log_id
           ? (cpByLog.get(a.daily_log_id) ?? []).sort((x, y) => new Date(x.due_at) - new Date(y.due_at))

@@ -19,6 +19,39 @@ import {
 } from '@/lib/api';
 
 const POLL_MS = 30_000;
+const CHIME_REPEAT_MS = 15_000;   // re-chime while the prompt waits (agent may be on a call)
+
+/* Distinct two-tone chime via the Web Audio API — no sound file to ship. Browsers
+   only allow audio after the user has interacted with the page; agents tap
+   constantly, so the context is created / resumed on their taps and reused. */
+let audioCtx: AudioContext | null = null;
+function unlockAudio() {
+  try {
+    const AC = window.AudioContext
+      ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!audioCtx && AC) audioCtx = new AC();
+    if (audioCtx?.state === 'suspended') void audioCtx.resume();
+  } catch { /* audio unavailable */ }
+}
+function playChime() {
+  try {
+    const ctx = audioCtx;
+    if (!ctx || ctx.state !== 'running') return;
+    [880, 1318.5, 880, 1318.5].forEach((freq, i) => {
+      const t = ctx.currentTime + i * 0.22;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.4, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.21);
+    });
+  } catch { /* audio unavailable */ }
+}
 
 const CAIRO_HM = new Intl.DateTimeFormat('ar-EG-u-nu-latn', {
   timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit', hour12: true,
@@ -121,11 +154,13 @@ export default function DisciplinePanel() {
 
   const serverNow = now + offset;
 
-  /* ── 13-minute inactivity prompt ──────────────────────────────────────────── */
-  const sinceAction = state?.seconds_since_action == null
+  /* ── Inactivity prompt (18 min) ───────────────────────────────────────────────
+     Runs on the SERVER's idle clock, which is paused with no workable 'جديد'
+     orders and outside the shift — so waiting for work is never nagged. */
+  const sinceAction = state?.idle_seconds == null
     ? null
-    : state.seconds_since_action + Math.max(0, (serverNow - fetchedAt) / 1000);
-  const idleThreshold = (state?.idle_warning_minutes ?? 13) * 60;
+    : state.idle_seconds + Math.max(0, (serverNow - fetchedAt) / 1000);
+  const idleThreshold = (state?.idle_warning_minutes ?? 18) * 60;
   useEffect(() => {
     if (!state?.idle_watch || sinceAction == null) { if (idleOpen) setIdleOpen(false); return; }
     if (sinceAction < idleThreshold) { if (idleOpen) setIdleOpen(false); return; }
@@ -134,7 +169,7 @@ export default function DisciplinePanel() {
     confirming.current = true;
     load().then((fresh) => {
       confirming.current = false;
-      if (fresh?.idle_watch && (fresh.seconds_since_action ?? 0) >= idleThreshold) {
+      if (fresh?.idle_watch && (fresh.idle_seconds ?? 0) >= idleThreshold) {
         setIdleOpen(true);
         /* Buzz the phone — only after a tap (Chrome blocks it otherwise and logs noise). */
         try {
@@ -144,6 +179,28 @@ export default function DisciplinePanel() {
       }
     });
   }, [state?.idle_watch, sinceAction, idleThreshold, idleOpen, load]);
+
+  /* Unlock audio on the agent's taps (browser autoplay rule). */
+  useEffect(() => {
+    if (!state) return;
+    window.addEventListener('pointerdown', unlockAudio);
+    window.addEventListener('keydown', unlockAudio);
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, [state]);
+
+  /* While the prompt is open: chime now and every 15 s, flash the tab title. */
+  useEffect(() => {
+    if (!idleOpen) return;
+    const title = document.title;
+    playChime();
+    const chime = setInterval(playChime, CHIME_REPEAT_MS);
+    let flip = false;
+    const flash = setInterval(() => { flip = !flip; document.title = flip ? '⏰ هل ما زلتِ هنا؟' : title; }, 1000);
+    return () => { clearInterval(chime); clearInterval(flash); document.title = title; };
+  }, [idleOpen]);
 
   if (!state) return null;
 
@@ -243,6 +300,15 @@ export default function DisciplinePanel() {
                 {state.checkpoints.map((c) => <CheckpointChip key={c.code} cp={c} now={serverNow} />)}
               </div>
             )}
+            {status === 'active' && (
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {state.idle_paused_reason === 'no_new_orders'
+                  ? '⏸️ عداد عدم النشاط متوقف — لا توجد أوردرات «جديد» عليكِ الآن'
+                  : state.idle_paused_reason === 'outside_shift'
+                    ? `⏸️ عداد عدم النشاط يعمل فقط من ${state.shift?.start ?? '11:00'} إلى ${state.shift?.end ?? '19:00'}`
+                    : `عداد عدم النشاط يعمل (${state.new_orders ?? 0} أوردر جديد) — التنبيه بعد ${state.idle_warning_minutes ?? 18} دقيقة بدون إجراء`}
+              </p>
+            )}
             {brk && status !== 'withdrawn' && (
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="text-slate-600 dark:text-slate-300">
@@ -279,9 +345,9 @@ export default function DisciplinePanel() {
             <div className="text-4xl mb-2" aria-hidden>⏰</div>
             <h2 className="text-lg font-bold text-slate-900 dark:text-white mb-2">هل ما زلتِ هنا؟</h2>
             <p className="text-sm text-slate-600 dark:text-slate-300 mb-5 leading-relaxed">
-              لم يُسجَّل أي إجراء على الأوردرات منذ{' '}
+              لديكِ أوردرات جديدة ولم يُسجَّل أي إجراء عليها منذ{' '}
               <b>{Math.floor((sinceAction ?? 0) / 60)}</b> دقيقة.
-              بعد {(state.idle_warning_minutes ?? 13) + 2} دقيقة بدون نشاط تظهرين للتيم ليدر كغير نشطة.
+              عند {state.idle_minutes ?? 20} دقيقة تظهرين للتيم ليدر كغير نشطة.
             </p>
             <button onClick={doStillHere} disabled={busy}
               className="w-full py-3 rounded-xl text-base font-bold bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50">

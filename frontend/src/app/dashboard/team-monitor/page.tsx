@@ -6,7 +6,7 @@
    Polls GET /api/discipline/live every 20s. Each enrolled agent is a card whose
    colour follows the agreed rules:
      red     — orders withdrawn today
-     orange  — checked in but no real order action for ≥ 15 min (idle)
+     orange  — idle ≥ 20 min: had workable 'جديد' orders, in shift, no real action
      sky     — on a break
      yellow  — a checkpoint was late (1–15 min) or one is in its grace now
      green   — checked in on time
@@ -108,13 +108,14 @@ export default function TeamMonitorPage() {
 
   const serverNow = now + offset;
   const drift = Math.max(0, (now - fetchedAt) / 1000);   // seconds since the board was fetched
+  /* The server's idle clock (null = paused: no workable 'جديد' orders / outside shift). */
   const idleSec = useCallback((a: DisciplineBoardAgent) =>
-    a.seconds_since_action == null ? null : a.seconds_since_action + drift, [drift]);
+    a.idle_seconds == null ? null : a.idle_seconds + drift, [drift]);
 
   const enrolled = useMemo(() => (board?.agents ?? []).filter((a) => a.track), [board]);
   const tones = useMemo(() => {
     const m = new Map<string, Tone>();
-    for (const a of enrolled) m.set(a.id, toneOf(a, idleSec(a), board?.idle_minutes ?? 15, serverNow));
+    for (const a of enrolled) m.set(a.id, toneOf(a, idleSec(a), board?.idle_minutes ?? 20, serverNow));
     return m;
   }, [enrolled, idleSec, board, serverNow]);
   const counts = useMemo(() => {
@@ -219,7 +220,12 @@ export default function TeamMonitorPage() {
 
               {/* Facts */}
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-600 dark:text-slate-300">
-                <span>آخر إجراء: <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{ago(idle)}</b></span>
+                <span>آخر إجراء: <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{ago(a.seconds_since_action == null ? null : a.seconds_since_action + drift)}</b></span>
+                <span>
+                  {a.idle_paused_reason === 'no_new_orders' ? <span className="text-slate-400">⏸️ بانتظار أوردرات جديدة</span>
+                    : a.idle_paused_reason === 'outside_shift' ? <span className="text-slate-400">⏸️ خارج الشفت</span>
+                    : <>جديد: <b>{a.new_orders}</b> · خمول <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{Math.floor((idle ?? 0) / 60)} د</b></>}
+                </span>
                 <span>تأكيد التواجد: <b>{a.still_here_today}</b></span>
                 <span>استراحة: <b>{a.break.used_minutes}</b>/30 د · <b>{a.break.sessions_used}</b>/2</span>
                 {a.break.active_until && <span className="text-sky-700 dark:text-sky-300">حتى {hm(a.break.active_until)}</span>}
