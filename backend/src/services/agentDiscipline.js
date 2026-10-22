@@ -59,6 +59,12 @@ const BREAK_CHECKPOINT_BUFFER_MIN = 15;      // no break if a checkpoint is due 
    'مؤجل' stays: those are callbacks the agent promised the customer. */
 const NO_ANSWER_WITHDRAW_WINDOW_DAYS = 4;
 
+/* The cron withdraws only for a deadline that passed within this many minutes
+   (it ticks every minute; the slack covers restarts). An older open checkpoint
+   was not enforceable when it fell due (absent / un-enrolled) → recorded as
+   missed, nothing withdrawn. */
+const ENFORCE_CATCHUP_MINUTES = 10;
+
 const DEFAULT_CHECKPOINTS = [
   { code: 'yesterday_review', label_ar: 'بدء مراجعة أوردرات أمس', due_time: '11:00', sort_order: 1 },
   { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '11:30', sort_order: 2 },
@@ -788,12 +794,29 @@ async function closeExpiredBreaks() {
       take that product. The commission-ownership trigger keeps any commission
       she already earned on them; order_assignment_log records every move.     */
 async function enforceCheckpoints() {
+  /* Stale rows — the deadline passed while she was absent / un-enrolled, so
+     nobody was holding her to it. Un-marking her later must not withdraw her
+     on the spot: record them as missed, move nothing. */
+  const deadline = `c.due_at + make_interval(mins => c.grace_minutes + 1)`;
+  const { rowCount: stale } = await pool.query(
+    `UPDATE agent_checkpoint_logs c SET outcome = 'missed'
+       FROM agent_daily_logs d, users u
+      WHERE c.daily_log_id = d.id AND u.id = d.user_id
+        AND c.outcome = 'open'
+        AND NOW() >= ${deadline} + make_interval(mins => ${ENFORCE_CATCHUP_MINUTES})
+        AND d.work_date = ${CAIRO_TODAY}
+        AND d.status <> 'withdrawn'
+        AND u.agent_track IS NOT NULL
+        AND COALESCE(u.is_active, TRUE) AND NOT COALESCE(u.is_absent, FALSE)`);
+  if (stale) console.log(`[discipline] ${stale} stale checkpoint(s) recorded as missed without withdrawal`);
+
   const { rows: missed } = await pool.query(
     `UPDATE agent_checkpoint_logs c SET outcome = 'missed'
        FROM agent_daily_logs d, users u
       WHERE c.daily_log_id = d.id AND u.id = d.user_id
         AND c.outcome = 'open'
-        AND NOW() >= c.due_at + make_interval(mins => c.grace_minutes + 1)
+        AND NOW() >= ${deadline}
+        AND NOW() <  ${deadline} + make_interval(mins => ${ENFORCE_CATCHUP_MINUTES})
         AND c.due_at >= ${ENFORCE_FROM_SQL}
         AND d.work_date = ${CAIRO_TODAY}
         AND d.status <> 'withdrawn'
@@ -908,15 +931,26 @@ async function withdrawOrders({ id: dailyLogId, business_id: businessId, user_id
 
 /* Team Leader / admin: lift a withdrawal for the rest of the day. Orders already
    handed to others stay with them; the missed checkpoint stays on the record
-   (it still counts in the monthly evaluation); later checkpoints apply again. */
+   (it still counts in the monthly evaluation); later checkpoints apply again.
+   Checkpoints whose deadline passed WHILE she was withdrawn are settled as
+   missed in the same statement — otherwise the next cron tick would see them
+   open and past due and withdraw her again a minute after the reinstatement. */
 async function reinstate(businessId, userId, actorEmail) {
-  const { rows } = await pool.query(
-    `UPDATE agent_daily_logs SET status = 'active', reinstated_by = $3, reinstated_at = NOW()
-      WHERE business_id = $1 AND user_id = $2 AND work_date = ${CAIRO_TODAY} AND status = 'withdrawn'
-      RETURNING id`,
+  const { rows: [r] } = await pool.query(
+    `WITH r AS (
+       UPDATE agent_daily_logs SET status = 'active', reinstated_by = $3, reinstated_at = NOW()
+        WHERE business_id = $1 AND user_id = $2 AND work_date = ${CAIRO_TODAY} AND status = 'withdrawn'
+        RETURNING id),
+     s AS (
+       UPDATE agent_checkpoint_logs c SET outcome = 'missed'
+         FROM r
+        WHERE c.daily_log_id = r.id AND c.outcome = 'open'
+          AND NOW() >= c.due_at + make_interval(mins => c.grace_minutes + 1)
+        RETURNING c.checkpoint_code)
+     SELECT (SELECT id FROM r) AS id, (SELECT array_agg(checkpoint_code) FROM s) AS settled`,
     [businessId, String(userId), actorEmail]);
-  if (!rows.length) throw new DisciplineError(409, 'الموظفة غير مسحوبة اليوم');
-  await logEvent(pool, businessId, userId, 'reinstated', { by: actorEmail });
+  if (!r?.id) throw new DisciplineError(409, 'الموظفة غير مسحوبة اليوم');
+  await logEvent(pool, businessId, userId, 'reinstated', { by: actorEmail, settled_missed: r.settled ?? [] });
   return getAgentState(userId, businessId);
 }
 
