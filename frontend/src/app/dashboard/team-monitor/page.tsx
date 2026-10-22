@@ -205,12 +205,12 @@ export default function TeamMonitorPage() {
                   let cls = 'bg-slate-50 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700';
                   let txt = d.due_time;
                   if (!c) txt = `${d.due_time} —`;
-                  else if (c.outcome === 'on_time') { cls = 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800'; txt = `✓ ${hm(c.checked_in_at)}`; }
-                  else if (c.outcome === 'late') { cls = 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-800'; txt = `${hm(c.checked_in_at)} (+${c.late_minutes}د)`; }
+                  else if (c.outcome === 'on_time') { cls = 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800'; txt = `✓ ${hm(c.checked_in_at)}${c.checked_in_via === 'work' ? ' ⚡' : ''}`; }
+                  else if (c.outcome === 'late') { cls = 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-800'; txt = `${hm(c.checked_in_at)} (+${c.late_minutes}د)${c.checked_in_via === 'work' ? ' ⚡' : ''}`; }
                   else if (c.outcome === 'missed') { cls = 'bg-red-50 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-800'; txt = '✗ فائتة'; }
                   else if (Date.parse(c.due_at) <= serverNow) { cls = 'bg-amber-50 text-amber-800 border-amber-300 animate-pulse dark:bg-amber-900/30 dark:text-amber-300'; txt = 'في المهلة'; }
                   return (
-                    <span key={d.code} title={d.label_ar} className={`px-2 py-1 rounded-lg border text-[11px] leading-tight ${cls}`}>
+                    <span key={d.code} title={c?.checked_in_via === 'work' ? `${d.label_ar} — سُجّل تلقائياً من العمل على الأوردرات` : d.label_ar} className={`px-2 py-1 rounded-lg border text-[11px] leading-tight ${cls}`}>
                       <span className="block text-[10px] opacity-75">{d.label_ar}</span>
                       <span dir="ltr">{txt}</span>
                     </span>

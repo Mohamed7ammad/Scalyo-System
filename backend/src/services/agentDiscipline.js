@@ -140,6 +140,10 @@ const schemaReady = (async () => {
       UNIQUE (daily_log_id, checkpoint_code)
     )`);
 
+  /* How a checkpoint was checked in: 'button' (the panel) or 'work' (auto — a real
+     order action inside the checkpoint's window; see autoCheckInFromWork). */
+  await pool.query(`ALTER TABLE agent_checkpoint_logs ADD COLUMN IF NOT EXISTS checked_in_via VARCHAR(10)`);
+
   /* Break sessions. The DB itself caps a day at 2 sessions (session_no 1..2 +
      unique) and at one open session at a time — a double tap can't beat it. */
   await pool.query(`
@@ -380,7 +384,7 @@ async function getAgentState(userId, businessId, db = pool) {
     `SELECT checkpoint_code AS code, label_ar, due_at, grace_minutes,
             due_at - make_interval(mins => ${EARLY_CHECKIN_MINUTES})  AS opens_at,
             due_at + make_interval(mins => grace_minutes + 1)          AS deadline_at,
-            checked_in_at, outcome,
+            checked_in_at, checked_in_via, outcome,
             CASE WHEN checked_in_at > due_at
                  THEN CEIL(EXTRACT(EPOCH FROM (checked_in_at - due_at)) / 60)::int ELSE 0 END AS late_minutes
        FROM agent_checkpoint_logs WHERE daily_log_id = $1 ORDER BY due_at`,
@@ -516,7 +520,7 @@ async function checkIn(userId, businessId, code = null) {
 
     const { rows: [done] } = await client.query(
       `UPDATE agent_checkpoint_logs
-          SET checked_in_at = NOW(),
+          SET checked_in_at = NOW(), checked_in_via = 'button',
               outcome = CASE WHEN NOW() < due_at + INTERVAL '1 minute' THEN 'on_time' ELSE 'late' END
         WHERE id = $1 RETURNING outcome`,
       [cp.id]
@@ -531,6 +535,78 @@ async function checkIn(userId, businessId, code = null) {
       { checkpoint: cp.checkpoint_code, outcome: done.outcome, ended_break: brk.rowCount > 0 });
     await client.query('COMMIT');
     return { checkpoint: cp.checkpoint_code, outcome: done.outcome, state: await getAgentState(userId, businessId) };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/* ── Auto check-in from real work ────────────────────────────────────────────────
+   Called by middleware/trackAction after a SUCCESSFUL order write (status, note,
+   call attempt, manual order) by an enrolled agent. Working orders is stronger
+   proof of presence than a button press — this protects an agent who is busy on
+   calls and forgets to press «تسجيل الحضور».
+   EVERY open checkpoint whose window contains NOW() (opens 30 min before due →
+   due + grace, the same window as the button) is checked in, with the same
+   on_time / late rule and checked_in_via = 'work'. Overlapping windows (10:30–
+   11:15 for 11:00, 11:00–11:45 for 11:30) are both satisfied by one action.
+   Never for a withdrawn day — that still needs the Team Leader's reinstatement.
+   It cannot race the withdrawal cron: auto check-in only touches checkpoints
+   BEFORE their deadline, the cron only AFTER it.                                 */
+async function autoCheckInFromWork(userId) {
+  /* Cheap gate first — most order writes happen with no checkpoint window open. */
+  const { rows: gate } = await pool.query(
+    `SELECT 1 FROM agent_checkpoint_logs c
+       JOIN agent_daily_logs d ON d.id = c.daily_log_id
+      WHERE d.user_id = $1 AND d.work_date = ${CAIRO_TODAY} AND d.status <> 'withdrawn'
+        AND c.outcome = 'open'
+        AND NOW() >= c.due_at - make_interval(mins => ${EARLY_CHECKIN_MINUTES})
+        AND NOW() <  c.due_at + make_interval(mins => c.grace_minutes + 1)
+      LIMIT 1`,
+    [String(userId)]
+  );
+  if (!gate.length) return [];
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    /* Same row lock as the manual check-in, so the two can never double-record. */
+    const { rows: [d] } = await client.query(
+      `SELECT d.id, d.business_id, d.status
+         FROM agent_daily_logs d JOIN users u ON u.id = d.user_id
+        WHERE d.user_id = $1 AND d.work_date = ${CAIRO_TODAY} AND u.agent_track IS NOT NULL
+        FOR UPDATE OF d`,
+      [String(userId)]
+    );
+    if (!d || d.status === 'withdrawn') { await client.query('ROLLBACK'); return []; }
+
+    const { rows: done } = await client.query(
+      `UPDATE agent_checkpoint_logs
+          SET checked_in_at = NOW(), checked_in_via = 'work',
+              outcome = CASE WHEN NOW() < due_at + INTERVAL '1 minute' THEN 'on_time' ELSE 'late' END
+        WHERE daily_log_id = $1 AND outcome = 'open'
+          AND NOW() >= due_at - make_interval(mins => ${EARLY_CHECKIN_MINUTES})
+          AND NOW() <  due_at + make_interval(mins => grace_minutes + 1)
+        RETURNING checkpoint_code, label_ar, outcome`,
+      [d.id]
+    );
+    if (!done.length) { await client.query('ROLLBACK'); return []; }
+
+    await client.query(
+      `UPDATE agent_break_sessions SET ended_at = LEAST(NOW(), max_end_at), ended_by = 'checkin'
+        WHERE daily_log_id = $1 AND ended_at IS NULL`, [d.id]);
+    await client.query(
+      `UPDATE agent_daily_logs SET status = 'active', started_at = COALESCE(started_at, NOW())
+        WHERE id = $1 AND status <> 'withdrawn'`, [d.id]);
+    for (const c of done) {
+      await logEvent(client, d.business_id, userId, 'checkin',
+        { checkpoint: c.checkpoint_code, outcome: c.outcome, via: 'work' });
+    }
+    await client.query('COMMIT');
+    console.log(`[discipline] ⚡ auto check-in (order work) user ${userId}: ${done.map((c) => `${c.checkpoint_code}=${c.outcome}`).join(', ')}`);
+    return done;
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     throw e;
@@ -790,7 +866,7 @@ async function liveBoard(businessId) {
           AND COALESCE(u.is_active, TRUE)
         ORDER BY (u.agent_track IS NULL), u.agent_track, name`, [businessId]),
     pool.query(
-      `SELECT c.daily_log_id, c.checkpoint_code AS code, c.due_at, c.grace_minutes, c.checked_in_at, c.outcome,
+      `SELECT c.daily_log_id, c.checkpoint_code AS code, c.due_at, c.grace_minutes, c.checked_in_at, c.checked_in_via, c.outcome,
               CASE WHEN c.checked_in_at > c.due_at
                    THEN CEIL(EXTRACT(EPOCH FROM (c.checked_in_at - c.due_at)) / 60)::int ELSE 0 END AS late_minutes
          FROM agent_checkpoint_logs c JOIN agent_daily_logs d ON d.id = c.daily_log_id
@@ -862,6 +938,6 @@ async function listAgents(businessId) {
 module.exports = {
   schemaReady, DisciplineError, AGENT_TRACKS, CHECKPOINT_TRACKS, trackCovers, trackCoversSql, DEFAULT_CHECKPOINTS,
   listCheckpoints, updateCheckpoint, setAgentTrack, listAgents,
-  seedToday, getAgentState, checkIn, startBreak, endBreak, reinstate, stillHere, liveBoard,
+  seedToday, getAgentState, checkIn, autoCheckInFromWork, startBreak, endBreak, reinstate, stillHere, liveBoard,
   closeExpiredBreaks, enforceCheckpoints,
 };

@@ -13,7 +13,7 @@
    Backend: /api/discipline (services/agentDiscipline.js).                       */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
+import api, {
   getDisciplineMe, disciplineCheckIn, disciplineBreak, disciplineStillHere,
   DisciplineState, DisciplineCheckpoint,
 } from '@/lib/api';
@@ -87,12 +87,14 @@ function phaseOf(cp: DisciplineCheckpoint, now: number): Phase {
 function CheckpointChip({ cp, now }: { cp: DisciplineCheckpoint; now: number }) {
   let cls = 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700';
   let mark = hm(cp.due_at);
-  if (cp.outcome === 'on_time') { cls = 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800'; mark = `✓ ${hm(cp.checked_in_at)}`; }
-  else if (cp.outcome === 'late') { cls = 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-800'; mark = `+${cp.late_minutes} د`; }
+  const auto = cp.checked_in_via === 'work' ? ' ⚡' : '';
+  if (cp.outcome === 'on_time') { cls = 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800'; mark = `✓ ${hm(cp.checked_in_at)}${auto}`; }
+  else if (cp.outcome === 'late') { cls = 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-800'; mark = `+${cp.late_minutes} د${auto}`; }
   else if (cp.outcome === 'missed') { cls = 'bg-red-50 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-800'; mark = '✗ فائتة'; }
   else if (phaseOf(cp, now) === 'late') { cls = 'bg-red-50 text-red-700 border-red-300 animate-pulse dark:bg-red-900/30 dark:text-red-300'; mark = 'في المهلة'; }
   return (
-    <span className={`inline-flex flex-col items-center px-2.5 py-1 rounded-lg border text-[11px] leading-tight ${cls}`}>
+    <span title={cp.checked_in_via === 'work' ? 'سُجّل تلقائياً — كنتِ تعملين على الأوردرات' : undefined}
+      className={`inline-flex flex-col items-center px-2.5 py-1 rounded-lg border text-[11px] leading-tight ${cls}`}>
       <span className="font-semibold">{cp.label_ar}</span>
       <span dir="ltr" className="opacity-90">{mark}</span>
     </span>
@@ -138,6 +140,30 @@ export default function DisciplinePanel() {
     window.addEventListener('focus', onFocus);
     return () => { clearInterval(poll); window.removeEventListener('focus', onFocus); };
   }, [load]);
+
+  /* Right after a successful order write (status / note / call attempt), the
+     server may have AUTO-checked her in — refresh now instead of waiting for the
+     30-s poll, and tell her which checkpoint it covered. */
+  const stateRef = useRef<DisciplineState | null>(null);
+  useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => {
+    if (!state) return;
+    const id = api.interceptors.response.use((res) => {
+      const m = String(res.config?.method ?? 'get').toLowerCase();
+      const url = String(res.config?.url ?? '');
+      if (m !== 'get' && url.startsWith('/api/orders')) {
+        const openBefore = new Set((stateRef.current?.checkpoints ?? []).filter((c) => c.outcome === 'open').map((c) => c.code));
+        setTimeout(() => {
+          load().then((fresh) => {
+            const auto = (fresh?.checkpoints ?? []).filter((c) => openBefore.has(c.code) && c.outcome !== 'open' && c.checked_in_via === 'work');
+            if (auto.length) setMsg({ text: `⚡ تم تسجيل حضورك تلقائياً في «${auto.map((c) => c.label_ar).join('» و«')}» لأنك تعملين على الأوردرات`, tone: 'ok' });
+          });
+        }, 800);
+      }
+      return res;
+    });
+    return () => api.interceptors.response.eject(id);
+  }, [state ? 1 : 0, load]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   /* 1-second clock, only while enrolled. */
   useEffect(() => {

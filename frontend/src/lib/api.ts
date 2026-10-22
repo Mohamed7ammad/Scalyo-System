@@ -2039,6 +2039,7 @@ export interface DisciplineCheckpoint {
   opens_at:      string;          // check-in opens (30 min before due)
   deadline_at:   string;          // last moment to check in (due + grace + 1 min)
   checked_in_at: string | null;
+  checked_in_via?: 'button' | 'work' | null;   // 'work' = auto check-in from order activity
   outcome:       CheckpointOutcome;
   late_minutes:  number;
 }
@@ -2100,6 +2101,7 @@ export interface DisciplineBoardCheckpoint {
   due_at:        string;
   grace_minutes: number;
   checked_in_at: string | null;
+  checked_in_via?: 'button' | 'work' | null;
   outcome:       CheckpointOutcome;
   late_minutes:  number;
 }
