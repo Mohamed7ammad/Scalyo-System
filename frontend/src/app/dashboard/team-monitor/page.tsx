@@ -11,7 +11,9 @@
      yellow  — a checkpoint was late (1–15 min) or one is in its grace now
      green   — checked in on time
      grey    — not started / not scheduled
-   The enrolment section sets users.agent_track (who the system monitors).     */
+   The enrolment section sets users.agent_track (who the system monitors); the
+   schedule editor (components/DisciplineScheduleEditor) sets work windows and
+   checkpoint times.                                                           */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -19,6 +21,7 @@ import {
   getDisciplineLive, setDisciplineTrack, reinstateDisciplineAgent, userHasRole, trackCovers,
   DisciplineBoard, DisciplineBoardAgent, DisciplineTrack,
 } from '@/lib/api';
+import DisciplineScheduleEditor from '@/components/DisciplineScheduleEditor';
 
 const POLL_MS = 20_000;
 const CAIRO_HM = new Intl.DateTimeFormat('ar-EG-u-nu-latn', {
@@ -280,6 +283,9 @@ export default function TeamMonitorPage() {
           </div>
         )}
       </div>
+
+      {/* Schedule: work windows + checkpoint times (admin / TL — this page is gated). */}
+      <DisciplineScheduleEditor onSaved={load} />
     </div>
   );
 }

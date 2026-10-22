@@ -2158,4 +2158,27 @@ export const setDisciplineTrack = (userId: string, track: DisciplineTrack | null
 export const reinstateDisciplineAgent = (userId: string) =>
   api.post<DisciplineState>('/api/discipline/reinstate', { user_id: userId });
 
+/* Schedule settings (admin / TL) — edited in the team-monitor schedule editor. */
+export interface DisciplineCheckpointDef {
+  code:          string;
+  label_ar:      string;
+  due_time:      string;                         // "HH:MM" Cairo
+  grace_minutes: number;
+  tracks:        ('confirmation' | 'review')[];
+  sort_order:    number;
+  is_active:     boolean;
+}
+export interface DisciplineWorkWindow { start: string; end: string }   // "HH:MM" Cairo
+/** How an edit landed on today's rows: moved now / dropped / new time already passed (from tomorrow). */
+export interface DisciplineTodayEffect { retimed: number; removed: number; kept: number }
+
+export const getDisciplineCheckpointDefs = () =>
+  api.get<DisciplineCheckpointDef[]>('/api/discipline/checkpoints');
+export const updateDisciplineCheckpoint = (code: string, patch: Partial<Pick<DisciplineCheckpointDef, 'label_ar' | 'due_time' | 'grace_minutes' | 'tracks' | 'is_active'>>) =>
+  api.put<{ checkpoint: DisciplineCheckpointDef; today: DisciplineTodayEffect }>(`/api/discipline/checkpoints/${encodeURIComponent(code)}`, patch);
+export const getDisciplineWorkWindows = () =>
+  api.get<DisciplineWorkWindow[]>('/api/discipline/work-windows');
+export const setDisciplineWorkWindows = (windows: DisciplineWorkWindow[]) =>
+  api.put<DisciplineWorkWindow[]>('/api/discipline/work-windows', { windows });
+
 export default api;

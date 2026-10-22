@@ -13,8 +13,8 @@
    • Every time below is Cairo local time (the server and DB run in UTC).
    • One agent_daily_logs row per agent per Cairo day; one agent_checkpoint_logs
      row per checkpoint for that day, seeded with the absolute due time.
-   • Deadline = due + grace + 1 minute: with a 15-minute grace, an 11:30
-     checkpoint accepts a check-in until 11:45:59 and is withdrawn at 11:46.
+   • Deadline = due + grace + 1 minute: with a 15-minute grace, a 12:30
+     checkpoint accepts a check-in until 12:45:59 and is withdrawn at 12:46.
    • users.last_action_at = last REAL work action (check-in now; status changes,
      notes and call attempts in Stage 2). It is deliberately NOT last_active_at,
      which the 90-second presence ping keeps writing for Online/Offline.        */
@@ -65,9 +65,10 @@ const NO_ANSWER_WITHDRAW_WINDOW_DAYS = 4;
    missed, nothing withdrawn. */
 const ENFORCE_CATCHUP_MINUTES = 10;
 
+/* The day starts at noon (owner, 2026-10-22: customers rarely answer at 11). */
 const DEFAULT_CHECKPOINTS = [
-  { code: 'yesterday_review', label_ar: 'بدء مراجعة أوردرات أمس', due_time: '11:00', sort_order: 1 },
-  { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '11:30', sort_order: 2 },
+  { code: 'yesterday_review', label_ar: 'بدء مراجعة أوردرات أمس', due_time: '12:00', sort_order: 1 },
+  { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '12:30', sort_order: 2 },
   { code: 'review_1',         label_ar: 'المراجعة الأولى',          due_time: '13:00', sort_order: 3 },
   { code: 'review_2',         label_ar: 'المراجعة الثانية',         due_time: '15:00', sort_order: 4 },
   { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '21:00', sort_order: 5 },
@@ -76,10 +77,10 @@ const DEFAULT_CHECKPOINTS = [
 /* Active WORK WINDOWS (Cairo). Agents are not expected to work continuously:
    outside these windows they are off duty, so the idle tracker sleeps entirely
    (no orange, no «هل ما زلتِ هنا؟», no chime) whatever orders are pending.
-   Data, not code — admins / Team Leaders retime them via PUT /work-windows. */
+   Data, not code — admins / Team Leaders retime them in the team-monitor
+   schedule editor (PUT /work-windows). */
 const DEFAULT_WORK_WINDOWS = [
-  { start: '11:00', end: '12:00' },   // morning
-  { start: '12:30', end: '13:30' },   // noon
+  { start: '12:00', end: '13:30' },   // noon (was 11–12 + 12:30–13:30)
   { start: '14:30', end: '15:30' },   // afternoon
   { start: '20:30', end: '22:30' },   // evening
 ];
@@ -294,8 +295,17 @@ async function listCheckpoints(businessId) {
   return rows;
 }
 
-/* Validated partial update. Takes effect from the NEXT day's seeding: today's
-   checkpoint rows were frozen when the day was seeded. */
+/* Validated partial update of a checkpoint definition. It drives every future
+   day's seeding AND today's rows that are still open before their deadline
+   (history — checked in or missed — never changes; a row already in its grace
+   can only move later, i.e. a Team Leader may extend a running checkpoint):
+     • retimed / relabelled when the new due time is still ahead today;
+       a new time that has already passed today is kept for tomorrow
+       (the row stays at its old time — counted as `kept`);
+     • removed when the checkpoint no longer applies to her (deactivated, or
+       her track dropped from it);
+     • newly applicable rows (re-activated, track added) come from seedToday.
+   Returns { checkpoint, today: { retimed, removed, kept } }.                   */
 async function updateCheckpoint(businessId, code, body) {
   await ensureDefaultCheckpoints(businessId);
   const sets = [];
@@ -328,14 +338,59 @@ async function updateCheckpoint(businessId, code, body) {
   if (!sets.length) throw new DisciplineError(400, 'لا توجد حقول للتحديث');
   sets.push('updated_at = NOW()');
   params.push(businessId, code);
-  const { rows } = await pool.query(
-    `UPDATE discipline_checkpoints SET ${sets.join(', ')}
-      WHERE business_id = $${params.length - 1} AND code = $${params.length}
-      RETURNING code, label_ar, to_char(due_time, 'HH24:MI') AS due_time, grace_minutes, tracks, sort_order, is_active`,
-    params
-  );
-  if (!rows.length) throw new DisciplineError(404, 'نقطة المتابعة غير موجودة');
-  return rows[0];
+
+  /* Today's rows this edit may still touch: open, deadline not reached. */
+  const pending = `d.business_id = $1 AND c.checkpoint_code = $2 AND d.work_date = ${CAIRO_TODAY}
+        AND c.outcome = 'open' AND NOW() < c.due_at + make_interval(mins => c.grace_minutes + 1)`;
+  const newDue = `(d.work_date + k.due_time) AT TIME ZONE 'Africa/Cairo'`;
+  const client = await pool.connect();
+  let checkpoint, today;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `UPDATE discipline_checkpoints SET ${sets.join(', ')}
+        WHERE business_id = $${params.length - 1} AND code = $${params.length}
+        RETURNING code, label_ar, to_char(due_time, 'HH24:MI') AS due_time, grace_minutes, tracks, sort_order, is_active`,
+      params
+    );
+    if (!rows.length) throw new DisciplineError(404, 'نقطة المتابعة غير موجودة');
+    checkpoint = rows[0];
+
+    const { rowCount: removed } = await client.query(
+      `DELETE FROM agent_checkpoint_logs c
+        USING agent_daily_logs d, users u, discipline_checkpoints k
+        WHERE c.daily_log_id = d.id AND u.id = d.user_id
+          AND k.business_id = d.business_id AND k.code = c.checkpoint_code
+          AND ${pending}
+          AND NOT (k.is_active AND (u.agent_track = 'both' OR u.agent_track = ANY(k.tracks)))`,
+      [businessId, code]);
+    const { rowCount: retimed } = await client.query(
+      `UPDATE agent_checkpoint_logs c
+          SET due_at = ${newDue}, grace_minutes = k.grace_minutes, label_ar = k.label_ar
+         FROM agent_daily_logs d, discipline_checkpoints k
+        WHERE c.daily_log_id = d.id
+          AND k.business_id = d.business_id AND k.code = c.checkpoint_code
+          AND ${pending}
+          AND ${newDue} > NOW()
+          AND (c.due_at, c.grace_minutes, c.label_ar) IS DISTINCT FROM (${newDue}, k.grace_minutes, k.label_ar)`,
+      [businessId, code]);
+    const { rows: [k] } = await client.query(
+      `SELECT COUNT(*)::int AS n
+         FROM agent_checkpoint_logs c
+         JOIN agent_daily_logs d       ON d.id = c.daily_log_id
+         JOIN discipline_checkpoints k ON k.business_id = d.business_id AND k.code = c.checkpoint_code
+        WHERE ${pending} AND c.due_at <> ${newDue}`,
+      [businessId, code]);
+    await client.query('COMMIT');
+    today = { retimed, removed, kept: k.n };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  await seedToday();                       // re-activated / newly covered → today's future rows now
+  return { checkpoint, today };
 }
 
 async function setAgentTrack(businessId, userId, track) {
@@ -393,7 +448,7 @@ async function seedToday({ userId = null, db = pool } = {}) {
 /* ── Idle clock ──────────────────────────────────────────────────────────────────
    Per enrolled agent. Idle time accrues ONLY while:
      • NOW is inside one of the tenant's active work windows
-       (discipline_work_windows — 11–12, 12:30–13:30, 14:30–15:30, 20:30–22:30);
+       (discipline_work_windows — default 12:00–13:30, 14:30–15:30, 20:30–22:30);
        outside them the tracker sleeps completely; and
      • she has at least one live 'جديد' order she can work (past its 15-minute
        new-order lock). 0 such orders → paused: she is waiting for work.
@@ -643,8 +698,8 @@ async function checkIn(userId, businessId, code = null) {
    calls and forgets to press «تسجيل الحضور».
    EVERY open checkpoint whose window contains NOW() (opens 30 min before due →
    due + grace, the same window as the button) is checked in, with the same
-   on_time / late rule and checked_in_via = 'work'. Overlapping windows (10:30–
-   11:15 for 11:00, 11:00–11:45 for 11:30) are both satisfied by one action.
+   on_time / late rule and checked_in_via = 'work'. Overlapping windows (11:30–
+   12:15 for 12:00, 12:00–12:45 for 12:30) are both satisfied by one action.
    Never for a withdrawn day — that still needs the Team Leader's reinstatement.
    It cannot race the withdrawal cron: auto check-in only touches checkpoints
    BEFORE their deadline, the cron only AFTER it.                                 */
