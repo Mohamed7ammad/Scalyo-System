@@ -34,7 +34,7 @@ const ENFORCE_FROM_LOCAL = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(process.env.DI
 const ENFORCE_FROM_SQL = `('${ENFORCE_FROM_LOCAL}'::timestamp AT TIME ZONE 'Africa/Cairo')`;
 /* Idle (rescue patch, launch day 2026-10-22): agents on long customer calls make
    no DB writes, so the thresholds are generous and the clock only runs while
-   there is NEW work she can act on, inside her shift. */
+   there is NEW work she can act on, inside an active work window. */
 const IDLE_WARNING_MINUTES   = 18;   // client «هل ما زلتِ هنا؟» prompt (+ sound)
 const IDLE_MINUTES           = 20;   // shown as idle (orange) on the Team Leader board
 const NEW_ORDER_LOCK_MINUTES = 15;   // a 'جديد' order can't be confirmed in its first 15 min (OrdersTable cooldown)
@@ -64,7 +64,18 @@ const DEFAULT_CHECKPOINTS = [
   { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '11:30', sort_order: 2 },
   { code: 'review_1',         label_ar: 'المراجعة الأولى',          due_time: '13:00', sort_order: 3 },
   { code: 'review_2',         label_ar: 'المراجعة الثانية',         due_time: '15:00', sort_order: 4 },
-  { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '19:00', sort_order: 5 },
+  { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '21:00', sort_order: 5 },
+];
+
+/* Active WORK WINDOWS (Cairo). Agents are not expected to work continuously:
+   outside these windows they are off duty, so the idle tracker sleeps entirely
+   (no orange, no «هل ما زلتِ هنا؟», no chime) whatever orders are pending.
+   Data, not code — admins / Team Leaders retime them via PUT /work-windows. */
+const DEFAULT_WORK_WINDOWS = [
+  { start: '11:00', end: '12:00' },   // morning
+  { start: '12:30', end: '13:30' },   // noon
+  { start: '14:30', end: '15:30' },   // afternoon
+  { start: '20:30', end: '22:30' },   // evening
 ];
 
 /* Typed error the routes turn into an HTTP status + Arabic message. */
@@ -103,6 +114,18 @@ const schemaReady = (async () => {
       updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
       UNIQUE (business_id, code)
     )`);
+
+  /* Active work windows (see DEFAULT_WORK_WINDOWS). */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discipline_work_windows (
+      id          SERIAL      PRIMARY KEY,
+      business_id INTEGER     NOT NULL,
+      start_time  TIME        NOT NULL,
+      end_time    TIME        NOT NULL CHECK (end_time > start_time),
+      sort_order  INTEGER     NOT NULL DEFAULT 0,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS discipline_work_windows_biz_start_uq ON discipline_work_windows (business_id, start_time)`);
 
   /* One row per agent per Cairo work day. */
   await pool.query(`
@@ -189,6 +212,7 @@ const BREAK_USED_SQL = `
 
 /* ── Checkpoint settings ─────────────────────────────────────────────────────── */
 async function ensureDefaultCheckpoints(businessId, db = pool) {
+  await ensureDefaultWorkWindows(businessId, db);
   for (const c of DEFAULT_CHECKPOINTS) {
     await db.query(
       `INSERT INTO discipline_checkpoints (business_id, code, label_ar, due_time, sort_order)
@@ -197,6 +221,61 @@ async function ensureDefaultCheckpoints(businessId, db = pool) {
       [businessId, c.code, c.label_ar, c.due_time, c.sort_order]
     );
   }
+}
+
+/* Seed the default work windows for a tenant that has none yet. */
+async function ensureDefaultWorkWindows(businessId, db = pool) {
+  const { rows } = await db.query(`SELECT 1 FROM discipline_work_windows WHERE business_id = $1 LIMIT 1`, [businessId]);
+  if (rows.length) return;
+  for (const [i, w] of DEFAULT_WORK_WINDOWS.entries()) {
+    await db.query(
+      `INSERT INTO discipline_work_windows (business_id, start_time, end_time, sort_order) VALUES ($1, $2::time, $3::time, $4)
+       ON CONFLICT (business_id, start_time) DO NOTHING`,
+      [businessId, w.start, w.end, i + 1]);
+  }
+}
+
+async function listWorkWindows(businessId, db = pool) {
+  await ensureDefaultWorkWindows(businessId, db);
+  const { rows } = await db.query(
+    `SELECT to_char(start_time, 'HH24:MI') AS start, to_char(end_time, 'HH24:MI') AS "end"
+       FROM discipline_work_windows WHERE business_id = $1 ORDER BY start_time`, [businessId]);
+  return rows;
+}
+
+/* Replace the whole list (validated: HH:MM, start < end, no overlaps, 1–10).
+   Takes effect immediately — the idle clock is computed live. */
+async function setWorkWindows(businessId, windows) {
+  const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+  if (!Array.isArray(windows) || windows.length < 1 || windows.length > 10) {
+    throw new DisciplineError(400, 'أدخلي من فترة عمل واحدة إلى 10 فترات');
+  }
+  const list = windows.map((w) => ({ start: String(w?.start ?? '').trim(), end: String(w?.end ?? '').trim() }))
+    .sort((a, b) => a.start.localeCompare(b.start));
+  for (const w of list) {
+    if (!HHMM.test(w.start) || !HHMM.test(w.end)) throw new DisciplineError(400, 'الأوقات بصيغة HH:MM (24 ساعة)');
+    if (w.end <= w.start) throw new DisciplineError(400, `نهاية الفترة يجب أن تكون بعد بدايتها (${w.start}–${w.end})`);
+  }
+  for (let i = 1; i < list.length; i++) {
+    if (list[i].start < list[i - 1].end) throw new DisciplineError(400, `الفترتان ${list[i - 1].start}–${list[i - 1].end} و${list[i].start}–${list[i].end} متداخلتان`);
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM discipline_work_windows WHERE business_id = $1`, [businessId]);
+    for (const [i, w] of list.entries()) {
+      await client.query(
+        `INSERT INTO discipline_work_windows (business_id, start_time, end_time, sort_order) VALUES ($1, $2::time, $3::time, $4)`,
+        [businessId, w.start, w.end, i + 1]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  return listWorkWindows(businessId);
 }
 
 async function listCheckpoints(businessId) {
@@ -307,15 +386,17 @@ async function seedToday({ userId = null, db = pool } = {}) {
 
 /* ── Idle clock ──────────────────────────────────────────────────────────────────
    Per enrolled agent. Idle time accrues ONLY while:
-     • it is inside her shift — her first checkpoint's due time → her last one's
-       (11:00 → 19:00 by default, from discipline_checkpoints for her track); and
+     • NOW is inside one of the tenant's active work windows
+       (discipline_work_windows — 11–12, 12:30–13:30, 14:30–15:30, 20:30–22:30);
+       outside them the tracker sleeps completely; and
      • she has at least one live 'جديد' order she can work (past its 15-minute
        new-order lock). 0 such orders → paused: she is waiting for work.
    The clock starts at the LATEST of: her last real action, the moment that work
-   became available, the shift start, the end of her last break — so waiting
-   with an empty queue, or a break, never counts against her.
-   Returns Map(userId → { new_total, workable, within_shift, shift_start_local,
-   shift_end_local, idle_seconds (null when paused), paused_reason }).          */
+   became available, the START OF THE CURRENT WINDOW, the end of her last break —
+   so waiting with an empty queue, the gap between windows, or a break never
+   counts against her.
+   Returns Map(userId → { new_total, workable, within_window, window_start_local,
+   window_end_local, idle_seconds (null when paused), idle_since, paused_reason }). */
 async function idleFacts(businessId, userId = null, db = pool) {
   const params = [businessId];
   let userFilter = '';
@@ -323,12 +404,12 @@ async function idleFacts(businessId, userId = null, db = pool) {
   const lock = `make_interval(mins => ${NEW_ORDER_LOCK_MINUTES})`;
   const { rows } = await db.query(
     `SELECT u.id, w.new_total, w.workable,
-            COALESCE(NOW() BETWEEN s.shift_start AND s.shift_end, FALSE) AS within_shift,
-            to_char(s.shift_start AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS shift_start_local,
-            to_char(s.shift_end   AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS shift_end_local,
-            FLOOR(EXTRACT(EPOCH FROM (NOW() - GREATEST(u.last_action_at, w.work_since, s.shift_start, b.last_break_end))))::int
+            (s.win_start IS NOT NULL) AS within_window,
+            to_char(s.win_start AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS window_start_local,
+            to_char(s.win_end   AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS window_end_local,
+            FLOOR(EXTRACT(EPOCH FROM (NOW() - GREATEST(u.last_action_at, w.work_since, s.win_start, b.last_break_end))))::int
               AS raw_idle_seconds,
-            GREATEST(u.last_action_at, w.work_since, s.shift_start, b.last_break_end) AS idle_since
+            GREATEST(u.last_action_at, w.work_since, s.win_start, b.last_break_end) AS idle_since
        FROM users u
        LEFT JOIN LATERAL (
          SELECT COUNT(*)::int AS new_total,
@@ -339,11 +420,13 @@ async function idleFacts(businessId, userId = null, db = pool) {
           WHERE o.business_id = u.business_id AND o."AssignedTo" = u.email
             AND o.is_lost_order = FALSE AND btrim(o."Status") = 'جديد') w ON TRUE
        LEFT JOIN LATERAL (
-         SELECT (${CAIRO_TODAY} + MIN(k.due_time)) AT TIME ZONE 'Africa/Cairo' AS shift_start,
-                (${CAIRO_TODAY} + MAX(k.due_time)) AT TIME ZONE 'Africa/Cairo' AS shift_end
-           FROM discipline_checkpoints k
-          WHERE k.business_id = u.business_id AND k.is_active
-            AND (u.agent_track = 'both' OR u.agent_track = ANY(k.tracks))) s ON TRUE
+         SELECT (${CAIRO_TODAY} + ww.start_time) AT TIME ZONE 'Africa/Cairo' AS win_start,
+                (${CAIRO_TODAY} + ww.end_time)   AT TIME ZONE 'Africa/Cairo' AS win_end
+           FROM discipline_work_windows ww
+          WHERE ww.business_id = u.business_id
+            AND NOW() >= (${CAIRO_TODAY} + ww.start_time) AT TIME ZONE 'Africa/Cairo'
+            AND NOW() <  (${CAIRO_TODAY} + ww.end_time)   AT TIME ZONE 'Africa/Cairo'
+          ORDER BY ww.start_time LIMIT 1) s ON TRUE
        LEFT JOIN LATERAL (
          SELECT MAX(LEAST(COALESCE(bs.ended_at, NOW()), bs.max_end_at)) AS last_break_end
            FROM agent_break_sessions bs JOIN agent_daily_logs dl ON dl.id = bs.daily_log_id
@@ -353,10 +436,10 @@ async function idleFacts(businessId, userId = null, db = pool) {
   );
   const out = new Map();
   for (const r of rows) {
-    const paused_reason = !r.within_shift ? 'outside_shift' : r.workable === 0 ? 'no_new_orders' : null;
+    const paused_reason = !r.within_window ? 'outside_window' : r.workable === 0 ? 'no_new_orders' : null;
     out.set(String(r.id), {
-      new_total: r.new_total, workable: r.workable, within_shift: r.within_shift,
-      shift_start_local: r.shift_start_local, shift_end_local: r.shift_end_local,
+      new_total: r.new_total, workable: r.workable, within_window: r.within_window,
+      window_start_local: r.window_start_local, window_end_local: r.window_end_local,
       idle_seconds: paused_reason ? null : Math.max(0, r.raw_idle_seconds ?? 0),
       /* When the current idle stretch began — a stable id for "this idle episode". */
       idle_since:   paused_reason ? null : r.idle_since,
@@ -424,16 +507,17 @@ async function getAgentState(userId, businessId, db = pool) {
     checkpoints,
     next_checkpoint: nextCheckpoint,
     enforce_from: ENFORCE_FROM_LOCAL,
-    /* Inactivity prompt: only while checked in, inside her shift, AND with new
+    /* Inactivity prompt: only while checked in, inside a work window, AND with new
        work to do (see idleFacts). The clock is the SERVER's. */
     seconds_since_action: u.seconds_since_action,
     idle_seconds:         idle?.idle_seconds ?? null,
-    idle_paused_reason:   d.status !== 'active' ? d.status : (idle?.paused_reason ?? 'outside_shift'),
+    idle_paused_reason:   d.status !== 'active' ? d.status : (idle?.paused_reason ?? 'outside_window'),
     idle_watch:           d.status === 'active' && idle?.idle_seconds != null,
     idle_warning_minutes: IDLE_WARNING_MINUTES,
     idle_minutes:         IDLE_MINUTES,
     new_orders:           idle?.workable ?? 0,
-    shift:                idle ? { start: idle.shift_start_local, end: idle.shift_end_local } : null,
+    current_window:       idle?.within_window ? { start: idle.window_start_local, end: idle.window_end_local } : null,
+    work_windows:         await listWorkWindows(businessId, db),
     break: {
       max_sessions:      BREAK_MAX_SESSIONS,
       sessions_used:     br.sessions_used,
@@ -928,7 +1012,7 @@ async function liveBoard(businessId) {
    polls (admins + Team Leaders, every 30 s). Each alertable state carries a
    stable id so the client alerts exactly once per event:
      withdrawn → withdrawn_at (a new withdrawal after a reinstatement = new event)
-     idle      → idle_since   (≥ IDLE_MINUTES with workable 'جديد', in shift)   */
+     idle      → idle_since   (≥ IDLE_MINUTES with workable 'جديد', in a window) */
 async function alertSnapshot(businessId) {
   const [{ rows }, idle] = await Promise.all([
     pool.query(
@@ -974,7 +1058,7 @@ async function listAgents(businessId) {
 
 module.exports = {
   schemaReady, DisciplineError, AGENT_TRACKS, CHECKPOINT_TRACKS, trackCovers, trackCoversSql, DEFAULT_CHECKPOINTS,
-  listCheckpoints, updateCheckpoint, setAgentTrack, listAgents,
+  listCheckpoints, updateCheckpoint, setAgentTrack, listAgents, listWorkWindows, setWorkWindows, DEFAULT_WORK_WINDOWS,
   seedToday, getAgentState, checkIn, autoCheckInFromWork, startBreak, endBreak, reinstate, stillHere, liveBoard, alertSnapshot,
   closeExpiredBreaks, enforceCheckpoints,
 };

@@ -13,6 +13,8 @@
      GET  /checkpoints                     checkpoint settings (defaults seeded on first read)
      PUT  /checkpoints/:code               { label_ar?, due_time?, grace_minutes?, tracks?, is_active? }
      GET  /agents                          agents, their track and today's status
+     GET  /work-windows                    active work windows (idle tracking only runs inside)
+     PUT  /work-windows { windows: [{start,end}] }  replace them (validated, no overlaps)
      GET  /live                            live board for the Team Leader grid
      GET  /alerts                          tiny snapshot for the dashboard-wide alert toasts
      PATCH /agents/:id/track               { track: 'confirmation' | 'review' | null }
@@ -79,6 +81,12 @@ router.put('/checkpoints/:code', authenticate, requireAdminOrTeamLeader, handle(
   checkpoint: await svc.updateCheckpoint(req.user.business_id, req.params.code, req.body || {}),
   note: 'التعديل يُطبَّق من الغد — مواعيد اليوم ثُبِّتت عند بدايته',
 })));
+
+router.get('/work-windows', authenticate, requireAdminOrTeamLeader, handle((req) =>
+  svc.listWorkWindows(req.user.business_id)));
+
+router.put('/work-windows', authenticate, requireAdminOrTeamLeader, handle((req) =>
+  svc.setWorkWindows(req.user.business_id, req.body?.windows)));
 
 router.get('/agents', authenticate, requireAdminOrTeamLeader, handle((req) =>
   svc.listAgents(req.user.business_id)));

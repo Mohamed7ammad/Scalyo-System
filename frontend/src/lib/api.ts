@@ -2076,12 +2076,13 @@ export interface DisciplineState {
   /* Idle clock: accrues only inside her shift AND while she has workable 'جديد'
      orders. null = paused (no new orders / outside shift / not active). */
   idle_seconds?:         number | null;
-  idle_paused_reason?:   string | null;   // 'no_new_orders' | 'outside_shift' | day status
+  idle_paused_reason?:   string | null;   // 'no_new_orders' | 'outside_window' | day status
   idle_watch?:           boolean;         // show the inactivity prompt at all?
   idle_warning_minutes?: number;          // prompt + sound (18)
   idle_minutes?:         number;          // idle on the Team Leader board (20)
   new_orders?:           number;          // workable 'جديد' orders right now
-  shift?:                { start: string; end: string } | null;
+  current_window?:       { start: string; end: string } | null;   // the work window she's in now
+  work_windows?:         { start: string; end: string }[];       // idle tracking only runs inside these
   break?:                DisciplineBreak;
   server_time?:          string;
 }
@@ -2121,7 +2122,7 @@ export interface DisciplineBoardAgent {
   reinstated_by:        string | null;
   seconds_since_action: number | null;
   idle_seconds:         number | null;    // null = clock paused
-  idle_paused_reason:   string | null;    // 'no_new_orders' | 'outside_shift'
+  idle_paused_reason:   string | null;    // 'no_new_orders' | 'outside_window'
   new_orders:           number;           // workable 'جديد' orders right now
   still_here_today:     number;
   checkpoints:          DisciplineBoardCheckpoint[];

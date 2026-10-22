@@ -6,7 +6,7 @@
    Polls GET /api/discipline/live every 20s. Each enrolled agent is a card whose
    colour follows the agreed rules:
      red     — orders withdrawn today
-     orange  — idle ≥ 20 min: had workable 'جديد' orders, in shift, no real action
+     orange  — idle ≥ 20 min: had workable 'جديد' orders, inside a work window, no real action
      sky     — on a break
      yellow  — a checkpoint was late (1–15 min) or one is in its grace now
      green   — checked in on time
@@ -223,7 +223,7 @@ export default function TeamMonitorPage() {
                 <span>آخر إجراء: <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{ago(a.seconds_since_action == null ? null : a.seconds_since_action + drift)}</b></span>
                 <span>
                   {a.idle_paused_reason === 'no_new_orders' ? <span className="text-slate-400">⏸️ بانتظار أوردرات جديدة</span>
-                    : a.idle_paused_reason === 'outside_shift' ? <span className="text-slate-400">⏸️ خارج الشفت</span>
+                    : a.idle_paused_reason === 'outside_window' ? <span className="text-slate-400">⏸️ خارج فترات العمل</span>
                     : <>جديد: <b>{a.new_orders}</b> · خمول <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{Math.floor((idle ?? 0) / 60)} د</b></>}
                 </span>
                 <span>تأكيد التواجد: <b>{a.still_here_today}</b></span>

@@ -26,6 +26,8 @@ const CAIRO_HM = new Intl.DateTimeFormat('ar-EG-u-nu-latn', {
   timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit', hour12: true,
 });
 const hm = (iso: string | null | undefined) => (iso ? CAIRO_HM.format(new Date(iso)) : '');
+/* 24-hour "HH:MM" in Cairo — compared against the work-window bounds. */
+const CAIRO_HHMM = new Intl.DateTimeFormat('en-GB', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const pad = (n: number) => String(n).padStart(2, '0');
 const countdown = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -151,8 +153,11 @@ export default function DisciplinePanel() {
 
   /* ── Inactivity prompt (18 min) ───────────────────────────────────────────────
      Runs on the SERVER's idle clock, which is paused with no workable 'جديد'
-     orders and outside the shift — so waiting for work is never nagged. */
-  const sinceAction = state?.idle_seconds == null
+     orders and outside the work windows — so waiting for work is never nagged.
+     The local guard stops it the second the current window ends, without
+     waiting for the next poll. */
+  const windowOver = !!state?.current_window && CAIRO_HHMM.format(new Date(serverNow)) >= state.current_window.end;
+  const sinceAction = state?.idle_seconds == null || windowOver
     ? null
     : state.idle_seconds + Math.max(0, (serverNow - fetchedAt) / 1000);
   const idleThreshold = (state?.idle_warning_minutes ?? 18) * 60;
@@ -294,9 +299,9 @@ export default function DisciplinePanel() {
               <p className="text-[11px] text-slate-500 dark:text-slate-400">
                 {state.idle_paused_reason === 'no_new_orders'
                   ? '⏸️ عداد عدم النشاط متوقف — لا توجد أوردرات «جديد» عليكِ الآن'
-                  : state.idle_paused_reason === 'outside_shift'
-                    ? `⏸️ عداد عدم النشاط يعمل فقط من ${state.shift?.start ?? '11:00'} إلى ${state.shift?.end ?? '19:00'}`
-                    : `عداد عدم النشاط يعمل (${state.new_orders ?? 0} أوردر جديد) — التنبيه بعد ${state.idle_warning_minutes ?? 18} دقيقة بدون إجراء`}
+                  : state.idle_paused_reason === 'outside_window'
+                    ? `⏸️ خارج فترات العمل — عداد عدم النشاط يعمل فقط في: ${(state.work_windows ?? []).map((w) => `${w.start}–${w.end}`).join(' · ')}`
+                    : `عداد عدم النشاط يعمل (فترة ${state.current_window?.start ?? ''}–${state.current_window?.end ?? ''} · ${state.new_orders ?? 0} أوردر جديد) — التنبيه بعد ${state.idle_warning_minutes ?? 18} دقيقة بدون إجراء`}
               </p>
             )}
             {brk && status !== 'withdrawn' && (
