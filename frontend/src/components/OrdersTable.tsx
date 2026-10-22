@@ -123,13 +123,21 @@ const formatOrderTimeArabic = (iso: string | null | undefined, now: number): str
 // from its options silently displays the first option ('جديد') — that exact
 // fallback made returned orders masquerade as new ones and invited admins to
 // overwrite 'تم الإرجاع' with 'جديد' in the DB.
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'];
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'ملغي - عدم رد نهائي'];
 
 // Statuses agents AND admins may set from the inline table dropdown.
 // Everything from 'تم الشحن' onward is COURIER-OWNED (set by the shipping API /
 // Bosta webhook) and renders as a locked badge in the table for everyone —
 // admin overrides go through the full edit modal only.
 const MANUAL_STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع'];
+
+// «ملغي - عدم رد نهائي» is set by the nightly no-answer hand-off after the
+// 2 + 2 day cycle. Such an order still gets the inline select (with its own
+// value first) so its last holder / a Team Leader / an admin can REOPEN it;
+// it is never offered on other orders — the server rejects agents setting it.
+const NO_ANSWER_CLOSED = 'ملغي - عدم رد نهائي';
+const inlineStatusOptions = (s?: string | null) =>
+  normStatus(s) === NO_ANSWER_CLOSED ? [NO_ANSWER_CLOSED, ...MANUAL_STATUS_OPTIONS] : MANUAL_STATUS_OPTIONS;
 
 const STATUS_STYLES: Record<string, string> = {
   'جديد':       'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
@@ -144,6 +152,8 @@ const STATUS_STYLES: Record<string, string> = {
   'تم التوصيل':  'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
   'جاري الإعادة': 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300',
   'تم الإرجاع':  'bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300',
+  // Closed after the no-answer cycle (2 days with her + 2 review days)
+  'ملغي - عدم رد نهائي': 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
 };
 
 const DELIVERY_RATE_OPTIONS = ['بدون', 'جديد', 'ضعيف', 'متوسط', 'ممتاز'];
@@ -1837,7 +1847,7 @@ const OrderRow = memo(function OrderRow({
               {elapsedLabel} · متبقٍ {toArabicNum(remainingMin)} {remainingMin === 2 ? 'دقيقتان' : remainingMin >= 3 && remainingMin <= 10 ? 'دقائق' : 'دقيقة'}
             </span>
           </div>
-        ) : MANUAL_STATUS_OPTIONS.includes(normStatus(order.Status)) ? (
+        ) : inlineStatusOptions(order.Status).includes(normStatus(order.Status)) ? (
           <>
             <select
               /* normalized so a stray space / RTL mark in the DB value can never
@@ -1850,7 +1860,7 @@ const OrderRow = memo(function OrderRow({
                 dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
                 ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
             >
-              {MANUAL_STATUS_OPTIONS.map((s) => (
+              {inlineStatusOptions(order.Status).map((s) => (
                 <option key={s} value={s}>{s}</option>
               ))}
             </select>

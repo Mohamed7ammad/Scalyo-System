@@ -25,7 +25,7 @@ import OrdersTable from '@/components/OrdersTable';
    'جاري الإعادة' (in transit back to us) and 'تم الإرجاع' (physically received /
    restocked) are courier-set states — surfaced here so returned parcels have a
    dedicated queue instead of hiding under 'الكل'. */
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'جاري الإعادة', 'تم الإرجاع'];
+const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'جاري الإعادة', 'تم الإرجاع', 'ملغي - عدم رد نهائي'];
 
 /* Every status that means the order successfully PASSED confirmation — used for
    a cumulative confirmation rate so the % doesn't collapse as orders move on to

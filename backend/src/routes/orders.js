@@ -5,6 +5,7 @@ const { requireAdmin, filterAgentFields, requireAdminOrPermission } = require('.
 const { agentAllowsProduct, assignProductAware } = require('../utils/productRouting');
 const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
 const { hasRole } = require('../utils/roles');
+const noAnswer = require('../services/noAnswerCycles');   // «لا يرد» cycles: schema/trigger + terminal guard
 
 /* Treasury ledger sources that make up an agent's earned commission for an order.
    (bosta_cod / deposit are revenue/cash, NOT commission — excluded.) */
@@ -1742,6 +1743,17 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     return res.status(500).json({ error: 'خطأ في الخادم' });
   }
 
+  /* ── «ملغي - عدم رد نهائي» guard ────────────────────────────────────────────
+     Closed by the nightly no-answer hand-off. Only an admin, a Team Leader or
+     the order's last holder may change it (reopen); agents never set it. */
+  {
+    const blocked = noAnswer.terminalGuard(req.user, {
+      currentStatus, currentAssignedTo,
+      nextStatus: Object.prototype.hasOwnProperty.call(updates, 'Status') ? updates.Status : undefined,
+    });
+    if (blocked) return res.status(403).json({ error: blocked });
+  }
+
   /* ── Inline reassignment guard ──────────────────────────────────────────────
      If this PATCH changes AssignedTo (the inline "الموظف المسؤول" dropdown), a
      NON-admin (team-leader) may NOT move an order that is already committed —
@@ -2126,6 +2138,7 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
       'تم التوصيل': ['comm_confirmed', 'comm_delivered', 'bosta_cod'],
       'تم الرفض':   ['comm_rejected'],
       'لا يرد':     ['comm_no_answer'],
+      [noAnswer.TERMINAL]: ['comm_no_answer'],   // closed after the no-answer cycle → her 5-attempt commission stays
       'مؤجل':       [],   // postponed → NO automatic commission; void all (deposit kept)
       'معلق حتي الدفع': [],   // pending-until-payment → NO commission; void all (deposit kept)
     };
@@ -2173,6 +2186,14 @@ router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
   const businessId = req.user.business_id;
 
   try {
+    /* «ملغي - عدم رد نهائي»: only an admin, a Team Leader or its last holder. */
+    {
+      const { rows: [cur] } = await pool.query(
+        `SELECT "Status", "AssignedTo" FROM orders WHERE id = $1 AND business_id = $2`, [id, businessId]);
+      if (!cur) return res.status(404).json({ error: 'الطلب غير موجود' });
+      const blocked = noAnswer.terminalGuard(req.user, { currentStatus: cur.Status, currentAssignedTo: cur.AssignedTo });
+      if (blocked) return res.status(403).json({ error: blocked });
+    }
     /* Append the current timestamp to the JSONB array atomically. */
     const upd = await pool.query(
       `UPDATE orders

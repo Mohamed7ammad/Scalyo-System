@@ -34,6 +34,7 @@ const STATUS_BADGE: Record<string, string> = {
   'لا يرد':        'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   'جاري الإعادة':  'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
   'تم الإرجاع':    'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
+  'ملغي - عدم رد نهائي': 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
 };
 const badgeFor = (s: string) => STATUS_BADGE[s?.trim()] ?? 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
 
