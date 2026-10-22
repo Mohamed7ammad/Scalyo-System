@@ -65,12 +65,14 @@ const NO_ANSWER_WITHDRAW_WINDOW_DAYS = 4;
    missed, nothing withdrawn. */
 const ENFORCE_CATCHUP_MINUTES = 10;
 
-/* The day starts at noon (owner, 2026-10-22: customers rarely answer at 11). */
+/* Owner's schedule (2026-10-22): the day starts at noon (customers rarely answer
+   at 11); 14:30 is the last check before the 15:30 shipping cutoff; 18:00 and
+   21:00 cover the evening peak. */
 const DEFAULT_CHECKPOINTS = [
   { code: 'yesterday_review', label_ar: 'بدء مراجعة أوردرات أمس', due_time: '12:00', sort_order: 1 },
   { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '12:30', sort_order: 2 },
-  { code: 'review_1',         label_ar: 'المراجعة الأولى',          due_time: '13:00', sort_order: 3 },
-  { code: 'review_2',         label_ar: 'المراجعة الثانية',         due_time: '15:00', sort_order: 4 },
+  { code: 'review_1',         label_ar: 'المراجعة الأولى',          due_time: '14:30', sort_order: 3 },
+  { code: 'review_2',         label_ar: 'المراجعة الثانية',         due_time: '18:00', sort_order: 4 },
   { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '21:00', sort_order: 5 },
 ];
 
@@ -80,9 +82,10 @@ const DEFAULT_CHECKPOINTS = [
    Data, not code — admins / Team Leaders retime them in the team-monitor
    schedule editor (PUT /work-windows). */
 const DEFAULT_WORK_WINDOWS = [
-  { start: '12:00', end: '13:30' },   // noon (was 11–12 + 12:30–13:30)
-  { start: '14:30', end: '15:30' },   // afternoon
-  { start: '20:30', end: '22:30' },   // evening
+  { start: '12:00', end: '13:30' },   // noon start
+  { start: '14:00', end: '15:00' },   // before the 15:30 shipping cutoff
+  { start: '17:30', end: '18:30' },   // evening peak
+  { start: '20:30', end: '21:30' },   // night
 ];
 
 /* Typed error the routes turn into an HTTP status + Arabic message. */
@@ -448,7 +451,7 @@ async function seedToday({ userId = null, db = pool } = {}) {
 /* ── Idle clock ──────────────────────────────────────────────────────────────────
    Per enrolled agent. Idle time accrues ONLY while:
      • NOW is inside one of the tenant's active work windows
-       (discipline_work_windows — default 12:00–13:30, 14:30–15:30, 20:30–22:30);
+       (discipline_work_windows — default 12:00–13:30, 14:00–15:00, 17:30–18:30, 20:30–21:30);
        outside them the tracker sleeps completely; and
      • she has at least one live 'جديد' order she can work (past its 15-minute
        new-order lock). 0 such orders → paused: she is waiting for work.
