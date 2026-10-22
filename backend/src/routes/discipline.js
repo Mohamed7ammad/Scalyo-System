@@ -14,6 +14,7 @@
      PUT  /checkpoints/:code               { label_ar?, due_time?, grace_minutes?, tracks?, is_active? }
      GET  /agents                          agents, their track and today's status
      GET  /live                            live board for the Team Leader grid
+     GET  /alerts                          tiny snapshot for the dashboard-wide alert toasts
      PATCH /agents/:id/track               { track: 'confirmation' | 'review' | null }
      POST /reinstate { user_id }           lift today's withdrawal
    ════════════════════════════════════════════════════════════════════════════ */
@@ -63,6 +64,9 @@ router.post('/break', authenticate, handle((req) => {
 router.post('/still-here', authenticate, handle((req) => svc.stillHere(req.user.id, req.user.business_id)));
 
 /* ── Admin / Team Leader ───────────────────────────────────────────────────── */
+router.get('/alerts', authenticate, requireAdminOrTeamLeader, handle((req) =>
+  svc.alertSnapshot(req.user.business_id)));
+
 router.get('/live', authenticate, requireAdminOrTeamLeader, handle(async (req) => {
   await svc.seedToday();
   return svc.liveBoard(req.user.business_id);

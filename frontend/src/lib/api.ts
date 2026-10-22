@@ -2134,6 +2134,22 @@ export interface DisciplineBoard {
   checkpoints:  { code: string; label_ar: string; due_time: string; grace_minutes: number; tracks: ('confirmation' | 'review')[] }[];
   agents:       DisciplineBoardAgent[];
 }
+export interface DisciplineAlertAgent {
+  id:               string;
+  name:             string;
+  status:           DisciplineDayStatus;
+  withdrawn_at:     string | null;   // set while withdrawn — the event id
+  withdrawn_label:  string | null;
+  orders_withdrawn: number;
+  idle:             boolean;         // ≥ idle threshold with workable 'جديد', in shift
+  idle_since:       string | null;   // start of this idle stretch — the event id
+  idle_minutes:     number | null;
+}
+export interface DisciplineAlerts { server_time: string; idle_minutes: number; agents: DisciplineAlertAgent[] }
+/** Tiny snapshot polled by the dashboard-wide SupervisorAlerts (admin / TL). */
+export const getDisciplineAlerts = () =>
+  api.get<DisciplineAlerts>('/api/discipline/alerts');
+
 export const getDisciplineLive = () =>
   api.get<DisciplineBoard>('/api/discipline/live');
 export const setDisciplineTrack = (userId: string, track: DisciplineTrack | null) =>

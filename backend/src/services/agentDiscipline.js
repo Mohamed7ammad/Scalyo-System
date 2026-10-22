@@ -327,7 +327,8 @@ async function idleFacts(businessId, userId = null, db = pool) {
             to_char(s.shift_start AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS shift_start_local,
             to_char(s.shift_end   AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS shift_end_local,
             FLOOR(EXTRACT(EPOCH FROM (NOW() - GREATEST(u.last_action_at, w.work_since, s.shift_start, b.last_break_end))))::int
-              AS raw_idle_seconds
+              AS raw_idle_seconds,
+            GREATEST(u.last_action_at, w.work_since, s.shift_start, b.last_break_end) AS idle_since
        FROM users u
        LEFT JOIN LATERAL (
          SELECT COUNT(*)::int AS new_total,
@@ -357,6 +358,8 @@ async function idleFacts(businessId, userId = null, db = pool) {
       new_total: r.new_total, workable: r.workable, within_shift: r.within_shift,
       shift_start_local: r.shift_start_local, shift_end_local: r.shift_end_local,
       idle_seconds: paused_reason ? null : Math.max(0, r.raw_idle_seconds ?? 0),
+      /* When the current idle stretch began — a stable id for "this idle episode". */
+      idle_since:   paused_reason ? null : r.idle_since,
       paused_reason,
     });
   }
@@ -921,6 +924,40 @@ async function liveBoard(businessId) {
   };
 }
 
+/* Supervisor alerts: the minimal per-agent facts the dashboard-wide notifier
+   polls (admins + Team Leaders, every 30 s). Each alertable state carries a
+   stable id so the client alerts exactly once per event:
+     withdrawn → withdrawn_at (a new withdrawal after a reinstatement = new event)
+     idle      → idle_since   (≥ IDLE_MINUTES with workable 'جديد', in shift)   */
+async function alertSnapshot(businessId) {
+  const [{ rows }, idle] = await Promise.all([
+    pool.query(
+      `SELECT u.id, COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '@', 1)) AS name,
+              d.status, d.withdrawn_at, d.orders_withdrawn, k.label_ar AS withdrawn_label
+         FROM users u
+         JOIN agent_daily_logs d ON d.user_id = u.id AND d.work_date = ${CAIRO_TODAY}
+         LEFT JOIN discipline_checkpoints k ON k.business_id = d.business_id AND k.code = d.withdrawn_checkpoint
+        WHERE u.business_id = $1 AND u.agent_track IS NOT NULL`, [businessId]),
+    idleFacts(businessId),
+  ]);
+  return {
+    server_time:  new Date().toISOString(),
+    idle_minutes: IDLE_MINUTES,
+    agents: rows.map((r) => {
+      const f = idle.get(String(r.id));
+      const isIdle = r.status === 'active' && f?.idle_seconds != null && f.idle_seconds >= IDLE_MINUTES * 60;
+      return {
+        id: r.id, name: r.name, status: r.status,
+        withdrawn_at: r.status === 'withdrawn' ? r.withdrawn_at : null,
+        withdrawn_label: r.withdrawn_label, orders_withdrawn: r.orders_withdrawn,
+        idle: isIdle,
+        idle_since: isIdle ? f.idle_since : null,
+        idle_minutes: isIdle ? Math.floor(f.idle_seconds / 60) : null,
+      };
+    }),
+  };
+}
+
 /* Team view of enrolled + enrollable agents with today's status. */
 async function listAgents(businessId) {
   const { rows } = await pool.query(
@@ -938,6 +975,6 @@ async function listAgents(businessId) {
 module.exports = {
   schemaReady, DisciplineError, AGENT_TRACKS, CHECKPOINT_TRACKS, trackCovers, trackCoversSql, DEFAULT_CHECKPOINTS,
   listCheckpoints, updateCheckpoint, setAgentTrack, listAgents,
-  seedToday, getAgentState, checkIn, autoCheckInFromWork, startBreak, endBreak, reinstate, stillHere, liveBoard,
+  seedToday, getAgentState, checkIn, autoCheckInFromWork, startBreak, endBreak, reinstate, stillHere, liveBoard, alertSnapshot,
   closeExpiredBreaks, enforceCheckpoints,
 };

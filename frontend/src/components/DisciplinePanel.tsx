@@ -17,41 +17,10 @@ import api, {
   getDisciplineMe, disciplineCheckIn, disciplineBreak, disciplineStillHere,
   DisciplineState, DisciplineCheckpoint,
 } from '@/lib/api';
+import { installAudioUnlock, playTone } from '@/lib/alertSound';
 
 const POLL_MS = 30_000;
 const CHIME_REPEAT_MS = 15_000;   // re-chime while the prompt waits (agent may be on a call)
-
-/* Distinct two-tone chime via the Web Audio API — no sound file to ship. Browsers
-   only allow audio after the user has interacted with the page; agents tap
-   constantly, so the context is created / resumed on their taps and reused. */
-let audioCtx: AudioContext | null = null;
-function unlockAudio() {
-  try {
-    const AC = window.AudioContext
-      ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!audioCtx && AC) audioCtx = new AC();
-    if (audioCtx?.state === 'suspended') void audioCtx.resume();
-  } catch { /* audio unavailable */ }
-}
-function playChime() {
-  try {
-    const ctx = audioCtx;
-    if (!ctx || ctx.state !== 'running') return;
-    [880, 1318.5, 880, 1318.5].forEach((freq, i) => {
-      const t = ctx.currentTime + i * 0.22;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'triangle';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.exponentialRampToValueAtTime(0.4, t + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(t);
-      osc.stop(t + 0.21);
-    });
-  } catch { /* audio unavailable */ }
-}
 
 const CAIRO_HM = new Intl.DateTimeFormat('ar-EG-u-nu-latn', {
   timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit', hour12: true,
@@ -209,20 +178,15 @@ export default function DisciplinePanel() {
   /* Unlock audio on the agent's taps (browser autoplay rule). */
   useEffect(() => {
     if (!state) return;
-    window.addEventListener('pointerdown', unlockAudio);
-    window.addEventListener('keydown', unlockAudio);
-    return () => {
-      window.removeEventListener('pointerdown', unlockAudio);
-      window.removeEventListener('keydown', unlockAudio);
-    };
+    return installAudioUnlock();
   }, [state]);
 
   /* While the prompt is open: chime now and every 15 s, flash the tab title. */
   useEffect(() => {
     if (!idleOpen) return;
     const title = document.title;
-    playChime();
-    const chime = setInterval(playChime, CHIME_REPEAT_MS);
+    playTone('agentIdlePrompt');
+    const chime = setInterval(() => playTone('agentIdlePrompt'), CHIME_REPEAT_MS);
     let flip = false;
     const flash = setInterval(() => { flip = !flip; document.title = flip ? '⏰ هل ما زلتِ هنا؟' : title; }, 1000);
     return () => { clearInterval(chime); clearInterval(flash); document.title = title; };
