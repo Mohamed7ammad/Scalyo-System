@@ -21,12 +21,18 @@
      GET  /alerts                          tiny snapshot for the dashboard-wide alert toasts
      PATCH /agents/:id/track               { track: 'confirmation' | 'review' | null }
      POST /reinstate { user_id }           lift today's withdrawal
+     GET  /review-queue                    «لا يرد» queue: what a distribution would do now,
+                                           the review accounts, the last distribution
+     POST /review-queue/distribute { agent_ids: [..], dry_run? }
+                                           «توزيع طابور المراجعة» — hand the ready orders to
+                                           ONLY the selected review account(s) (dry_run → plan)
    ════════════════════════════════════════════════════════════════════════════ */
 
 const express      = require('express');
 const authenticate = require('../middleware/auth');
 const { hasRole }  = require('../utils/roles');
 const svc          = require('../services/agentDiscipline');
+const noAnswer     = require('../services/noAnswerCycles');
 
 const router = express.Router();
 
@@ -68,6 +74,16 @@ router.post('/break', authenticate, handle((req) => {
 router.post('/still-here', authenticate, handle((req) => svc.stillHere(req.user.id, req.user.business_id)));
 
 /* ── Admin / Team Leader ───────────────────────────────────────────────────── */
+router.get('/review-queue', authenticate, requireAdminOrTeamLeader, handle((req) =>
+  noAnswer.reviewQueueSummary(req.user.business_id)));
+
+router.post('/review-queue/distribute', authenticate, requireAdminOrTeamLeader, handle((req) =>
+  noAnswer.distributeReviewQueue(req.user.business_id, {
+    agentIds: req.body?.agent_ids,
+    actor:    req.user,
+    dryRun:   req.body?.dry_run === true,
+  })));
+
 router.get('/alerts', authenticate, requireAdminOrTeamLeader, handle((req) =>
   svc.alertSnapshot(req.user.business_id)));
 

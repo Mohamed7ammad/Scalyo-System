@@ -22,6 +22,7 @@ import {
   DisciplineBoard, DisciplineBoardAgent, DisciplineTrack,
 } from '@/lib/api';
 import DisciplineScheduleEditor from '@/components/DisciplineScheduleEditor';
+import ReviewQueuePanel from '@/components/ReviewQueuePanel';
 
 const POLL_MS = 20_000;
 const CAIRO_HM = new Intl.DateTimeFormat('ar-EG-u-nu-latn', {
@@ -178,6 +179,9 @@ export default function TeamMonitorPage() {
           ))}
         </div>
       )}
+
+      {/* «لا يرد» review queue — the Team Leader decides who gets it and when. */}
+      <ReviewQueuePanel onDone={load} />
 
       {/* Agent cards */}
       {board && enrolled.length === 0 && (

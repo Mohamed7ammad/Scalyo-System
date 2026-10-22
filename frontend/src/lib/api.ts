@@ -2179,6 +2179,33 @@ export const getDisciplineCheckpointDefs = () =>
   api.get<DisciplineCheckpointDef[]>('/api/discipline/checkpoints');
 export const updateDisciplineCheckpoint = (code: string, patch: Partial<Pick<DisciplineCheckpointDef, 'label_ar' | 'due_time' | 'grace_minutes' | 'tracks' | 'is_active'>>) =>
   api.put<{ checkpoint: DisciplineCheckpointDef; today: DisciplineTodayEffect }>(`/api/discipline/checkpoints/${encodeURIComponent(code)}`, patch);
+/* «لا يرد» review queue — the Team Leader's «توزيع طابور المراجعة» (manual). */
+export interface ReviewQueueReviewer { id: string; name: string; email: string; is_absent: boolean; review_load: number }
+export interface ReviewQueueCounts {
+  to_review: number;   // the owner's 2 days are done → first review day
+  redeal:    number;   // review day 1 done → a different reviewer, round 2
+  rescue:    number;   // holder absent / unassigned → another reviewer, same round
+  close:     number;   // review day 2 done → «ملغي - عدم رد نهائي»
+}
+export interface ReviewQueueResult extends ReviewQueueCounts {
+  today:   string;
+  dryRun?: boolean;
+  raced?:  number;
+  skipped: { same_agent: number; product: number };
+  to:      Record<string, number>;   // reviewer email → orders handed over
+}
+export interface ReviewQueueSummary {
+  today:     string;
+  ready:     ReviewQueueCounts;
+  open:      { owner: number; review: number };
+  reviewers: ReviewQueueReviewer[];
+  last:      { created_at: string; actor_email: string | null; targets: string[]; summary: ReviewQueueResult } | null;
+}
+export const getReviewQueue = () =>
+  api.get<ReviewQueueSummary>('/api/discipline/review-queue');
+export const distributeReviewQueue = (agentIds: string[], dryRun = false) =>
+  api.post<ReviewQueueResult>('/api/discipline/review-queue/distribute', { agent_ids: agentIds, dry_run: dryRun });
+
 export const getDisciplineWorkWindows = (dayType: DisciplineDayType = 'regular') =>
   api.get<DisciplineWorkWindow[]>('/api/discipline/work-windows', { params: { day_type: dayType } });
 export const setDisciplineWorkWindows = (windows: DisciplineWorkWindow[], dayType: DisciplineDayType = 'regular') =>
