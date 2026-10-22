@@ -48,6 +48,7 @@ function toneOf(a: DisciplineBoardAgent, idleSeconds: number | null, idleMin: nu
   if (a.status === 'withdrawn') return 'red';
   if (a.status === 'break') return 'sky';
   if (a.status === 'active' && idleSeconds != null && idleSeconds >= idleMin * 60) return 'orange';
+  if (a.status === 'active' && a.checkpoints.length === 0) return 'green';   // on-demand (review) account, not idle
   if (a.checkpoints.some((c) => c.outcome === 'late')) return 'yellow';
   if (a.checkpoints.some((c) => c.outcome === 'open' && Date.parse(c.due_at) <= now)) return 'yellow';
   if (a.checkpoints.some((c) => c.outcome === 'on_time')) return 'green';
@@ -207,6 +208,7 @@ export default function TeamMonitorPage() {
 
               {/* Checkpoints */}
               <div className="flex flex-wrap gap-1.5 mb-3">
+                {!defs.length && <span className="text-[11px] text-slate-400">بدون بصمات — حسب الطلب (يتابعها عداد عدم النشاط)</span>}
                 {defs.map((d) => {
                   const c = a.checkpoints.find((x) => x.code === d.code);
                   let cls = 'bg-slate-50 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700';

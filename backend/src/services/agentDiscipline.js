@@ -70,11 +70,19 @@ const ENFORCE_CATCHUP_MINUTES = 10;
    21:00 cover the evening peak. */
 const DEFAULT_CHECKPOINTS = [
   { code: 'yesterday_review', label_ar: 'مراجعة أوردرات امبارح',  due_time: '12:00', sort_order: 1 },
-  { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '12:30', sort_order: 2, tracks: ['confirmation'] },
+  { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '12:30', sort_order: 2 },
   { code: 'review_1',         label_ar: 'مراجعة ما قبل الشحن',      due_time: '14:30', sort_order: 3 },
   { code: 'review_2',         label_ar: 'مراجعة بليل',              due_time: '18:00', sort_order: 4 },
   { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '21:00', sort_order: 5 },
 ];
+
+/* Checkpoints are for the confirmation side only (owner, 2026-10-23): review
+   accounts (track 'review') work on demand — the Team Leader hands them work
+   whenever she decides — so they have NO check-ins, are never withdrawn, and
+   are watched by the idle radar on their «مراجعة جديدة» queue instead ('both'
+   accounts still get every checkpoint). Seeded defaults therefore carry
+   tracks ['confirmation']; the per-checkpoint tracks stay editable data. */
+const DEFAULT_CHECKPOINT_TRACKS = ['confirmation'];
 
 /* Fridays (owner, 2026-10-22): no shipping, so only two checkpoints and two
    windows. Every checkpoint / window row carries a day_type; a Cairo Friday
@@ -262,7 +270,7 @@ async function ensureDefaultCheckpoints(businessId, db = pool) {
         `INSERT INTO discipline_checkpoints (business_id, code, label_ar, due_time, sort_order, day_type, tracks)
          VALUES ($1, $2, $3, $4::time, $5, $6, $7::text[])
          ON CONFLICT (business_id, code) DO NOTHING`,
-        [businessId, c.code, c.label_ar, c.due_time, c.sort_order, dayType, c.tracks ?? CHECKPOINT_TRACKS]
+        [businessId, c.code, c.label_ar, c.due_time, c.sort_order, dayType, c.tracks ?? DEFAULT_CHECKPOINT_TRACKS]
       );
     }
   }
@@ -494,6 +502,20 @@ async function seedToday({ userId = null, db = pool, workDate = null } = {}) {
         AND ((d.work_date + k.due_time) AT TIME ZONE 'Africa/Cairo') >= ${ENFORCE_FROM_SQL}
         ${userFilter}
      ON CONFLICT (daily_log_id, checkpoint_code) DO NOTHING`, params);
+
+  /* On-demand days: no checkpoint applies to her track today (the review
+     accounts). Nothing to check in for, so the day starts active — the idle
+     radar then covers her from the first «مراجعة جديدة», and with no
+     checkpoint rows she can never be withdrawn. */
+  await db.query(
+    `UPDATE agent_daily_logs d SET status = 'active'
+       FROM users u
+      WHERE u.id = d.user_id AND d.work_date = ${daySql} AND d.status = 'pending'
+        AND NOT EXISTS (SELECT 1 FROM discipline_checkpoints k
+                         WHERE k.business_id = d.business_id AND k.is_active
+                           AND k.day_type = ${dayTypeSql('d.work_date')}
+                           AND (u.agent_track = 'both' OR u.agent_track = ANY(k.tracks)))
+        ${userFilter}`, params);
 }
 
 /* ── Idle clock ──────────────────────────────────────────────────────────────────

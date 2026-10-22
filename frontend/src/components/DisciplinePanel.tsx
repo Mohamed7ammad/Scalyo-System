@@ -233,6 +233,9 @@ export default function DisciplinePanel() {
     headline = <span className="text-slate-500 dark:text-slate-400">{state.is_absent ? 'مسجّلة كغائبة اليوم' : 'لا توجد نقاط متابعة لكِ اليوم'}</span>;
   } else if (status === 'withdrawn') {
     headline = <span className="font-semibold text-red-700 dark:text-red-300">تم سحب أوردراتك اليوم — تواصلي مع التيم ليدر</span>;
+  } else if (!state.checkpoints?.length) {
+    /* On-demand account (review): no check-ins at all — the idle radar watches her queue. */
+    headline = <span className="text-slate-600 dark:text-slate-300">بدون بصمات — المتابعة بعداد عدم النشاط على {state.track === 'review' ? '«مراجعة جديدة»' : 'أوردراتك'}</span>;
   } else if (!cp) {
     headline = <span className="text-emerald-700 dark:text-emerald-300 font-medium">انتهت نقاط المتابعة لليوم ✓</span>;
   } else if (phase === 'not_open') {
