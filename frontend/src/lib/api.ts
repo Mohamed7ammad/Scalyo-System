@@ -2191,8 +2191,9 @@ export interface ReviewQueueResult extends ReviewQueueCounts {
   today:   string;
   dryRun?: boolean;
   raced?:  number;
-  skipped: { same_agent: number; product: number };
-  to:      Record<string, number>;   // reviewer email → orders handed over
+  kept?:   number;                    // already with the chosen reviewer → round advanced, not moved
+  skipped: { product: number };       // reviewer restricted to other products
+  to:      Record<string, number>;   // reviewer email → orders for this round
 }
 export interface ReviewQueueSummary {
   today:     string;

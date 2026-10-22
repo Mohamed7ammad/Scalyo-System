@@ -7,8 +7,8 @@
    filter-and-transfer sweep: the system tracks each «لا يرد» order's cycle
    (2 days with its agent → 2 review days → «ملغي - عدم رد نهائي»), and she
    decides WHO receives the ready ones and WHEN. Picking reviewers shows the
-   exact split first (dry run); the button then hands the orders to ONLY those
-   reviewers, never back to the order's own agent or its current holder.     */
+   exact split first (dry run); the button then splits ALL ready orders evenly
+   between ONLY those reviewers — her selection is absolute.                 */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -94,7 +94,6 @@ export default function ReviewQueuePanel({ onDone }: { onDone?: () => void }) {
   if (!summary) return null;
   const r = summary.ready;
   const readyTotal = handOffs(r);
-  const skipped = preview ? preview.skipped.same_agent + preview.skipped.product : 0;
   const nothing = !!preview && handOffs(preview) === 0 && preview.close === 0;
 
   return (
@@ -165,11 +164,6 @@ export default function ReviewQueuePanel({ onDone }: { onDone?: () => void }) {
             {handOffs(preview) ? <>التوزيع: <b>{splitText(preview.to)}</b></> : 'لا أوردرات تُنقل لهذا الاختيار.'}
             {preview.close > 0 && <> · سيُغلق <b>{preview.close}</b> نهائياً</>}
           </p>
-          {preview.skipped.same_agent > 0 && (
-            <p className="text-amber-700 dark:text-amber-400">
-              {preview.skipped.same_agent} لن تُنقل: الموظفة المختارة هي صاحبة الأوردر أو معها حالياً — أضيفي موظفة مراجعة أخرى لتوزيعها.
-            </p>
-          )}
           {preview.skipped.product > 0 && (
             <p className="text-amber-700 dark:text-amber-400">
               {preview.skipped.product} لن تُنقل: المنتج غير مسموح للموظفة المختارة.
@@ -185,9 +179,6 @@ export default function ReviewQueuePanel({ onDone }: { onDone?: () => void }) {
         </button>
         {!selected.length && (readyTotal > 0 || r.close > 0) && (
           <span className="text-xs text-slate-500 dark:text-slate-400">اختاري موظفة مراجعة واحدة على الأقل.</span>
-        )}
-        {skipped > 0 && selected.length > 0 && !busy && (
-          <span className="text-[11px] text-slate-400">({skipped} ستبقى كما هي)</span>
         )}
       </div>
 

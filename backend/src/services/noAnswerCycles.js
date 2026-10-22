@@ -126,11 +126,13 @@ schemaReady.catch(() => {});   // surfaced by callers that await it
      redeal    — a review day is done, one more to go → next reviewer, round 2;
      rescue    — the reviewer is away mid-round → another reviewer, same round;
      close     — the last review day is done → «ملغي - عدم رد نهائي».
-   Hand-offs go ONLY to the reviewer(s) she selected, split evenly, never to the
-   order's owner nor its current holder, and only where the reviewer may handle
-   the product; whatever none of them can take stays as it is (reported as
-   skipped) for her next press. A moved order's next step is tomorrow, so a
-   second press the same day only picks up what is left. Moves go through a
+   Her selection is absolute: everything ready is pooled and split evenly
+   between the reviewer(s) she picked, whoever owned or held it before — review
+   accounts call from their own SIM cards, so it's a new caller to the customer
+   anyway (owner, 2026-10-22). An order that lands with the reviewer already
+   holding it just advances its round. The only exception is a reviewer
+   restricted to other products (none today). A handled order's next step is
+   tomorrow, so a second press the same day only picks up what is left. Moves go through a
    normal AssignedTo update (trg_orders_commission_owner keeps every earned
    عمولة عدم الرد with whoever earned it); closing grants / voids nothing.     */
 
@@ -179,25 +181,29 @@ async function pendingQueue(db, businessId) {
   return { today, items };
 }
 
-/* Exclusive, even split between the selected reviewers. */
+/* Even split between the selected reviewers. On a tie the order's current
+   holder wins, so nothing moves needlessly; a.stay marks those. */
 function dealTo(items, targets) {
   const count = new Map(targets.map((t) => [norm(t.email), 0]));
   for (const a of items) {
     if (a.kind === 'close') continue;
-    const notSelf  = targets.filter((t) => norm(t.email) !== norm(a.owner_email) && norm(t.email) !== norm(a.holder));
-    const eligible = notSelf.filter((t) => agentAllowsProduct(t.allowed, a.product));
-    if (!eligible.length) { a.skip = notSelf.length ? 'product' : 'same_agent'; continue; }
-    eligible.sort((x, y) => count.get(norm(x.email)) - count.get(norm(y.email)) || x.email.localeCompare(y.email));
+    const eligible = targets.filter((t) => agentAllowsProduct(t.allowed, a.product));
+    if (!eligible.length) { a.skip = 'product'; continue; }
+    const isHolder = (t) => (norm(t.email) === norm(a.holder) ? 1 : 0);
+    eligible.sort((x, y) => count.get(norm(x.email)) - count.get(norm(y.email))
+      || isHolder(y) - isHolder(x) || x.email.localeCompare(y.email));
     a.to = eligible[0].email;
+    a.stay = norm(a.to) === norm(a.holder);
     count.set(norm(a.to), count.get(norm(a.to)) + 1);
   }
 }
 
 function summarize(items) {
-  const s = { to_review: 0, redeal: 0, rescue: 0, close: 0, skipped: { same_agent: 0, product: 0 }, to: {} };
+  const s = { to_review: 0, redeal: 0, rescue: 0, close: 0, kept: 0, skipped: { product: 0 }, to: {} };
   for (const a of items) {
     if (a.skip) { s.skipped[a.skip] += 1; continue; }
     s[a.kind] += 1;
+    if (a.stay) s.kept += 1;
     if (a.to) s.to[a.to] = (s.to[a.to] ?? 0) + 1;
   }
   return s;
@@ -251,22 +257,34 @@ async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = fal
     const plan = summarize(items);
     if (dryRun) { await client.query('ROLLBACK'); return { dryRun: true, today, ...plan }; }
 
-    const done = { to_review: 0, redeal: 0, rescue: 0, close: 0, skipped: plan.skipped, raced: 0, to: {} };
+    const done = { to_review: 0, redeal: 0, rescue: 0, close: 0, kept: 0, skipped: plan.skipped, raced: 0, to: {} };
     const closeIds = [];
     for (const a of items) {
       if (a.skip) continue;
       if (a.kind === 'close') { closeIds.push(a.order_id); continue; }
-      const { rowCount } = await client.query(
-        `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
-          WHERE id = $2 AND business_id = $3 AND btrim("Status") = '${NO_ANSWER}'
-            AND "AssignedTo" IS NOT DISTINCT FROM $4`,
-        [a.to, a.order_id, businessId, a.holder]);
-      if (!rowCount) { done.raced += 1; continue; }   // changed since it was read
-      await client.query(
-        `INSERT INTO order_assignment_log
-           (order_id, business_id, from_agent, to_agent, changed_by, changed_by_id, source, order_status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'review_queue', '${NO_ANSWER}')`,
-        [a.order_id, businessId, a.holder, a.to, actor?.email ?? null, actor?.id != null ? String(actor.id) : null]);
+      if (a.stay) {
+        /* Already with this reviewer: nothing to move, the round still advances. */
+        const { rowCount } = await client.query(
+          `SELECT 1 FROM orders
+            WHERE id = $1 AND business_id = $2 AND btrim("Status") = '${NO_ANSWER}'
+              AND "AssignedTo" IS NOT DISTINCT FROM $3
+            FOR UPDATE`,
+          [a.order_id, businessId, a.holder]);
+        if (!rowCount) { done.raced += 1; continue; }   // changed since it was read
+        done.kept += 1;
+      } else {
+        const { rowCount } = await client.query(
+          `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
+            WHERE id = $2 AND business_id = $3 AND btrim("Status") = '${NO_ANSWER}'
+              AND "AssignedTo" IS NOT DISTINCT FROM $4`,
+          [a.to, a.order_id, businessId, a.holder]);
+        if (!rowCount) { done.raced += 1; continue; }   // changed since it was read
+        await client.query(
+          `INSERT INTO order_assignment_log
+             (order_id, business_id, from_agent, to_agent, changed_by, changed_by_id, source, order_status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'review_queue', '${NO_ANSWER}')`,
+          [a.order_id, businessId, a.holder, a.to, actor?.email ?? null, actor?.id != null ? String(actor.id) : null]);
+      }
       /* to_review / redeal start a new review day tomorrow; rescue keeps its day. */
       await client.query(
         `UPDATE no_answer_cycles
@@ -274,9 +292,9 @@ async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = fal
                 review_round = CASE WHEN $2 = 'to_review' THEN 1 WHEN $2 = 'redeal' THEN review_round + 1 ELSE review_round END,
                 step_until   = CASE WHEN $2 = 'rescue' THEN step_until ELSE ${CAIRO_TODAY} + 1 END,
                 last_reviewer = $3,
-                moves = moves + 1
+                moves = moves + CASE WHEN $4 THEN 0 ELSE 1 END
           WHERE id = $1 AND closed_at IS NULL`,
-        [a.cycle_id, a.kind, a.to]);
+        [a.cycle_id, a.kind, a.to, a.stay === true]);
       done[a.kind] += 1;
       done.to[a.to] = (done.to[a.to] ?? 0) + 1;
     }
@@ -293,8 +311,8 @@ async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = fal
       `INSERT INTO no_answer_distributions (business_id, actor_email, targets, summary) VALUES ($1, $2, $3, $4)`,
       [businessId, actor?.email ?? null, targets.map((t) => t.email), JSON.stringify(done)]);
     await client.query('COMMIT');
-    console.log(`[no-answer] 📞 review queue by ${actor?.email}: → ${JSON.stringify(done.to)} · closed ${done.close}` +
-      (plan.skipped.same_agent + plan.skipped.product ? ` · skipped ${plan.skipped.same_agent + plan.skipped.product}` : ''));
+    console.log(`[no-answer] 📞 review queue by ${actor?.email}: → ${JSON.stringify(done.to)} (kept ${done.kept}) · closed ${done.close}` +
+      (plan.skipped.product ? ` · skipped ${plan.skipped.product} (product)` : ''));
     return { today, ...done };
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
