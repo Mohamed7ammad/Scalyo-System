@@ -23,9 +23,10 @@
      POST /reinstate { user_id }           lift today's withdrawal
      GET  /review-queue                    «لا يرد» queue: what a distribution would do now,
                                            the review accounts, the last distribution
-     POST /review-queue/distribute { agent_ids: [..], dry_run? }
-                                           «توزيع طابور المراجعة» — hand the ready orders to
-                                           ONLY the selected review account(s) (dry_run → plan)
+     POST /review-queue/distribute { agent_ids: [..], queues?: [..], dry_run? }
+                                           «توزيع طابور المراجعة» — split the ticked queues
+                                           (to_review | redeal | rescue | close; default all)
+                                           between ONLY the selected review account(s)
    ════════════════════════════════════════════════════════════════════════════ */
 
 const express      = require('express');
@@ -82,6 +83,7 @@ router.post('/review-queue/distribute', authenticate, requireAdminOrTeamLeader, 
     agentIds: req.body?.agent_ids,
     actor:    req.user,
     dryRun:   req.body?.dry_run === true,
+    queues:   req.body?.queues,
   })));
 
 router.get('/alerts', authenticate, requireAdminOrTeamLeader, handle((req) =>

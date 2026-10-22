@@ -233,12 +233,21 @@ async function reviewQueueSummary(businessId) {
   };
 }
 
-/* The button. agentIds = the selected review accounts (users.id). dryRun →
-   the exact plan for that selection, nothing written. */
-async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = false }) {
+/* The queues a press can act on — she ticks which ones (default: all). */
+const REVIEW_QUEUES = ['to_review', 'redeal', 'rescue', 'close'];
+
+/* The button. agentIds = the selected review accounts (users.id); queues =
+   the ticked queues — only their orders are pooled / closed. Reviewers are
+   needed only when a ticked queue has orders to hand over (closing alone
+   needs none). dryRun → the exact plan for that selection, nothing written. */
+async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = false, queues }) {
   await schemaReady;
   const ids = Array.isArray(agentIds) ? [...new Set(agentIds.map(String))] : [];
-  if (!ids.length || ids.length > 10) throw new DisciplineError(400, 'اختاري موظفة مراجعة واحدة على الأقل');
+  if (ids.length > 10) throw new DisciplineError(400, 'اختاري 10 موظفات مراجعة على الأكثر');
+  const want = queues === undefined ? REVIEW_QUEUES : (Array.isArray(queues) ? [...new Set(queues.map(String))] : []);
+  if (!want.length || want.some((q) => !REVIEW_QUEUES.includes(q))) {
+    throw new DisciplineError(400, 'اختاري قائمة واحدة على الأقل للتوزيع');
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -252,12 +261,17 @@ async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = fal
     const absent = targets.filter((t) => t.is_absent);
     if (absent.length) throw new DisciplineError(400, `مسجّلة غائبة اليوم: ${absent.map((t) => t.name).join('، ')}`);
 
-    const { today, items } = await pendingQueue(client, businessId);
+    const pending = await pendingQueue(client, businessId);
+    const today = pending.today;
+    const items = pending.items.filter((a) => want.includes(a.kind));
+    if (!targets.length && items.some((a) => a.kind !== 'close')) {
+      throw new DisciplineError(400, 'اختاري موظفة مراجعة واحدة على الأقل');
+    }
     dealTo(items, targets);
-    const plan = summarize(items);
+    const plan = { queues: want, ...summarize(items) };
     if (dryRun) { await client.query('ROLLBACK'); return { dryRun: true, today, ...plan }; }
 
-    const done = { to_review: 0, redeal: 0, rescue: 0, close: 0, kept: 0, skipped: plan.skipped, raced: 0, to: {} };
+    const done = { queues: want, to_review: 0, redeal: 0, rescue: 0, close: 0, kept: 0, skipped: plan.skipped, raced: 0, to: {} };
     const closeIds = [];
     for (const a of items) {
       if (a.skip) continue;
@@ -443,5 +457,5 @@ function terminalGuard(user, { currentStatus, currentAssignedTo, nextStatus }) {
 
 module.exports = {
   schemaReady, NO_ANSWER, TERMINAL, OWNER_DAYS, REVIEW_DAYS, BACKLOG_CUTOFF_LOCAL,
-  REVIEW_ROUTING_TRACKS, reviewQueueSummary, distributeReviewQueue, backlogMigrate, terminalGuard,
+  REVIEW_ROUTING_TRACKS, REVIEW_QUEUES, reviewQueueSummary, distributeReviewQueue, backlogMigrate, terminalGuard,
 };

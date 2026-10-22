@@ -2187,8 +2187,11 @@ export interface ReviewQueueCounts {
   rescue:    number;   // holder absent / unassigned → another reviewer, same round
   close:     number;   // review day 2 done → «ملغي - عدم رد نهائي»
 }
+/** The queues a press can act on (she ticks which). */
+export type ReviewQueueKey = keyof ReviewQueueCounts;
 export interface ReviewQueueResult extends ReviewQueueCounts {
   today:   string;
+  queues?: ReviewQueueKey[];          // the queues this press acted on
   dryRun?: boolean;
   raced?:  number;
   kept?:   number;                    // already with the chosen reviewer → round advanced, not moved
@@ -2204,8 +2207,8 @@ export interface ReviewQueueSummary {
 }
 export const getReviewQueue = () =>
   api.get<ReviewQueueSummary>('/api/discipline/review-queue');
-export const distributeReviewQueue = (agentIds: string[], dryRun = false) =>
-  api.post<ReviewQueueResult>('/api/discipline/review-queue/distribute', { agent_ids: agentIds, dry_run: dryRun });
+export const distributeReviewQueue = (agentIds: string[], dryRun = false, queues?: ReviewQueueKey[]) =>
+  api.post<ReviewQueueResult>('/api/discipline/review-queue/distribute', { agent_ids: agentIds, dry_run: dryRun, queues });
 
 export const getDisciplineWorkWindows = (dayType: DisciplineDayType = 'regular') =>
   api.get<DisciplineWorkWindow[]>('/api/discipline/work-windows', { params: { day_type: dayType } });
