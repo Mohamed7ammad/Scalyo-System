@@ -229,9 +229,9 @@ export default function TeamMonitorPage() {
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-600 dark:text-slate-300">
                 <span>آخر إجراء: <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{ago(a.seconds_since_action == null ? null : a.seconds_since_action + drift)}</b></span>
                 <span>
-                  {a.idle_paused_reason === 'no_new_orders' ? <span className="text-slate-400">⏸️ بانتظار أوردرات جديدة</span>
+                  {a.idle_paused_reason === 'no_new_orders' ? <span className="text-slate-400">⏸️ بانتظار {a.track === 'review' ? 'مراجعات جديدة' : 'أوردرات جديدة'}</span>
                     : a.idle_paused_reason === 'outside_window' ? <span className="text-slate-400">⏸️ خارج فترات العمل</span>
-                    : <>جديد: <b>{a.new_orders}</b> · خمول <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{Math.floor((idle ?? 0) / 60)} د</b></>}
+                    : <>{a.track === 'review' ? 'مراجعة جديدة' : 'جديد'}: <b>{a.new_orders}</b> · خمول <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{Math.floor((idle ?? 0) / 60)} د</b></>}
                 </span>
                 <span>تأكيد التواجد: <b>{a.still_here_today}</b></span>
                 <span>استراحة: <b>{a.break.used_minutes}</b>/30 د · <b>{a.break.sessions_used}</b>/2</span>

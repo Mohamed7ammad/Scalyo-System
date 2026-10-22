@@ -26,6 +26,7 @@ const SEARCH_MODES: { key: OrderLookupBy; label: string; placeholder: string; lt
 /* Status → badge colour (mirrors the orders table palette). */
 const STATUS_BADGE: Record<string, string> = {
   'جديد':          'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  'مراجعة جديدة':  'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300',
   'تم التأكيد':    'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
   'تم الشحن':      'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300',
   'تم التوصيل':    'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',

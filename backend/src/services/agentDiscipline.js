@@ -70,7 +70,7 @@ const ENFORCE_CATCHUP_MINUTES = 10;
    21:00 cover the evening peak. */
 const DEFAULT_CHECKPOINTS = [
   { code: 'yesterday_review', label_ar: 'مراجعة أوردرات امبارح',  due_time: '12:00', sort_order: 1 },
-  { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '12:30', sort_order: 2 },
+  { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '12:30', sort_order: 2, tracks: ['confirmation'] },
   { code: 'review_1',         label_ar: 'مراجعة ما قبل الشحن',      due_time: '14:30', sort_order: 3 },
   { code: 'review_2',         label_ar: 'مراجعة بليل',              due_time: '18:00', sort_order: 4 },
   { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '21:00', sort_order: 5 },
@@ -259,10 +259,10 @@ async function ensureDefaultCheckpoints(businessId, db = pool) {
   for (const [dayType, list] of [['regular', DEFAULT_CHECKPOINTS], ['friday', DEFAULT_FRIDAY_CHECKPOINTS]]) {
     for (const c of list) {
       await db.query(
-        `INSERT INTO discipline_checkpoints (business_id, code, label_ar, due_time, sort_order, day_type)
-         VALUES ($1, $2, $3, $4::time, $5, $6)
+        `INSERT INTO discipline_checkpoints (business_id, code, label_ar, due_time, sort_order, day_type, tracks)
+         VALUES ($1, $2, $3, $4::time, $5, $6, $7::text[])
          ON CONFLICT (business_id, code) DO NOTHING`,
-        [businessId, c.code, c.label_ar, c.due_time, c.sort_order, dayType]
+        [businessId, c.code, c.label_ar, c.due_time, c.sort_order, dayType, c.tracks ?? CHECKPOINT_TRACKS]
       );
     }
   }
@@ -524,13 +524,22 @@ async function idleFacts(businessId, userId = null, db = pool) {
             GREATEST(u.last_action_at, w.work_since, s.win_start, b.last_break_end) AS idle_since
        FROM users u
        LEFT JOIN LATERAL (
+         /* Her "to work" queue: «جديد» (past the 15-min lock) — and for review
+            accounts «مراجعة جديدة» (handed out by the Team Leader; workable at
+            once, from the moment it landed). 'both' covers the two. */
          SELECT COUNT(*)::int AS new_total,
-                COUNT(*) FILTER (WHERE o."createdAt" + ${lock} <= NOW())::int AS workable,
-                MIN(GREATEST(COALESCE(o.assigned_at, o."createdAt"), o."createdAt" + ${lock}))
-                  FILTER (WHERE o."createdAt" + ${lock} <= NOW()) AS work_since
-           FROM orders o
-          WHERE o.business_id = u.business_id AND o."AssignedTo" = u.email
-            AND o.is_lost_order = FALSE AND btrim(o."Status") = 'جديد') w ON TRUE
+                COUNT(*) FILTER (WHERE q.ready)::int AS workable,
+                MIN(q.avail) FILTER (WHERE q.ready) AS work_since
+           FROM (SELECT CASE WHEN btrim(o."Status") = 'جديد' THEN o."createdAt" + ${lock} <= NOW() ELSE TRUE END AS ready,
+                        CASE WHEN btrim(o."Status") = 'جديد'
+                             THEN GREATEST(COALESCE(o.assigned_at, o."createdAt"), o."createdAt" + ${lock})
+                             ELSE COALESCE(o."updatedAt", o.assigned_at) END AS avail
+                   FROM orders o
+                  WHERE o.business_id = u.business_id AND o."AssignedTo" = u.email AND o.is_lost_order = FALSE
+                    AND btrim(o."Status") = ANY(CASE u.agent_track
+                          WHEN 'review' THEN ARRAY['مراجعة جديدة']
+                          WHEN 'both'   THEN ARRAY['جديد', 'مراجعة جديدة']
+                          ELSE ARRAY['جديد'] END)) q) w ON TRUE
        LEFT JOIN LATERAL (
          SELECT (${CAIRO_TODAY} + ww.start_time) AT TIME ZONE 'Africa/Cairo' AS win_start,
                 (${CAIRO_TODAY} + ww.end_time)   AT TIME ZONE 'Africa/Cairo' AS win_end

@@ -130,6 +130,7 @@ export default function ReviewQueuePanel({ onDone }: { onDone?: () => void }) {
           <h2 className="text-base font-bold text-slate-900 dark:text-white">طابور المراجعة — «لا يرد»</h2>
           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
             كل أوردر: يومان مع موظفته ← يوما مراجعة مع موظفة أخرى ← «ملغي - عدم رد نهائي». أنتِ تختارين ماذا يُوزَّع، ومين تستلم، ومتى.
+            يصل لحساب المراجعة كـ «مراجعة جديدة»، واللي ميردش تحوّله الموظفة «لا يرد».
           </p>
         </div>
         <button onClick={load} disabled={busy} className="text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-50">تحديث</button>

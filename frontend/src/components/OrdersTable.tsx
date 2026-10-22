@@ -123,7 +123,7 @@ const formatOrderTimeArabic = (iso: string | null | undefined, now: number): str
 // from its options silently displays the first option ('جديد') — that exact
 // fallback made returned orders masquerade as new ones and invited admins to
 // overwrite 'تم الإرجاع' with 'جديد' in the DB.
-const STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'ملغي - عدم رد نهائي'];
+const STATUS_OPTIONS = ['جديد', 'مراجعة جديدة', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'ملغي - عدم رد نهائي'];
 
 // Statuses agents AND admins may set from the inline table dropdown.
 // Everything from 'تم الشحن' onward is COURIER-OWNED (set by the shipping API /
@@ -135,12 +135,20 @@ const MANUAL_STATUS_OPTIONS = ['جديد', 'تم التأكيد', 'تم الرف
 // 2 + 2 day cycle. Such an order still gets the inline select (with its own
 // value first) so its last holder / a Team Leader / an admin can REOPEN it;
 // it is never offered on other orders — the server rejects agents setting it.
+// «مراجعة جديدة» is how a review account receives a Team Leader hand-off
+// ("still to call"); she moves it on (e.g. to «لا يرد» after a missed call)
+// but never sets it herself. Same inline-select treatment as the closed status.
 const NO_ANSWER_CLOSED = 'ملغي - عدم رد نهائي';
-const inlineStatusOptions = (s?: string | null) =>
-  normStatus(s) === NO_ANSWER_CLOSED ? [NO_ANSWER_CLOSED, ...MANUAL_STATUS_OPTIONS] : MANUAL_STATUS_OPTIONS;
+const REVIEW_NEW       = 'مراجعة جديدة';
+const inlineStatusOptions = (s?: string | null) => {
+  const cur = normStatus(s);
+  return cur === NO_ANSWER_CLOSED || cur === REVIEW_NEW ? [cur, ...MANUAL_STATUS_OPTIONS] : MANUAL_STATUS_OPTIONS;
+};
 
 const STATUS_STYLES: Record<string, string> = {
   'جديد':       'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
+  // A Team Leader hand-off waiting in a review account ("still to call")
+  'مراجعة جديدة': 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300',
   'تم التأكيد': 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
   'تم الرفض':   'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
   'مؤجل':       'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',

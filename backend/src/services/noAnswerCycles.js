@@ -35,6 +35,13 @@ const { hasAnyRole } = require('../utils/roles');
 
 const NO_ANSWER   = 'لا يرد';
 const TERMINAL    = 'ملغي - عدم رد نهائي';
+/* What a review account receives (owner, 2026-10-22): a handed-off order lands
+   as «مراجعة جديدة» = "still to call", kept apart from her own «لا يرد» = "called,
+   no answer". She sets «لا يرد» herself after a missed call. Both are inside
+   the same no-answer cycle; the discipline idle clock treats «مراجعة جديدة» for
+   review accounts exactly like «جديد» for the others. */
+const REVIEW_NEW  = 'مراجعة جديدة';
+const IN_LOOP_SQL = `('${NO_ANSWER}', '${REVIEW_NEW}')`;   // statuses inside an open cycle
 const OWNER_DAYS  = 2;   // day it went «لا يرد» + the next day
 const REVIEW_DAYS = 2;
 const CAIRO_TODAY = `(NOW() AT TIME ZONE 'Africa/Cairo')::date`;
@@ -86,14 +93,15 @@ const schemaReady = (async () => {
       summary     JSONB
     )`);
 
-  /* Open / close cycles on every status change. Lost orders run their own flow.
+  /* Open / close cycles on every status change — «لا يرد» ⇄ «مراجعة جديدة» stays
+     inside the same cycle. Lost orders run their own flow.
      The actor (review_queue / backlog) is passed via SET LOCAL app.na_actor.
      Schema-qualified so it is created in public whatever the search_path. */
   await pool.query(`
     CREATE OR REPLACE FUNCTION public.no_answer_cycle_track() RETURNS trigger AS $fn$
     DECLARE
-      was_na BOOLEAN := TG_OP = 'UPDATE' AND btrim(COALESCE(OLD."Status", '')) = '${NO_ANSWER}';
-      is_na  BOOLEAN := btrim(COALESCE(NEW."Status", '')) = '${NO_ANSWER}';
+      was_na BOOLEAN := TG_OP = 'UPDATE' AND btrim(COALESCE(OLD."Status", '')) IN ${IN_LOOP_SQL};
+      is_na  BOOLEAN := btrim(COALESCE(NEW."Status", '')) IN ${IN_LOOP_SQL};
     BEGIN
       IF is_na AND NOT was_na AND NOT COALESCE(NEW.is_lost_order, FALSE) THEN
         INSERT INTO no_answer_cycles (business_id, order_id, owner_email, entered_at, stage, review_round, step_until)
@@ -143,7 +151,7 @@ async function listReviewers(db, businessId) {
             COALESCE(u.is_absent, FALSE) AS is_absent, COALESCE(u.allowed_products, '{}'::text[]) AS allowed,
             (SELECT COUNT(*) FROM no_answer_cycles c JOIN orders o ON o.id = c.order_id
               WHERE c.business_id = u.business_id AND c.closed_at IS NULL AND c.stage = 'review'
-                AND btrim(o."Status") = '${NO_ANSWER}'
+                AND btrim(o."Status") IN ${IN_LOOP_SQL}
                 AND LOWER(TRIM(o."AssignedTo")) = LOWER(TRIM(u.email)))::int AS review_load
        FROM users u
       WHERE u.business_id = $1
@@ -159,14 +167,14 @@ async function pendingQueue(db, businessId) {
   const { rows: [{ today }] } = await db.query(`SELECT ${CAIRO_TODAY}::text AS today`);
   const { rows: cycles } = await db.query(
     `SELECT c.id AS cycle_id, c.order_id, c.owner_email, c.stage, c.review_round,
-            o."AssignedTo" AS holder, o."ProductName" AS product,
+            o."AssignedTo" AS holder, o."ProductName" AS product, btrim(o."Status") AS status,
             (c.step_until <= $2::date) AS due,
             (h.email IS NULL OR NOT COALESCE(h.is_active, TRUE) OR COALESCE(h.is_absent, FALSE)) AS stranded
        FROM no_answer_cycles c
        JOIN orders o ON o.id = c.order_id AND o.business_id = c.business_id
        LEFT JOIN users h ON h.business_id = c.business_id AND LOWER(TRIM(h.email)) = LOWER(TRIM(o."AssignedTo"))
       WHERE c.business_id = $1 AND c.closed_at IS NULL
-        AND btrim(o."Status") = '${NO_ANSWER}' AND NOT COALESCE(o.is_lost_order, FALSE)
+        AND btrim(o."Status") IN ${IN_LOOP_SQL} AND NOT COALESCE(o.is_lost_order, FALSE)
         AND (c.step_until <= $2::date OR h.email IS NULL OR NOT COALESCE(h.is_active, TRUE) OR COALESCE(h.is_absent, FALSE))
       ORDER BY c.order_id`,
     [businessId, today]);
@@ -219,7 +227,7 @@ async function reviewQueueSummary(businessId) {
     pool.query(
       `SELECT COUNT(*) FILTER (WHERE c.stage = 'owner')::int AS owner, COUNT(*) FILTER (WHERE c.stage = 'review')::int AS review
          FROM no_answer_cycles c JOIN orders o ON o.id = c.order_id
-        WHERE c.business_id = $1 AND c.closed_at IS NULL AND btrim(o."Status") = '${NO_ANSWER}'`, [businessId]),
+        WHERE c.business_id = $1 AND c.closed_at IS NULL AND btrim(o."Status") IN ${IN_LOOP_SQL}`, [businessId]),
     pool.query(
       `SELECT created_at, actor_email, targets, summary FROM no_answer_distributions
         WHERE business_id = $1 ORDER BY id DESC LIMIT 1`, [businessId]),
@@ -276,28 +284,28 @@ async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = fal
     for (const a of items) {
       if (a.skip) continue;
       if (a.kind === 'close') { closeIds.push(a.order_id); continue; }
+      /* Every hand-off lands as «مراجعة جديدة» — still to call this round. */
       if (a.stay) {
-        /* Already with this reviewer: nothing to move, the round still advances. */
+        /* Already with this reviewer: not moved, but fresh again for this round. */
         const { rowCount } = await client.query(
-          `SELECT 1 FROM orders
-            WHERE id = $1 AND business_id = $2 AND btrim("Status") = '${NO_ANSWER}'
-              AND "AssignedTo" IS NOT DISTINCT FROM $3
-            FOR UPDATE`,
+          `UPDATE orders SET "Status" = '${REVIEW_NEW}', "updatedAt" = NOW()
+            WHERE id = $1 AND business_id = $2 AND btrim("Status") IN ${IN_LOOP_SQL}
+              AND "AssignedTo" IS NOT DISTINCT FROM $3`,
           [a.order_id, businessId, a.holder]);
         if (!rowCount) { done.raced += 1; continue; }   // changed since it was read
         done.kept += 1;
       } else {
         const { rowCount } = await client.query(
-          `UPDATE orders SET "AssignedTo" = $1, "updatedAt" = NOW()
-            WHERE id = $2 AND business_id = $3 AND btrim("Status") = '${NO_ANSWER}'
+          `UPDATE orders SET "AssignedTo" = $1, "Status" = '${REVIEW_NEW}', "updatedAt" = NOW()
+            WHERE id = $2 AND business_id = $3 AND btrim("Status") IN ${IN_LOOP_SQL}
               AND "AssignedTo" IS NOT DISTINCT FROM $4`,
           [a.to, a.order_id, businessId, a.holder]);
         if (!rowCount) { done.raced += 1; continue; }   // changed since it was read
         await client.query(
           `INSERT INTO order_assignment_log
              (order_id, business_id, from_agent, to_agent, changed_by, changed_by_id, source, order_status)
-           VALUES ($1, $2, $3, $4, $5, $6, 'review_queue', '${NO_ANSWER}')`,
-          [a.order_id, businessId, a.holder, a.to, actor?.email ?? null, actor?.id != null ? String(actor.id) : null]);
+           VALUES ($1, $2, $3, $4, $5, $6, 'review_queue', $7)`,
+          [a.order_id, businessId, a.holder, a.to, actor?.email ?? null, actor?.id != null ? String(actor.id) : null, a.status]);
       }
       /* to_review / redeal start a new review day tomorrow; rescue keeps its day. */
       await client.query(
@@ -316,7 +324,7 @@ async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = fal
       /* The status trigger closes the cycles (closed_by = 'review_queue'). */
       const { rowCount } = await client.query(
         `UPDATE orders SET "Status" = '${TERMINAL}', "updatedAt" = NOW()
-          WHERE id = ANY($1::int[]) AND business_id = $2 AND btrim("Status") = '${NO_ANSWER}'`,
+          WHERE id = ANY($1::int[]) AND business_id = $2 AND btrim("Status") IN ${IN_LOOP_SQL}`,
         [closeIds, businessId]);
       done.close = rowCount;
       done.raced += closeIds.length - rowCount;
@@ -452,10 +460,14 @@ function terminalGuard(user, { currentStatus, currentAssignedTo, nextStatus }) {
       && String(currentStatus ?? '').trim() !== TERMINAL) {
     return 'الإغلاق النهائي لعدم الرد يتم تلقائياً بعد انتهاء دورة المتابعة (يومان للموظفة + يومان مراجعة)';
   }
+  if (nextStatus !== undefined && String(nextStatus ?? '').trim() === REVIEW_NEW
+      && String(currentStatus ?? '').trim() !== REVIEW_NEW) {
+    return '«مراجعة جديدة» تُضبط فقط عند توزيع طابور المراجعة';
+  }
   return null;
 }
 
 module.exports = {
-  schemaReady, NO_ANSWER, TERMINAL, OWNER_DAYS, REVIEW_DAYS, BACKLOG_CUTOFF_LOCAL,
+  schemaReady, NO_ANSWER, TERMINAL, REVIEW_NEW, OWNER_DAYS, REVIEW_DAYS, BACKLOG_CUTOFF_LOCAL,
   REVIEW_ROUTING_TRACKS, REVIEW_QUEUES, reviewQueueSummary, distributeReviewQueue, backlogMigrate, terminalGuard,
 };

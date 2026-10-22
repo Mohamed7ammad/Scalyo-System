@@ -1743,9 +1743,10 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     return res.status(500).json({ error: 'خطأ في الخادم' });
   }
 
-  /* ── «ملغي - عدم رد نهائي» guard ────────────────────────────────────────────
-     Closed by the nightly no-answer hand-off. Only an admin, a Team Leader or
-     the order's last holder may change it (reopen); agents never set it. */
+  /* ── «ملغي - عدم رد نهائي» / «مراجعة جديدة» guard ─────────────────────────────
+     Set by the Team Leader's review-queue distribution. «ملغي - عدم رد نهائي»:
+     only an admin, a Team Leader or the order's last holder may change it
+     (reopen). Agents never set either of them themselves. */
   {
     const blocked = noAnswer.terminalGuard(req.user, {
       currentStatus, currentAssignedTo,
@@ -2139,6 +2140,7 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
       'تم الرفض':   ['comm_rejected'],
       'لا يرد':     ['comm_no_answer'],
       [noAnswer.TERMINAL]: ['comm_no_answer'],   // closed after the no-answer cycle → her 5-attempt commission stays
+      [noAnswer.REVIEW_NEW]: ['comm_no_answer'], // handed to a review account → still inside the no-answer cycle
       'مؤجل':       [],   // postponed → NO automatic commission; void all (deposit kept)
       'معلق حتي الدفع': [],   // pending-until-payment → NO commission; void all (deposit kept)
     };

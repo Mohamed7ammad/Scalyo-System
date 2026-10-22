@@ -298,10 +298,10 @@ export default function DisciplinePanel() {
             {status === 'active' && (
               <p className="text-[11px] text-slate-500 dark:text-slate-400">
                 {state.idle_paused_reason === 'no_new_orders'
-                  ? '⏸️ عداد عدم النشاط متوقف — لا توجد أوردرات «جديد» عليكِ الآن'
+                  ? `⏸️ عداد عدم النشاط متوقف — لا توجد أوردرات ${state.track === 'review' ? '«مراجعة جديدة»' : '«جديد»'} عليكِ الآن`
                   : state.idle_paused_reason === 'outside_window'
                     ? `⏸️ خارج فترات العمل — عداد عدم النشاط يعمل فقط في: ${(state.work_windows ?? []).map((w) => `${w.start}–${w.end}`).join(' · ')}`
-                    : `عداد عدم النشاط يعمل (فترة ${state.current_window?.start ?? ''}–${state.current_window?.end ?? ''} · ${state.new_orders ?? 0} أوردر جديد) — التنبيه بعد ${state.idle_warning_minutes ?? 18} دقيقة بدون إجراء`}
+                    : `عداد عدم النشاط يعمل (فترة ${state.current_window?.start ?? ''}–${state.current_window?.end ?? ''} · ${state.new_orders ?? 0} ${state.track === 'review' ? 'مراجعة جديدة' : 'أوردر جديد'}) — التنبيه بعد ${state.idle_warning_minutes ?? 18} دقيقة بدون إجراء`}
               </p>
             )}
             {brk && status !== 'withdrawn' && (
