@@ -71,7 +71,7 @@ const ENFORCE_CATCHUP_MINUTES = 10;
 const DEFAULT_CHECKPOINTS = [
   { code: 'yesterday_review', label_ar: 'بدء مراجعة أوردرات أمس', due_time: '12:00', sort_order: 1 },
   { code: 'new_orders',       label_ar: 'بدء الأوردرات الجديدة',   due_time: '12:30', sort_order: 2 },
-  { code: 'review_1',         label_ar: 'المراجعة الأولى',          due_time: '14:30', sort_order: 3 },
+  { code: 'review_1',         label_ar: 'مراجعة ما قبل الشحن',      due_time: '14:30', sort_order: 3 },
   { code: 'review_2',         label_ar: 'المراجعة الثانية',         due_time: '18:00', sort_order: 4 },
   { code: 'final_review',     label_ar: 'المراجعة النهائية',        due_time: '21:00', sort_order: 5 },
 ];
