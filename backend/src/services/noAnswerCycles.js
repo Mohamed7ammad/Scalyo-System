@@ -43,6 +43,11 @@ const TERMINAL    = 'ملغي - عدم رد نهائي';
 const REVIEW_NEW  = 'مراجعة جديدة';
 const IN_LOOP_SQL = `('${NO_ANSWER}', '${REVIEW_NEW}')`;   // statuses inside an open cycle
 const OWNER_DAYS  = 2;   // day it went «لا يرد» + the next day
+/* …and the owner's 2nd day only ends at this Cairo time (owner, 2026-10-23):
+   «لا يرد» on Thursday stays with her all Thursday and Friday and becomes
+   «جاهزة للمراجعة» from Friday 23:00 — after the last evening window — so a
+   Team Leader pressing earlier on day 2 never pulls it early. */
+const OWNER_READY_AT = '23:00';
 const REVIEW_DAYS = 2;
 const CAIRO_TODAY = `(NOW() AT TIME ZONE 'Africa/Cairo')::date`;
 /* Backlog rule (owner, 2026-10-22): close only «لا يرد» created AND last
@@ -130,7 +135,8 @@ schemaReady.catch(() => {});   // surfaced by callers that await it
    and WHEN, by daily capacity. One press takes every open cycle whose step has
    ended (step_until <= today) or whose holder can't work it (unassigned /
    absent / inactive):
-     to_review — the owner's 2 days are done (or she's away) → first review day;
+     to_review — the owner's 2nd day has ended (23:00 Cairo, OWNER_READY_AT)
+                 or she's away → first review day;
      redeal    — a review day is done, one more to go → next reviewer, round 2;
      rescue    — the reviewer is away mid-round → another reviewer, same round;
      close     — the last review day is done → «ملغي - عدم رد نهائي».
@@ -162,22 +168,28 @@ async function listReviewers(db, businessId) {
   return rows;
 }
 
-/* Everything one press would act on right now, classified (no reviewer yet). */
-async function pendingQueue(db, businessId) {
-  const { rows: [{ today }] } = await db.query(`SELECT ${CAIRO_TODAY}::text AS today`);
+/* Everything one press would act on right now, classified (no reviewer yet).
+   Owner stage: ready from OWNER_READY_AT on her last day (step_until).
+   Review stage: a review day is one press to the next — ready from the day
+   after the hand-off (step_until). asOf (tests only) replaces "now". */
+async function pendingQueue(db, businessId, asOf = null) {
+  const { rows: [{ today }] } = await db.query(
+    `SELECT ((COALESCE($1::timestamptz, NOW())) AT TIME ZONE 'Africa/Cairo')::date::text AS today`, [asOf]);
   const { rows: cycles } = await db.query(
-    `SELECT c.id AS cycle_id, c.order_id, c.owner_email, c.stage, c.review_round,
-            o."AssignedTo" AS holder, o."ProductName" AS product, btrim(o."Status") AS status,
-            (c.step_until <= $2::date) AS due,
-            (h.email IS NULL OR NOT COALESCE(h.is_active, TRUE) OR COALESCE(h.is_absent, FALSE)) AS stranded
-       FROM no_answer_cycles c
-       JOIN orders o ON o.id = c.order_id AND o.business_id = c.business_id
-       LEFT JOIN users h ON h.business_id = c.business_id AND LOWER(TRIM(h.email)) = LOWER(TRIM(o."AssignedTo"))
-      WHERE c.business_id = $1 AND c.closed_at IS NULL
-        AND btrim(o."Status") IN ${IN_LOOP_SQL} AND NOT COALESCE(o.is_lost_order, FALSE)
-        AND (c.step_until <= $2::date OR h.email IS NULL OR NOT COALESCE(h.is_active, TRUE) OR COALESCE(h.is_absent, FALSE))
-      ORDER BY c.order_id`,
-    [businessId, today]);
+    `WITH x AS (
+       SELECT c.id AS cycle_id, c.order_id, c.owner_email, c.stage, c.review_round,
+              o."AssignedTo" AS holder, o."ProductName" AS product, btrim(o."Status") AS status,
+              CASE WHEN c.stage = 'owner'
+                   THEN COALESCE($3::timestamptz, NOW()) >= (c.step_until + TIME '${OWNER_READY_AT}') AT TIME ZONE 'Africa/Cairo'
+                   ELSE c.step_until <= $2::date END AS due,
+              (h.email IS NULL OR NOT COALESCE(h.is_active, TRUE) OR COALESCE(h.is_absent, FALSE)) AS stranded
+         FROM no_answer_cycles c
+         JOIN orders o ON o.id = c.order_id AND o.business_id = c.business_id
+         LEFT JOIN users h ON h.business_id = c.business_id AND LOWER(TRIM(h.email)) = LOWER(TRIM(o."AssignedTo"))
+        WHERE c.business_id = $1 AND c.closed_at IS NULL
+          AND btrim(o."Status") IN ${IN_LOOP_SQL} AND NOT COALESCE(o.is_lost_order, FALSE))
+     SELECT * FROM x WHERE due OR stranded ORDER BY order_id`,
+    [businessId, today, asOf]);
   const items = [];
   for (const c of cycles) {
     let kind = null;
@@ -248,7 +260,7 @@ const REVIEW_QUEUES = ['to_review', 'redeal', 'rescue', 'close'];
    the ticked queues — only their orders are pooled / closed. Reviewers are
    needed only when a ticked queue has orders to hand over (closing alone
    needs none). dryRun → the exact plan for that selection, nothing written. */
-async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = false, queues }) {
+async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = false, queues, asOf = null }) {
   await schemaReady;
   const ids = Array.isArray(agentIds) ? [...new Set(agentIds.map(String))] : [];
   if (ids.length > 10) throw new DisciplineError(400, 'اختاري 10 موظفات مراجعة على الأكثر');
@@ -269,7 +281,7 @@ async function distributeReviewQueue(businessId, { agentIds, actor, dryRun = fal
     const absent = targets.filter((t) => t.is_absent);
     if (absent.length) throw new DisciplineError(400, `مسجّلة غائبة اليوم: ${absent.map((t) => t.name).join('، ')}`);
 
-    const pending = await pendingQueue(client, businessId);
+    const pending = await pendingQueue(client, businessId, asOf);
     const today = pending.today;
     const items = pending.items.filter((a) => want.includes(a.kind));
     if (!targets.length && items.some((a) => a.kind !== 'close')) {
@@ -468,6 +480,6 @@ function terminalGuard(user, { currentStatus, currentAssignedTo, nextStatus }) {
 }
 
 module.exports = {
-  schemaReady, NO_ANSWER, TERMINAL, REVIEW_NEW, OWNER_DAYS, REVIEW_DAYS, BACKLOG_CUTOFF_LOCAL,
+  schemaReady, NO_ANSWER, TERMINAL, REVIEW_NEW, OWNER_DAYS, OWNER_READY_AT, REVIEW_DAYS, BACKLOG_CUTOFF_LOCAL,
   REVIEW_ROUTING_TRACKS, REVIEW_QUEUES, reviewQueueSummary, distributeReviewQueue, backlogMigrate, terminalGuard,
 };
