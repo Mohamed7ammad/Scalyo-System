@@ -159,6 +159,10 @@ export default function DashboardPage() {
 
   const [user,          setUser]          = useState<User | null>(null);
   const [orders,        setOrders]        = useState<Order[]>([]);
+  /* Latest rows for handlers called from memoised table rows (stale closures) —
+     the compare-and-set needs the status actually on screen. */
+  const ordersRef = useRef<Order[]>(orders);
+  ordersRef.current = orders;
   const [loading,       setLoading]       = useState(true);
   const [error,         setError]         = useState('');
   /* ── Virtualized infinite scroll (keyset append + react-virtuoso) ──
@@ -570,6 +574,12 @@ export default function DashboardPage() {
        before any await, so the UI changes the instant the user picks a status
        (no transparent/loading row). The API runs in the background; we only
        touch state again if it FAILS (rollback). */
+    /* Compare-and-set: a status change names the status on screen right now —
+       if someone else (a Team Leader, the WhatsApp bot …) moved it first, the
+       server refuses instead of overwriting. */
+    const shownStatus = data.Status !== undefined
+      ? ordersRef.current.find((o) => o.id === id)?.Status
+      : undefined;
     let prevOrder: Order | null = null;
     setOrders((prev) => prev.map((o) => {
       if (o.id !== id) return o;
@@ -578,7 +588,7 @@ export default function DashboardPage() {
     }));
 
     try {
-      const res = await updateOrder(id, data);
+      const res = await updateOrder(id, data, shownStatus);
       /* Reconcile server-computed fields the client couldn't know — notably the
          lost-order governorate REPRICE (base × qty + shipping), which the backend
          derives when City changes. Merge them back so the new total shows at once
@@ -596,17 +606,23 @@ export default function DashboardPage() {
       setTimeout(() => showToast('تم الحفظ بنجاح', 'success'), 0);
       setTimeout(() => fetchProducts(), 0);
     } catch (err: unknown) {
-      // Rollback to the pre-edit row only on failure.
-      if (prevOrder) {
+      const body = (err as { response?: { data?: { error?: string; code?: string; current?: Partial<Order> } } })
+        ?.response?.data;
+      if (body?.code === 'STATUS_CONFLICT' && body.current) {
+        /* Lost the compare-and-set — show the order as it is NOW, not the stale
+           snapshot (the per-phone history badges come from the loaded row). */
+        const now = body.current;
+        setOrders((prev) => prev.map((o) => (o.id === id ? { ...(prevOrder ?? o), ...now } : o)));
+      } else if (prevOrder) {
+        // Rollback to the pre-edit row only on failure.
         const snapshot = prevOrder;
         setOrders((prev) => prev.map((o) => (o.id === id ? snapshot : o)));
       }
-      const data = (err as { response?: { data?: { error?: string; code?: string } } })?.response?.data;
-      const msg = data?.error || 'فشل في الحفظ — تم التراجع';
+      const msg = body?.error || 'فشل في الحفظ — تم التراجع';
       setTimeout(() => showToast(msg, 'error'), 0);
       /* Queue lock the page didn't know about yet (e.g. a callback was just
          moved to her) — pull the pinned callbacks + lock state now. */
-      if (data?.code === 'OVERDUE_CALLBACKS') silentRefresh();
+      if (body?.code === 'OVERDUE_CALLBACKS') silentRefresh();
     }
   };
 

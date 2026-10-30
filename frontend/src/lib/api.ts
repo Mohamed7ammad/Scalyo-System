@@ -283,8 +283,13 @@ export const getOrderSourceAnalytics = (startDate?: string, endDate?: string) =>
 export const createOrder = (data: CreateOrderPayload) =>
   api.post<Order>('/api/orders', data);
 
-export const updateOrder = (id: number, data: AgentUpdate | AdminUpdate) =>
-  api.patch<Order>(`/api/orders/${id}`, data);
+/** `expectedStatus` = the status this screen showed: a status change only lands
+ *  while the order is still in it — otherwise 409 { code: 'STATUS_CONFLICT',
+ *  error, current } with the order as it is now (another agent, a Team Leader,
+ *  the WhatsApp bot got there first). */
+export const updateOrder = (id: number, data: AgentUpdate | AdminUpdate, expectedStatus?: string) =>
+  api.patch<Order>(`/api/orders/${id}`, data,
+    expectedStatus ? { params: { expected_status: expectedStatus } } : undefined);
 
 /** ADMIN-ONLY: update just an order's total price (the "الدفع" column). Backend
     enforces requireAdmin + positive-number validation. */

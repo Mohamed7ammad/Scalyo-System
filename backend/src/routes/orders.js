@@ -3,36 +3,14 @@ const pool          = require('../config/db');
 const authenticate  = require('../middleware/auth');
 const { requireAdmin, filterAgentFields, requireAdminOrPermission } = require('../middleware/roleGuard');
 const { agentAllowsProduct, assignProductAware } = require('../utils/productRouting');
-const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
 const { hasRole } = require('../utils/roles');
 const noAnswer = require('../services/noAnswerCycles');   // «لا يرد» cycles: schema/trigger + terminal guard
 const postponed = require('../services/postponedCallbacks');   // «مؤجل» limits / rebalance / expiry
 
-/* Treasury ledger sources that make up an agent's earned commission for an order.
-   (bosta_cod / deposit are revenue/cash, NOT commission — excluded.) */
-const COMMISSION_SOURCES = ['comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer'];
-
-/* Re-freeze one order's earned_commission = the SUM of its CURRENT valid frozen
-   commission ledger rows. Called after any hook that adds/voids a commission txn,
-   so the denormalised column always mirrors the (already rate-frozen, funnel-aware)
-   treasury ledger. Best-effort: never throws into the request path.
-   NOTE: this is the order's TOTAL across every agent who earned on it. Agent
-   balances are NOT derived from it — they sum the ledger rows each agent owns
-   (utils/commission.js), so a transferred order's commission stays with its earner. */
-async function syncEarnedCommission(orderId, businessId) {
-  try {
-    await pool.query(
-      `UPDATE orders SET earned_commission = COALESCE((
-          SELECT SUM(amount::numeric) FROM treasury_transactions
-           WHERE order_id = $1 AND business_id = $2 AND source = ANY($3::text[])
-        ), 0)
-        WHERE id = $1 AND business_id = $2`,
-      [orderId, businessId, COMMISSION_SOURCES]
-    );
-  } catch (e) {
-    console.error('[earned_commission] sync failed for order', orderId, '—', e.message);
-  }
-}
+/* The one shared order writer (compare-and-set + stock / ledger side effects) —
+   PATCH /:id and the WhatsApp bot both go through it. */
+const orderStatus = require('../services/orderStatus');
+const { syncEarnedCommission, recordAssignmentLog } = orderStatus;
 
 /* Look up ONE agent's product-routing restriction (allowed_products) by email,
    tenant-scoped. Returns [] when unrestricted / unknown → handles all products. */
@@ -102,30 +80,7 @@ pool.query(`
   .then(() => console.log('✅  Orders: order_assignment_log ready'))
   .catch((err) => console.warn('⚠️   order_assignment_log check:', err.message));
 
-/* Fire-and-forget batch insert of assignment-change rows. A logging failure must
-   NEVER break the actual transfer, so every error is swallowed with a warning.
-   `rows` = [{ orderId, fromAgent, toAgent, status }]. */
-async function recordAssignmentLog(rows, { businessId, changedBy, changedById, source }) {
-  if (!Array.isArray(rows) || rows.length === 0) return;
-  const values = [];
-  const params = [];
-  let i = 1;
-  for (const r of rows) {
-    params.push(r.orderId, businessId, r.fromAgent ?? null, r.toAgent ?? null,
-                changedBy ?? null, changedById ?? null, source, r.status ?? null);
-    values.push(`($${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`);
-  }
-  try {
-    await pool.query(
-      `INSERT INTO order_assignment_log
-         (order_id, business_id, from_agent, to_agent, changed_by, changed_by_id, source, order_status)
-       VALUES ${values.join(',')}`,
-      params
-    );
-  } catch (e) {
-    console.warn('[assignment-log] insert skipped:', e.message);
-  }
-}
+/* recordAssignmentLog — see services/orderStatus.js. */
 
 /* Locks the product's WAC at confirmation time so historical profitability
    stays accurate even after cost_price is updated by a new supply batch.   */
@@ -224,8 +179,8 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS "no_answer_logs" JSONB N
 /* ── earned_commission — FROZEN per-order commission (fixes retroactive repricing)
    The agent's commission for THIS order, stamped at the rate in force when its
    status changed — never re-derived from the profile's CURRENT rate. Kept in sync
-   with the treasury commission ledger by the status-change hooks (COMMISSION_SOURCES
-   below). Analytics/payout totals SUM this column, so raising an agent's rate never
+   with the treasury commission ledger by the status-change hooks (COMMISSION_SOURCES,
+   services/orderStatus.js). Analytics/payout totals SUM this column, so raising an agent's rate never
    moves their past earnings. Backfilled ONCE from the existing frozen ledger, so
    history stays historically accurate (old confirmations keep their old rate). The
    guarded UPDATE only touches rows out of sync with the ledger → effectively one-time. */
@@ -1624,40 +1579,7 @@ const PATCH_WHITELIST = new Set([
 ]);
 
 // PATCH /api/orders/:id — agents restricted to Status + Note only
-/* ── Alias-aware product resolver ─────────────────────────────────────────────
-   Resolve the product an order maps to. Matches the order's sku OR product name
-   against a product's main `sku`, `name`, OR any entry in its `aliases` array —
-   all case-insensitive + trimmed. Returns the product row (or null). Preference
-   order: exact SKU → exact name → alias match.                                 */
-async function resolveProductForOrder(businessId, sku, name) {
-  const skuKey  = (sku  ?? '').trim();
-  const nameKey = (name ?? '').trim();
-  if (!skuKey && !nameKey) return null;
-
-  const { rows } = await pool.query(
-    `SELECT id, name, sku, stock_quantity, cost_price,
-            CASE
-              WHEN LOWER(TRIM(sku))  = LOWER(NULLIF($1, '')) THEN 1
-              WHEN LOWER(TRIM(name)) = LOWER(NULLIF($2, '')) THEN 2
-              ELSE 3
-            END AS match_rank
-       FROM products
-      WHERE business_id = $3
-        AND (
-              LOWER(TRIM(sku))  = LOWER(NULLIF($1, ''))
-           OR LOWER(TRIM(name)) = LOWER(NULLIF($2, ''))
-           OR EXISTS (
-                SELECT 1 FROM unnest(COALESCE(aliases, '{}'::text[])) AS a
-                 WHERE LOWER(TRIM(a)) = LOWER(NULLIF($1, ''))
-                    OR LOWER(TRIM(a)) = LOWER(NULLIF($2, ''))
-              )
-            )
-      ORDER BY match_rank ASC
-      LIMIT 1`,
-    [skuKey, nameKey, businessId]
-  );
-  return rows[0] || null;
-}
+/* resolveProductForOrder (alias-aware product match) — see services/orderStatus.js. */
 
 /* Accept either `Status` or lowercase `status` from the client (defensive —
    canonicalise to `Status` before the agent-field guard + whitelist run). */
@@ -1714,6 +1636,10 @@ router.patch('/:id/price', authenticate, requireAdminOrPermission('reassign_orde
 router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, async (req, res) => {
   const { id } = req.params;
   const businessId = req.user.business_id;
+  /* Compare-and-set: the status this client last saw (?expected_status=…) — a
+     query param, so a backend that predates it simply ignores it. */
+  const expectedStatus = typeof req.query.expected_status === 'string' && req.query.expected_status.trim()
+    ? req.query.expected_status : null;
 
   /* ── Strip any UI-only / unknown keys before touching the DB ─────── */
   const updates = Object.fromEntries(
@@ -1736,49 +1662,32 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
 
   /* ── Step 1: Fetch the current order from the DB ────────────────────
      The frontend only sends the fields being changed (e.g. {Status: '…'}).
-     ProductName, sku, and the previous Status are NOT in req.body — they
-     must come from the database.
+     The previous Status, product, stock flag, holder … come from the database.
      ─────────────────────────────────────────────────────────────────── */
-  let currentProductName  = '';
-  let currentStatus       = '';
-  let currentSku          = null;   // null means no SKU → fall back to name match
-  let currentProductPrice = '';
-  let currentQty          = 1;
-  let currentStockDeducted = false;
-  let currentAssignedTo   = null;   // for the inline-reassignment guard + audit log
-  let currentCity         = '';     // for lost-order governorate repricing
-  let currentIsLost       = false;  // dynamic shipping pricing applies to lost orders ONLY
-  let currentPostponedDate = null;  // «مؤجل» rules (date limits, postponement counter)
-  let currentPostponeCount = 0;
-
+  let current;
   try {
-    const row = await pool.query(
-      `SELECT "Status", "ProductName", "sku", "ProductPrice", "AssignedTo", "City",
-              "PostponedDate", COALESCE(postpone_count, 0) AS postpone_count,
-              COALESCE("quantity", 1) AS quantity,
-              COALESCE("stock_deducted", false) AS stock_deducted,
-              COALESCE(is_lost_order, false) AS is_lost_order
-         FROM orders WHERE id = $1 AND business_id = $2`,
-      [id, businessId]
-    );
-    if (!row.rows.length) {
-      return res.status(404).json({ error: 'الطلب غير موجود' });
-    }
-    currentProductName  = (row.rows[0].ProductName || '').trim();
-    currentStatus       = row.rows[0].Status || '';
-    // Treat empty string as null so the SQL $1 IS NOT NULL guard works correctly
-    currentSku          = row.rows[0].sku || null;
-    currentProductPrice = row.rows[0].ProductPrice ?? '';
-    currentQty          = Math.max(1, parseInt(row.rows[0].quantity, 10) || 1);
-    currentStockDeducted = row.rows[0].stock_deducted === true;
-    currentAssignedTo   = row.rows[0].AssignedTo ?? null;
-    currentCity         = row.rows[0].City ?? '';
-    currentIsLost       = row.rows[0].is_lost_order === true;
-    currentPostponedDate = row.rows[0].PostponedDate ?? null;
-    currentPostponeCount = Number(row.rows[0].postpone_count) || 0;
+    current = await orderStatus.loadOrder(businessId, id);
   } catch (err) {
     console.error('Step 1 – fetch order failed:', err.message);
     return res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+  if (!current) {
+    return res.status(404).json({ error: 'الطلب غير موجود' });
+  }
+  const {
+    status: currentStatus, productName: currentProductName, assignedTo: currentAssignedTo,
+    postponedDate: currentPostponedDate, postponeCount: currentPostponeCount,
+  } = current;
+
+  /* ── Compare-and-set ──────────────────────────────────────────────────────────
+     A status change names the status the client's screen showed. If the order
+     has moved on since (another agent, a Team Leader, the WhatsApp bot), refuse
+     with the order as it is now — before any rule below speaks. */
+  if (expectedStatus != null && Object.prototype.hasOwnProperty.call(updates, 'Status')
+      && !orderStatus.sameStatus(expectedStatus, currentStatus)) {
+    return res.status(409).json({
+      error: orderStatus.conflictMessage(current.row), code: 'STATUS_CONFLICT', current: current.row,
+    });
   }
 
   /* ── «ملغي - عدم رد نهائي» / «مراجعة جديدة» guard ─────────────────────────────
@@ -1844,399 +1753,26 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     }
   }
 
-  /* ── Step 1b: Recalculate total price when quantity changes ─────────
-     total = unit_price × new_qty. Unit price is taken from the product
-     catalogue (by SKU, else name) and, when the order has no matching product
-     (manual/imported), derived from the order's own current unit price
-     (oldTotal ÷ oldQty). The new ProductPrice is injected into `updates` so it
-     is saved and returned to the frontend. (No per-order shipping-fee column
-     exists — Bosta shipping/COD is handled separately.)                    */
-  if (updates.quantity !== undefined) {
-    const newQty = Math.max(1, parseInt(updates.quantity, 10) || 1);
-    updates.quantity = newQty;   // normalise
-
-    const parsePrice = (v) =>
-      parseFloat(String(v ?? '').replace(/[^0-9.]/g, '')) || 0;
-
-    let unitPrice = null;
-    try {
-      const prod = await pool.query(
-        `SELECT selling_price FROM products
-          WHERE business_id = $1 AND (sku = $2 OR TRIM(name) = TRIM($3))
-          ORDER BY (sku = $2) DESC
-          LIMIT 1`,
-        [businessId, currentSku, currentProductName]
-      );
-      if (prod.rows.length) unitPrice = parseFloat(prod.rows[0].selling_price) || null;
-    } catch (e) {
-      console.warn('[PATCH] product unit-price lookup failed:', e.message);
-    }
-
-    // Fallback: derive the unit price from the order's existing total.
-    if (unitPrice == null || unitPrice <= 0) {
-      const oldTotal = parsePrice(currentProductPrice);
-      if (oldTotal > 0) unitPrice = oldTotal / currentQty;
-    }
-
-    if (unitPrice != null && unitPrice > 0) {
-      const newTotal = Math.round(unitPrice * newQty * 100) / 100;
-      updates.ProductPrice = String(newTotal);
-      console.log(`[PATCH] qty ${currentQty}→${newQty} on order ${id}: unit=${unitPrice} → ProductPrice=${newTotal}`);
-    }
-  }
-
-  /* ── Step 1c: Dynamic governorate shipping — MISSING/lost orders ONLY ─────────
-     Total = (base unit price × quantity) + flat governorate shipping. This is the
-     AUTHORITATIVE repricing so an agent (who can't send ProductPrice) still gets a
-     correct total when they pick a governorate. It fires when the governorate is
-     changed (Rule B) OR when a lost order is confirmed (Rule C — "save on confirm"),
-     and covers Rule A (no governorate ⇒ base only, 0 shipping). Normal store orders
-     are never touched — their price already includes shipping.
-       • base price unresolvable (no matching catalogue product) → LEAVE price as-is.
-       • City non-empty but UNRECOGNISED                          → LEAVE price as-is
-         (never guess a shipping rate for an unknown place).
-       • City empty                                                → base × qty only.
-       • City recognised                                           → base × qty + rate. */
-  const cityIsChanging   = Object.prototype.hasOwnProperty.call(updates, 'City');
-  const confirmingLost   = updates.Status && String(updates.Status).trim() === 'تم التأكيد'
-                                          && currentStatus !== 'تم التأكيد';
-  if (currentIsLost && (cityIsChanging || confirmingLost)) {
-    const effectiveCity = cityIsChanging ? String(updates.City ?? '').trim() : String(currentCity ?? '').trim();
-    const qty = updates.quantity !== undefined
-      ? Math.max(1, parseInt(updates.quantity, 10) || 1)
-      : currentQty;
-
-    // Base UNIT price from the catalogue (SKU first, then name). No fallback to the
-    // order's own price here — without a real base we must not guess (decision: leave).
-    let baseUnit = null;
-    try {
-      const prod = await pool.query(
-        `SELECT selling_price FROM products
-          WHERE business_id = $1 AND (sku = $2 OR TRIM(name) = TRIM($3))
-          ORDER BY (sku = $2) DESC
-          LIMIT 1`,
-        [businessId, currentSku, currentProductName]
-      );
-      if (prod.rows.length) baseUnit = parseFloat(prod.rows[0].selling_price) || null;
-    } catch (e) {
-      console.warn('[PATCH] lost-order base-price lookup failed:', e.message);
-    }
-
-    if (baseUnit != null && baseUnit > 0) {
-      const canonical = resolveGovernorate(effectiveCity);   // null when empty/unknown
-      let newTotal = null;
-      if (!effectiveCity) {
-        newTotal = baseUnit * qty;                            // Rule A: no governorate
-      } else if (canonical) {
-        newTotal = baseUnit * qty + shippingRateFor(effectiveCity);   // Rules B / C
-      } // else: recognised-but-unknown string → leave price unchanged (newTotal stays null)
-
-      if (newTotal != null) {
-        updates.ProductPrice = String(Math.round(newTotal * 100) / 100);
-        console.log(`[PATCH] lost order ${id} reprice: base=${baseUnit}×${qty} + ship(${canonical ?? 'none'}) → ProductPrice=${updates.ProductPrice}`);
-      }
-    }
-  }
-
-  /* ── Step 2: Execute the main order update ──────────────────────────
-     SET clause is built only from whitelisted fields (see PATCH_WHITELIST).
-     Only this block can return a 500 to the client; everything below is
-     fire-and-forget.
-     ─────────────────────────────────────────────────────────────────── */
-  const fields     = Object.keys(updates);
-  const values     = Object.values(updates);
-  // Always stamp the action time so analytics date-filters see the update today.
-  let   setClauses = fields.map((f, i) => `"${f}" = $${i + 1}`).join(', ')
-                   + ', "updatedAt" = NOW()';
-
-  /* Dedicated shipped_at stamp the moment this PATCH moves the order to 'تم الشحن'.
-     Idempotent (COALESCE keeps the first ship time) and a fixed SQL literal — no
-     user parameter — so a later edit that re-touches the row never shifts it. */
-  if (String(updates.Status ?? '').trim() === 'تم الشحن') {
-    setClauses += ', shipped_at = COALESCE(shipped_at, NOW())';
-  }
-
-  let updatedOrder;
+  /* ── Steps 1b … 3.5c: repricing, the compare-and-set UPDATE, stock and the
+     deposit / commission / void-on-revert ledger writes — the one shared writer
+     (services/orderStatus.js), the same path the WhatsApp bot takes. Inventory
+     is settled before the response; ledger writes finish in the background. */
+  let result;
   try {
-    const result = await pool.query(
-      `UPDATE orders SET ${setClauses} WHERE id = $${fields.length + 1} AND business_id = $${fields.length + 2} RETURNING *`,
-      [...values, id, businessId]
-    );
-    if (!result.rows.length) {
-      return res.status(404).json({ error: 'الطلب غير موجود' });
-    }
-    updatedOrder = result.rows[0];
-
-    /* Audit trail — log an inline AssignedTo change once it has actually landed
-       and the owner really differs (a no-op re-select of the same agent isn't a
-       transfer). Fire-and-forget so it can never fail the update. */
-    if (Object.prototype.hasOwnProperty.call(updates, 'AssignedTo')
-        && String(updates.AssignedTo ?? '') !== String(currentAssignedTo ?? '')) {
-      recordAssignmentLog(
-        [{ orderId: Number(id), fromAgent: currentAssignedTo, toAgent: updatedOrder.AssignedTo, status: currentStatus }],
-        { businessId, changedBy: req.user.email, changedById: req.user.id, source: 'inline' }
-      );
-    }
+    result = await orderStatus.applyUpdate({
+      businessId, orderId: id, current, updates, expectedStatus,
+      actor: { email: req.user.email, id: req.user.id, source: 'inline' },
+    });
   } catch (err) {
-    console.error('PATCH Order Error (Step 2 – update failed):', err.message);
-    console.error('  → SET clause fields:', fields);
-    console.error('  → Full PG error:',     err);
+    console.error('PATCH Order Error (applyUpdate):', err);
     return res.status(500).json({ error: 'خطأ في الخادم' });
   }
-
-  /* ── Step 3: Inventory lifecycle (runs BEFORE res.json) ────────────
-     Stock is deducted the moment an order becomes COMMITTED (confirmed / shipped
-     / delivered) and restocked when it leaves that group (cancelled / rejected /
-     reverted / no-answer / postponed). The persisted `stock_deducted` flag is the
-     SINGLE idempotency guard: stock moves exactly once per direction, no matter
-     how many times the status flips (e.g. confirm → revert → confirm again).
-     Deduction/restock are by the order's `quantity`, matched SKU-first.
-     NOTE: physical returns from the Bosta webhook restock via applyPhysicalReturn,
-     which also clears stock_deducted, so the two paths never double-count.     */
-  /* Stock is held ONLY while the order is actively in the fulfilment pipeline.
-     ANY other state (مؤجل / ملغي / مرفوض / لا يرد / جديد / …) must release it.
-     Hamza/diacritic-resilient normalisation: unify أإآ→ا, ى→ي, ة→ه, strip
-     harakat + tatweel + spaces — so 'تم التاكيد' (no hamza) == 'تم التأكيد'.    */
-  const normState = (s) => (s ?? '')
-    .normalize('NFC')
-    .replace(/[أإآ]/g, 'ا')
-    .replace(/ى/g, 'ي')
-    .replace(/ة/g, 'ه')
-    .replace(/[ً-ْـ]/g, '')   // harakat + tatweel
-    .replace(/\s+/g, ' ')
-    .trim();
-  const COMMITTED_STATES = ['تم التأكيد', 'تم الشحن', 'تم التوصيل'].map(normState);
-
-  if (updates.Status && updates.Status !== currentStatus) {
-    const isCommitted = COMMITTED_STATES.includes(normState(updates.Status));
-    console.log(`[DEBUG Inventory] Raw incoming status: "${updates.Status}" | normalized: "${normState(updates.Status)}" | isCommitted: ${isCommitted} | stock_deducted: ${currentStockDeducted} | order ${id}`);
-
-    if (isCommitted && !currentStockDeducted) {
-      /* ── Deduct on confirmation (entering committed, not yet deducted) ── */
-      if (!currentProductName && !currentSku) {
-        console.warn(`[Inventory] Order ${id} has no product — cannot deduct.`);
-      } else {
-        try {
-          const prod = await resolveProductForOrder(businessId, currentSku, currentProductName);
-          if (!prod) {
-            console.warn(`⚠️ Inventory deduct: no product matched — order ${id} left undeducted.`);
-            console.log(`[DEBUG Inventory] Product MATCH FAILED (deduct) for order ${id} | sku="${currentSku}" | product_name="${currentProductName}" — no products row whose sku/name/aliases match (business ${businessId}). Add an alias on the product.`);
-          } else {
-            const r = await pool.query(
-              `UPDATE products SET stock_quantity = stock_quantity - $1
-                WHERE id = $2 AND business_id = $3
-                RETURNING name, sku, stock_quantity, cost_price`,
-              [currentQty, prod.id, businessId]
-            );
-            await pool.query(
-              'UPDATE orders SET "stock_deducted" = true WHERE id = $1 AND business_id = $2',
-              [id, businessId]
-            );
-            console.log(`✅ Inventory: -${currentQty} → "${r.rows[0].name}" (SKU ${r.rows[0].sku}) now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
-
-            /* WAC cost lock — freeze the product's current cost on the order so
-               historical profitability stays accurate after future supply batches. */
-            const lockedCost = parseFloat(r.rows[0].cost_price) || 0;
-            if (lockedCost > 0) {
-              pool.query(
-                'UPDATE orders SET "unit_cost_price" = $1 WHERE id = $2 AND business_id = $3',
-                [lockedCost, id, businessId]
-              ).catch((e) => console.error('[Inventory] unit_cost_price lock failed:', e.message));
-            }
-          }
-        } catch (err) {
-          console.error(`[Inventory] Deduct error: ${err.message}`);
-        }
-      }
-
-    } else if (!isCommitted && currentStockDeducted) {
-      /* ── Restock on leaving committed (postpone / cancel / reject / revert) ── */
-      try {
-        const prod = await resolveProductForOrder(businessId, currentSku, currentProductName);
-        if (!prod) {
-          console.warn(`⚠️ Inventory restock: no product matched — order ${id}.`);
-          console.log(`[DEBUG Inventory] Product MATCH FAILED (restock) for order ${id} | sku="${currentSku}" | product_name="${currentProductName}" — no products row whose sku/name/aliases match (business ${businessId}).`);
-        } else {
-          const r = await pool.query(
-            `UPDATE products SET stock_quantity = stock_quantity + $1
-              WHERE id = $2 AND business_id = $3
-              RETURNING name, sku, stock_quantity`,
-            [currentQty, prod.id, businessId]
-          );
-          console.log(`✅ Inventory: +${currentQty} → "${r.rows[0].name}" (SKU ${r.rows[0].sku}) now ${r.rows[0].stock_quantity} (order ${id} → ${updates.Status})`);
-        }
-        // Order no longer committed → clear the flag (even if no product matched,
-        // so the lifecycle state stays consistent).
-        await pool.query(
-          'UPDATE orders SET "stock_deducted" = false WHERE id = $1 AND business_id = $2',
-          [id, businessId]
-        );
-      } catch (err) {
-        console.error(`[Inventory] Restock error: ${err.message}`);
-      }
-
-    } else {
-      console.log(`[Inventory] No stock move for order ${id} (committed=${isCommitted}, alreadyDeducted=${currentStockDeducted}).`);
-    }
+  if (!result.ok) {
+    return res.status(result.status).json({
+      error: result.error, code: result.code, ...(result.current ? { current: result.current } : {}),
+    });
   }
-
-  /* ── Step 3.5a: Treasury — deposit hook (fire-and-forget) ───────────────
-     Fires whenever depositAmount is part of this PATCH payload.
-     Uses the partial unique index treasury_deposit_order_uidx
-     (ON CONFLICT … WHERE source = 'deposit') for idempotency so that
-     updating the amount on an existing deposit correctly UPDATES the row
-     rather than inserting a duplicate.
-     If the amount is cleared to 0 the treasury entry is deleted.            */
-  if (updates.depositAmount !== undefined) {
-    const depositAmt = parseFloat(updates.depositAmount) || 0;
-
-    if (depositAmt > 0) {
-      const depositDesc =
-        `عربون طلب #${id}` +
-        (updatedOrder.FullName    ? ` — ${updatedOrder.FullName}`       : '') +
-        (updatedOrder.ProductName ? ` | ${updatedOrder.ProductName}`    : '');
-
-      pool.query(
-        `INSERT INTO treasury_transactions
-           (order_id, amount, type, source, description, transaction_date, business_id)
-         VALUES ($1, $2, 'revenue', 'deposit', $3, CURRENT_DATE, $4)
-         ON CONFLICT (order_id) WHERE source = 'deposit'
-         DO UPDATE SET
-           amount      = EXCLUDED.amount,
-           description = EXCLUDED.description`,
-        [id, depositAmt.toFixed(2), depositDesc, businessId]
-      ).catch((e) => console.error('[Treasury] Deposit hook failed:', e.message));
-
-    } else {
-      /* Deposit cleared → remove treasury entry if it exists */
-      pool.query(
-        `DELETE FROM treasury_transactions WHERE order_id = $1 AND source = 'deposit' AND business_id = $2`,
-        [id, businessId]
-      ).catch((e) => console.error('[Treasury] Deposit clear failed:', e.message));
-    }
-  }
-
-  /* ── Step 3.5b: Treasury — commission hook (fire-and-forget) ────────────
-     Fires when Status changes to a commission-triggering state.
-     Looks up the assigned agent's rate for the new status from the users
-     table and logs the amount as an expense in treasury_transactions.
-
-     Idempotency: each (order_id, source) pair has its own partial unique
-     index, so the same commission can never be double-counted even if the
-     frontend sends the same status update twice.
-
-     Mapping:
-       'تم التأكيد'  → source 'comm_confirmed'  (comm_confirmed column)
-       'تم التوصيل' → source 'comm_delivered'   (comm_delivered column)
-       'تم الرفض'   → source 'comm_rejected'    (comm_rejected column)
-       'لا يرد'     → source 'comm_no_answer'   (comm_no_answer column)   */
-  if (updates.Status && updates.Status !== currentStatus) {
-    const COMM_MAP = {
-      'تم التأكيد':  { field: 'comm_confirmed', source: 'comm_confirmed', label: 'تأكيد'   },
-      'تم التوصيل': { field: 'comm_delivered',  source: 'comm_delivered',  label: 'توصيل'   },
-      'تم الرفض':   { field: 'comm_rejected',   source: 'comm_rejected',   label: 'رفض'     },
-      /* NOTE: neither 'لا يرد' nor 'مؤجل' is here.
-         • 'لا يرد' earns comm_no_answer ONLY after 5 logged call attempts —
-           handled by POST /:id/no-answer-attempt, not on the status change.
-         • 'مؤجل' grants NO automatic commission at all. */
-    };
-
-    const commInfo   = COMM_MAP[updates.Status];
-    const assignedTo = updatedOrder.AssignedTo;
-
-    if (commInfo && assignedTo) {
-      pool.query(
-        `SELECT "${commInfo.field}" AS rate FROM users WHERE email = $1 AND business_id = $2`,
-        [assignedTo, businessId]
-      ).then(({ rows: uRows }) => {
-        if (!uRows.length) return null;
-        const rate = parseFloat(uRows[0].rate) || 0;
-        if (rate <= 0) return null;   // agent has no commission for this status
-
-        const commDesc =
-          `عمولة ${commInfo.label} — ${assignedTo.split('@')[0]} — طلب #${id}` +
-          (updatedOrder.ProductName ? ` | ${updatedOrder.ProductName}` : '');
-
-        /* source literal is hardcoded (not user input) — safe to interpolate
-           into the ON CONFLICT WHERE clause (cannot use a bind parameter there) */
-        return pool.query(
-          `INSERT INTO treasury_transactions
-             (order_id, amount, type, source, description, transaction_date, business_id, agent_email)
-           VALUES ($1, $2, 'expense', $3, $4, CURRENT_DATE, $5, $6)
-           ON CONFLICT (order_id) WHERE source = '${commInfo.source}'
-           DO NOTHING`,
-          [id, rate.toFixed(2), commInfo.source, commDesc, businessId, assignedTo]
-        );
-      })
-        /* Re-freeze the order's earned_commission from the ledger AFTER the insert. */
-        .then(() => syncEarnedCommission(id, businessId))
-        .catch((e) => console.error('[Treasury] Commission hook failed:', e.message));
-    }
-  }
-
-  /* ── Step 3.5c: Treasury — VOID stale commission/revenue on status change ───
-     The hooks above only ADD commission/revenue on forward transitions; they
-     never remove anything. So reverting an order (e.g. تم الشحن → جديد, or
-     تم التوصيل → تم التأكيد, or → ملغي) used to leave phantom commissions and
-     expected revenue in the treasury. Here we delete every status-driven txn
-     that is NO LONGER valid for the order's new status.
-
-     Funnel-aware validity (a milestone's commission survives only while the
-     order is at/past that milestone):
-       تم التأكيد / تم الشحن → comm_confirmed
-       تم التوصيل            → comm_confirmed + comm_delivered + bosta_cod (COD revenue)
-       تم الرفض              → comm_rejected
-       لا يرد                → comm_no_answer (only if 5+ attempts already logged)
-       مؤجل                  → NONE  (no automatic commission)
-       جديد / ملغي / غيره    → NONE  (all status-driven txns voided)
-
-     NOTE: source 'deposit' is intentionally NOT touched — it represents real
-     collected cash and is managed solely by the depositAmount hook above.       */
-  if (updates.Status && updates.Status !== currentStatus) {
-    const STATUS_DRIVEN_SOURCES = [
-      'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer', 'bosta_cod',
-    ];
-    const VALID_BY_STATUS = {
-      'تم التأكيد':  ['comm_confirmed'],
-      'تم الشحن':   ['comm_confirmed'],
-      'تم التوصيل': ['comm_confirmed', 'comm_delivered', 'bosta_cod'],
-      'تم الرفض':   ['comm_rejected'],
-      'لا يرد':     ['comm_no_answer'],
-      [noAnswer.TERMINAL]: ['comm_no_answer'],   // closed after the no-answer cycle → her 5-attempt commission stays
-      [noAnswer.REVIEW_NEW]: ['comm_no_answer'], // handed to a review account → still inside the no-answer cycle
-      'مؤجل':       [],   // postponed → NO automatic commission; void all (deposit kept)
-      'معلق حتي الدفع': [],   // pending-until-payment → NO commission; void all (deposit kept)
-    };
-    const validSources = new Set(VALID_BY_STATUS[updates.Status] || []); // جديد/ملغي/… → none
-    const toVoid = STATUS_DRIVEN_SOURCES.filter((s) => !validSources.has(s));
-
-    if (toVoid.length > 0) {
-      /* Excludes the source(s) the commission hook may be inserting concurrently,
-         so the just-earned commission is never deleted — safe regardless of order.
-         OWNERSHIP LOCK: only rows owned by the order's CURRENT holder (or unowned
-         rows, which mean the same thing) are voided. A commission a PREVIOUS agent
-         earned before the order was transferred — e.g. her 5-attempt عمولة عدم الرد
-         — is her completed work and survives whatever the new holder does next. */
-      pool.query(
-        `DELETE FROM treasury_transactions
-          WHERE order_id = $1 AND business_id = $2 AND source = ANY($3::text[])
-            AND (agent_email IS NULL
-                 OR LOWER(TRIM(agent_email)) = LOWER(TRIM(COALESCE($4::text, ''))))`,
-        [id, businessId, toVoid, updatedOrder.AssignedTo ?? null]
-      ).then((r) => {
-        if (r.rowCount > 0) {
-          console.log(`[Treasury] 🧹 Voided ${r.rowCount} stale txn(s) for order ${id} → "${updates.Status}" (removed sources: ${toVoid.join(', ')})`);
-        }
-      })
-        /* Re-freeze earned_commission AFTER the void so a reverted order drops the
-           commission it no longer qualifies for. */
-        .then(() => syncEarnedCommission(id, businessId))
-        .catch((e) => console.error('[Treasury] Void-on-revert failed:', e.message));
-    }
-  }
-
-  /* ── Send 200 OK after all inventory + treasury work is dispatched ── */
-  res.json(updatedOrder);
+  res.json(result.order);
 });
 
 /* ── POST /api/orders/:id/no-answer-attempt ─────────────────────────────────
