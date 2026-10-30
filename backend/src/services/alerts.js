@@ -22,7 +22,10 @@ const { sendMail } = require('../utils/mailer');
 const STALE_HOURS = 24;
 
 /* Statuses considered "pending / awaiting the agent". */
-const PENDING_STATUSES = ['جديد', 'مؤجل'];
+/* «مؤجل» left this email on 2026-10-30: callbacks are tracked by their DATE
+   now (due tab, agent strip, Team Leader board, rebalance, expiry) — this
+   date-blind "untouched 24 h" nag only added noise. */
+const PENDING_STATUSES = ['جديد'];
 
 /** Build the Arabic alert email body for one staff member. */
 function buildAlertEmail(name, count) {
@@ -30,7 +33,7 @@ function buildAlertEmail(name, count) {
   const subject = 'تنبيه: طلبات متأخرة تحتاج لتأكيد';
   const text =
     `مرحباً ${greetingName}،\n\n` +
-    `لديك ${count} طلب معلّق (جديد / مؤجل) منذ فترة طويلة دون متابعة.\n` +
+    `لديك ${count} طلب «جديد» منذ فترة طويلة دون متابعة.\n` +
     `يرجى مراجعتها وتأكيدها في أسرع وقت ممكن.\n\n` +
     `— فريق Scalyooo`;
 
@@ -43,7 +46,7 @@ function buildAlertEmail(name, count) {
     </p>
     <p style="color:#475569;font-size:14px;line-height:1.8;margin:0 0 20px">
       لديك <strong style="color:#dc2626">${count}</strong> طلب معلّق
-      <span style="color:#64748b">(جديد / مؤجل)</span> منذ فترة طويلة دون متابعة.
+      <span style="color:#64748b">(جديد)</span> منذ فترة طويلة دون متابعة.
       يرجى مراجعتها وتأكيدها في أسرع وقت ممكن. 🙏
     </p>
     <p style="color:#94a3b8;font-size:12px;line-height:1.7;margin:16px 0 0">

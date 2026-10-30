@@ -4,6 +4,7 @@ const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { checkAndSendStaffAlerts } = require('../services/alerts');
+const postponedCallbacks = require('../services/postponedCallbacks');
 const { earnedCommissionSql } = require('../utils/commission');
 const { hasRole, primaryRole, normalizeRoles } = require('../utils/roles');
 const { normalizeEmail } = require('../utils/email');
@@ -624,6 +625,10 @@ router.post('/:id/toggle-attendance', authenticate, requireAdminOrPermission('ma
 
     await client.query('COMMIT');
     console.log(`[Attendance] ✅ "${agent.email}" absent — redistributed ${redistributed} orders`);
+    /* Her DUE «مؤجل» callbacks go to present agents too (non-blocking). */
+    postponedCallbacks.rebalanceDue(businessId)
+      .then((r) => { if (r.moved) console.log(`[Attendance] 📞 moved ${r.moved} due callback(s) off absent agents`); })
+      .catch((e) => console.error('[Attendance] callback rebalance failed:', e.message));
     res.json({ user: updatedUser, redistributed, presentAgentsCount: presentAgents.length });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

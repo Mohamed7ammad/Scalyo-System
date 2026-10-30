@@ -28,6 +28,7 @@ export interface Order {
   quantity?: number;            // number of units in the order (DB column, default 1)
   AssignedTo?: string;
   PostponedDate?: string;
+  postpone_count?: number;     // how many times it was postponed (max 2 for agents)
   BostaTrackingCode?: string;   // set after successful Bosta shipment
   shipped_at?: string | null;   // exact ISO timestamp the order first reached 'تم الشحن'
   rejectionReason?: string;     // set when Status is 'تم الرفض'
@@ -2082,6 +2083,8 @@ export interface DisciplineState {
   idle_minutes?:         number;          // idle on the Team Leader board (20)
   new_orders?:           number;          // workable 'جديد' orders right now
   current_window?:       { start: string; end: string } | null;   // the work window she's in now
+  postponed_due?:        number;   // her «مؤجل» callbacks dated today or earlier
+  postponed_overdue?:    number;   // …of which before today (they turn «لا يرد» tonight)
   work_windows?:         { start: string; end: string }[];       // idle tracking only runs inside these
   break?:                DisciplineBreak;
   server_time?:          string;
@@ -2125,6 +2128,8 @@ export interface DisciplineBoardAgent {
   idle_paused_reason:   string | null;    // 'no_new_orders' | 'outside_window'
   new_orders:           number;           // workable 'جديد' orders right now
   still_here_today:     number;
+  postponed_due:        number;   // «مؤجل» callbacks dated today or earlier
+  postponed_overdue:    number;
   checkpoints:          DisciplineBoardCheckpoint[];
   break:                { sessions_used: number; used_minutes: number; active_until: string | null };
 }

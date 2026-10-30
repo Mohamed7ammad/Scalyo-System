@@ -6,6 +6,7 @@ const { agentAllowsProduct, assignProductAware } = require('../utils/productRout
 const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
 const { hasRole } = require('../utils/roles');
 const noAnswer = require('../services/noAnswerCycles');   // «لا يرد» cycles: schema/trigger + terminal guard
+const postponed = require('../services/postponedCallbacks');   // «مؤجل» limits / rebalance / expiry
 
 /* Treasury ledger sources that make up an agent's earned commission for an order.
    (bosta_cod / deposit are revenue/cash, NOT commission — excluded.) */
@@ -323,8 +324,10 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_resend BOOLEAN NOT NU
      search    — FullName / Phone / BostaTrackingCode containment, plus exact
                  id match when the term is a number that fits INTEGER
      dates     — inclusive "createdAt" day range                              */
-/* Reconfirm window: postponed orders whose follow-up date falls within the
-   next 3 days (inclusive). "PostponedDate" is a VARCHAR column on the live
+/* Due callbacks: postponed orders whose follow-up date is TODAY OR EARLIER
+   (Cairo date). It used to be "today … +3 days", so a callback dropped out of
+   the tab the day after its date — exactly when it became overdue (2026-10-30:
+   239 of 262 «مؤجل» were overdue and invisible). "PostponedDate" is a VARCHAR column on the live
    schema (NOT a date) — comparing it directly against CURRENT_DATE throws
    `operator does not exist: character varying >= date` (42883). The CASE
    guard is load-bearing twice over:
@@ -337,8 +340,7 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_resend BOOLEAN NOT NU
 const RECONFIRM_PREDICATE = `
   "Status" = 'مؤجل'
   AND CASE WHEN "PostponedDate"::text ~ '^\\d{4}-\\d{2}-\\d{2}'
-           THEN left("PostponedDate"::text, 10)::date
-                BETWEEN CURRENT_DATE AND CURRENT_DATE + 3
+           THEN left("PostponedDate"::text, 10)::date <= (NOW() AT TIME ZONE 'Africa/Cairo')::date
            ELSE false
       END`;
 
@@ -1715,10 +1717,13 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
   let currentAssignedTo   = null;   // for the inline-reassignment guard + audit log
   let currentCity         = '';     // for lost-order governorate repricing
   let currentIsLost       = false;  // dynamic shipping pricing applies to lost orders ONLY
+  let currentPostponedDate = null;  // «مؤجل» rules (date limits, postponement counter)
+  let currentPostponeCount = 0;
 
   try {
     const row = await pool.query(
       `SELECT "Status", "ProductName", "sku", "ProductPrice", "AssignedTo", "City",
+              "PostponedDate", COALESCE(postpone_count, 0) AS postpone_count,
               COALESCE("quantity", 1) AS quantity,
               COALESCE("stock_deducted", false) AS stock_deducted,
               COALESCE(is_lost_order, false) AS is_lost_order
@@ -1738,6 +1743,8 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     currentAssignedTo   = row.rows[0].AssignedTo ?? null;
     currentCity         = row.rows[0].City ?? '';
     currentIsLost       = row.rows[0].is_lost_order === true;
+    currentPostponedDate = row.rows[0].PostponedDate ?? null;
+    currentPostponeCount = Number(row.rows[0].postpone_count) || 0;
   } catch (err) {
     console.error('Step 1 – fetch order failed:', err.message);
     return res.status(500).json({ error: 'خطأ في الخادم' });
@@ -1753,6 +1760,17 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
       nextStatus: Object.prototype.hasOwnProperty.call(updates, 'Status') ? updates.Status : undefined,
     });
     if (blocked) return res.status(403).json({ error: blocked });
+  }
+
+  /* ── «مؤجل» rules ─────────────────────────────────────────────────────────────
+     A callback date is required, today … +7 days, and an order can be
+     postponed at most twice (admins / Team Leaders may override); each real
+     postponement is counted (see services/postponedCallbacks.js). */
+  {
+    const r = postponed.checkPatch(req.user,
+      { currentStatus, currentPostponedDate, currentPostponeCount }, updates);
+    if (r.error) return res.status(r.status).json({ error: r.error });
+    if (r.postpone_count != null) updates.postpone_count = r.postpone_count;
   }
 
   /* ── Inline reassignment guard ──────────────────────────────────────────────

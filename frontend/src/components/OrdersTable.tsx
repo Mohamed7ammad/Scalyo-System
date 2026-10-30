@@ -49,6 +49,19 @@ const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
    a plain "2026-06-02" passes through unchanged. */
 const toDateInput = (v?: string | null) => (v ? String(v).slice(0, 10) : '');
 
+/* «مؤجل» callback dates are compared as Cairo calendar days. Agents may book a
+   callback at most POSTPONE_MAX_DAYS ahead (the server enforces it too; admins
+   and Team Leaders — canReassign — may go further). */
+const POSTPONE_MAX_DAYS = 7;
+const cairoYmd = (t: number = Date.now()) => CAIRO_YMD.format(new Date(t));
+const addDaysYmd = (ymd: string, n: number) => {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const daysBetween = (fromYmd: string, toYmd: string) =>
+  Math.round((Date.parse(`${toYmd}T00:00:00Z`) - Date.parse(`${fromYmd}T00:00:00Z`)) / 86_400_000);
+
 /* ── New-order cooldown ─────────────────────────────────────────────────────
    The confirmation team must NOT call a customer in the first 15 minutes after
    they place an order. A 'جديد' order younger than this is in cooldown: its
@@ -1158,6 +1171,7 @@ function OrdersTable({
                   type="date"
                   dir="ltr"
                   value={toDateInput(editForm.PostponedDate)}
+                  max={canReassign ? undefined : addDaysYmd(cairoYmd(), POSTPONE_MAX_DAYS)}
                   onChange={(e) => setEditForm((p) => ({ ...p, PostponedDate: e.target.value }))}
                   className="w-full px-3 py-2 rounded-xl text-sm outline-none
                     border border-amber-300 dark:border-amber-700/50
@@ -1387,6 +1401,7 @@ function OrdersTable({
               </h2>
               <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
                 اختر التاريخ الذي طلب العميل التواصل فيه
+                {!canReassign && <> — حتى {POSTPONE_MAX_DAYS} أيام، ومرتين بحد أقصى للأوردر</>}
               </p>
             </div>
           </div>
@@ -1398,7 +1413,8 @@ function OrdersTable({
             type="date"
             dir="ltr"
             value={pendingPostpone.date}
-            min={new Date().toISOString().slice(0, 10)}
+            min={cairoYmd()}
+            max={canReassign ? undefined : addDaysYmd(cairoYmd(), POSTPONE_MAX_DAYS)}
             onChange={(e) => setPendingPostpone((p) => p ? { ...p, date: e.target.value } : null)}
             className="w-full px-3 py-2.5 rounded-xl text-sm outline-none mb-5
               border border-amber-300 dark:border-amber-700/50
@@ -1921,13 +1937,18 @@ const OrderRow = memo(function OrderRow({
           </div>
         )}
 
-        {normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate) && (
+        {normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate) && (() => {
+          /* Overdue = red (it turns «لا يرد» the night after its date), today = amber, later = grey. */
+          const late = daysBetween(toDateInput(order.PostponedDate), cairoYmd(now));
+          const tone = late > 0
+            ? 'text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-800/50'
+            : late === 0
+              ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-800/40'
+              : 'text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700';
+          return (
           <div
-            title="تاريخ المتابعة"
-            className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs
-              text-amber-700 dark:text-amber-300
-              bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40
-              rounded-md mx-auto leading-snug"
+            title={late > 0 ? `مكالمة متأخرة ${late} يوم — تتحول «لا يرد» الليلة لو متعملتش` : late === 0 ? 'مكالمة مستحقة اليوم' : 'تاريخ المتابعة'}
+            className={`mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs border rounded-md mx-auto leading-snug ${tone}`}
             dir="ltr"
           >
             <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1935,8 +1956,11 @@ const OrderRow = memo(function OrderRow({
                 d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
             {toDateInput(order.PostponedDate)}
+            {late > 0 && <span dir="rtl" className="font-bold">· متأخر {late} يوم</span>}
+            {late === 0 && <span dir="rtl" className="font-bold">· اليوم</span>}
           </div>
-        )}
+          );
+        })()}
 
         {normStatus(order.Status) === 'لا يرد' && (() => {
           const logs  = attemptLogs ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);

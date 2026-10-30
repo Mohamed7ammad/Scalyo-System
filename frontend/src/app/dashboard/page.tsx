@@ -54,7 +54,10 @@ const RETURNS_AUDIT_STATUSES = ['جاري الإعادة', 'تم الإرجاع'
    3 days". Hoisted to module scope because both the server-query builder and
    the filter chain need it. Maps to `reconfirm=true` on the API (not a real
    "Status" value). */
-const RECONFIRM_FILTER = 'مؤجلات تستحق التأكيد';
+/* «مؤجل» callbacks due now: dated TODAY OR EARLIER (Cairo). It used to be
+   "today … +3", so a missed callback vanished the day after its date. */
+const RECONFIRM_FILTER = 'مكالمات مؤجلة مستحقة';
+const CAIRO_YMD = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit' });
 
 /* Virtual tab for orders the returns team sent back (is_resend). Maps to
    `resend=true` on the API — not a Status value, so it spans every status
@@ -424,6 +427,7 @@ export default function DashboardPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('filter') === 'returns_audit') setActiveFilter(RETURNS_AUDIT_FILTER);
+    if (params.get('filter') === 'reconfirm') setActiveFilter(RECONFIRM_FILTER);   // agent strip «📞» link
     const agentParam = params.get('agent');
     if (agentParam) setActiveAgent(agentParam);
   }, []);
@@ -1163,17 +1167,10 @@ export default function DashboardPage() {
   };
   const dateScoped = productFiltered.filter(isInDateRange);
 
-  // 3a. Helper — true when a postponed order needs re-confirmation within 3 days
+  // 3a. Helper — a postponed order whose callback date is today or overdue (Cairo)
   const needsReconfirmation = (o: Order): boolean => {
-    if (o.Status !== 'مؤجل' || !o.PostponedDate) return false;
-    const todayMidnight = new Date();
-    todayMidnight.setHours(0, 0, 0, 0);
-    const postponed = new Date(o.PostponedDate);
-    postponed.setHours(0, 0, 0, 0);
-    const diffDays = Math.floor(
-      (postponed.getTime() - todayMidnight.getTime()) / (1000 * 60 * 60 * 24)
-    );
-    return diffDays >= 0 && diffDays <= 3;
+    if (normStatus(o.Status) !== 'مؤجل' || !o.PostponedDate) return false;
+    return String(o.PostponedDate).slice(0, 10) <= CAIRO_YMD.format(new Date());
   };
 
   // Badge count — scoped to current agent + product selection. Server value is
@@ -3146,7 +3143,7 @@ export default function DashboardPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
                 d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 10-12 0v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
             </svg>
-            مؤجلات تستحق التأكيد
+            مكالمات مؤجلة مستحقة
             {/* Badge counter */}
             <span
               className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full

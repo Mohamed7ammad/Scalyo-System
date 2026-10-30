@@ -264,6 +264,16 @@ export default function DisciplinePanel() {
               تسجيل الحضور
             </button>
           )}
+          {(state.postponed_due ?? 0) > 0 && (
+            <a href="/dashboard?filter=reconfirm"
+              title={`مكالمات مؤجلة مستحقة: ${state.postponed_due}${state.postponed_overdue ? ` — منها ${state.postponed_overdue} متأخرة تتحول «لا يرد» الليلة` : ''}`}
+              className={`shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold
+                ${state.postponed_overdue
+                  ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 animate-pulse'
+                  : 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+              📞 {state.postponed_due} <span className="hidden sm:inline">مكالمات مؤجلة</span>
+            </a>
+          )}
           {brk && status !== 'withdrawn' && state.scheduled_today && (
             <span title="رصيد الاستراحة" className="shrink-0 hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-sky-50 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300">
               ☕ {brk.remaining_minutes}د · {brk.sessions_left}/{brk.max_sessions}
@@ -304,7 +314,7 @@ export default function DisciplinePanel() {
                   ? `⏸️ عداد عدم النشاط متوقف — لا توجد أوردرات ${state.track === 'review' ? '«مراجعة جديدة»' : '«جديد»'} عليكِ الآن`
                   : state.idle_paused_reason === 'outside_window'
                     ? `⏸️ خارج فترات العمل — عداد عدم النشاط يعمل فقط في: ${(state.work_windows ?? []).map((w) => `${w.start}–${w.end}`).join(' · ')}`
-                    : `عداد عدم النشاط يعمل (فترة ${state.current_window?.start ?? ''}–${state.current_window?.end ?? ''} · ${state.new_orders ?? 0} ${state.track === 'review' ? 'مراجعة جديدة' : 'أوردر جديد'}) — التنبيه بعد ${state.idle_warning_minutes ?? 18} دقيقة بدون إجراء`}
+                    : `عداد عدم النشاط يعمل (فترة ${state.current_window?.start ?? ''}–${state.current_window?.end ?? ''} · ${state.new_orders ?? 0} ${state.track === 'review' ? 'مراجعة جديدة' : 'أوردر'} مستحق) — التنبيه بعد ${state.idle_warning_minutes ?? 18} دقيقة بدون إجراء`}
               </p>
             )}
             {brk && status !== 'withdrawn' && (

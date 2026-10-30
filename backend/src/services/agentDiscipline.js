@@ -531,13 +531,16 @@ async function seedToday({ userId = null, db = pool, workDate = null } = {}) {
    counts against her.
    Returns Map(userId → { new_total, workable, within_window, window_start_local,
    window_end_local, idle_seconds (null when paused), idle_since, paused_reason }). */
+/* «مؤجل» callback date (VARCHAR on the live schema), as a date. */
+const PD_SQL = `(CASE WHEN o."PostponedDate"::text ~ '^\\d{4}-\\d{2}-\\d{2}' THEN left(o."PostponedDate"::text, 10)::date END)`;
+
 async function idleFacts(businessId, userId = null, db = pool) {
   const params = [businessId];
   let userFilter = '';
   if (userId != null) { params.push(String(userId)); userFilter = 'AND u.id = $2'; }
   const lock = `make_interval(mins => ${NEW_ORDER_LOCK_MINUTES})`;
   const { rows } = await db.query(
-    `SELECT u.id, w.new_total, w.workable,
+    `SELECT u.id, w.new_total, w.workable, w.postponed_due, w.postponed_overdue,
             (s.win_start IS NOT NULL) AS within_window,
             to_char(s.win_start AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS window_start_local,
             to_char(s.win_end   AT TIME ZONE 'Africa/Cairo', 'HH24:MI') AS window_end_local,
@@ -551,17 +554,24 @@ async function idleFacts(businessId, userId = null, db = pool) {
             once, from the moment it landed). 'both' covers the two. */
          SELECT COUNT(*)::int AS new_total,
                 COUNT(*) FILTER (WHERE q.ready)::int AS workable,
-                MIN(q.avail) FILTER (WHERE q.ready) AS work_since
+                MIN(q.avail) FILTER (WHERE q.ready) AS work_since,
+                COUNT(*) FILTER (WHERE q.pd IS NOT NULL)::int AS postponed_due,
+                COUNT(*) FILTER (WHERE q.pd < ${CAIRO_TODAY})::int AS postponed_overdue
            FROM (SELECT CASE WHEN btrim(o."Status") = 'جديد' THEN o."createdAt" + ${lock} <= NOW() ELSE TRUE END AS ready,
                         CASE WHEN btrim(o."Status") = 'جديد'
                              THEN GREATEST(COALESCE(o.assigned_at, o."createdAt"), o."createdAt" + ${lock})
-                             ELSE COALESCE(o."updatedAt", o.assigned_at) END AS avail
+                             WHEN btrim(o."Status") = 'مؤجل'
+                             THEN (${PD_SQL} + TIME '00:00') AT TIME ZONE 'Africa/Cairo'
+                             ELSE COALESCE(o."updatedAt", o.assigned_at) END AS avail,
+                        CASE WHEN btrim(o."Status") = 'مؤجل' THEN ${PD_SQL} END AS pd
                    FROM orders o
                   WHERE o.business_id = u.business_id AND o."AssignedTo" = u.email AND o.is_lost_order = FALSE
-                    AND btrim(o."Status") = ANY(CASE u.agent_track
+                    AND (btrim(o."Status") = ANY(CASE u.agent_track
                           WHEN 'review' THEN ARRAY['مراجعة جديدة']
                           WHEN 'both'   THEN ARRAY['جديد', 'مراجعة جديدة']
-                          ELSE ARRAY['جديد'] END)) q) w ON TRUE
+                          ELSE ARRAY['جديد'] END)
+                         /* a «مؤجل» callback is work from its date on, for everyone */
+                         OR (btrim(o."Status") = 'مؤجل' AND ${PD_SQL} <= ${CAIRO_TODAY}))) q) w ON TRUE
        LEFT JOIN LATERAL (
          SELECT (${CAIRO_TODAY} + ww.start_time) AT TIME ZONE 'Africa/Cairo' AS win_start,
                 (${CAIRO_TODAY} + ww.end_time)   AT TIME ZONE 'Africa/Cairo' AS win_end
@@ -582,6 +592,7 @@ async function idleFacts(businessId, userId = null, db = pool) {
     const paused_reason = !r.within_window ? 'outside_window' : r.workable === 0 ? 'no_new_orders' : null;
     out.set(String(r.id), {
       new_total: r.new_total, workable: r.workable, within_window: r.within_window,
+      postponed_due: r.postponed_due ?? 0, postponed_overdue: r.postponed_overdue ?? 0,
       window_start_local: r.window_start_local, window_end_local: r.window_end_local,
       idle_seconds: paused_reason ? null : Math.max(0, r.raw_idle_seconds ?? 0),
       /* When the current idle stretch began — a stable id for "this idle episode". */
@@ -661,6 +672,8 @@ async function getAgentState(userId, businessId, db = pool) {
     idle_warning_minutes: IDLE_WARNING_MINUTES,
     idle_minutes:         IDLE_MINUTES,
     new_orders:           idle?.workable ?? 0,
+    postponed_due:        idle?.postponed_due ?? 0,       // «مؤجل» dated today or earlier
+    postponed_overdue:    idle?.postponed_overdue ?? 0,   // …of which before today (expire tonight)
     current_window:       idle?.within_window ? { start: idle.window_start_local, end: idle.window_end_local } : null,
     work_windows:         await listWorkWindows(businessId, db, 'today'),
     break: {
@@ -1168,6 +1181,8 @@ async function liveBoard(businessId) {
         idle_seconds:       idleBy.get(String(a.id))?.idle_seconds ?? null,      // null = paused
         idle_paused_reason: idleBy.get(String(a.id))?.paused_reason ?? null,
         new_orders:         idleBy.get(String(a.id))?.workable ?? 0,
+        postponed_due:      idleBy.get(String(a.id))?.postponed_due ?? 0,
+        postponed_overdue:  idleBy.get(String(a.id))?.postponed_overdue ?? 0,
         still_here_today: pingBy.get(String(a.id)) ?? 0,
         checkpoints: a.daily_log_id
           ? (cpByLog.get(a.daily_log_id) ?? []).sort((x, y) => new Date(x.due_at) - new Date(y.due_at))

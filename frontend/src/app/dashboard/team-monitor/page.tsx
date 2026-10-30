@@ -236,6 +236,9 @@ export default function TeamMonitorPage() {
                     : <>{a.track === 'review' ? 'مراجعة جديدة' : 'جديد'}: <b>{a.new_orders}</b> · خمول <b className={tone === 'orange' ? 'text-orange-600 dark:text-orange-400' : ''}>{Math.floor((idle ?? 0) / 60)} د</b></>}
                 </span>
                 <span>تأكيد التواجد: <b>{a.still_here_today}</b></span>
+                <span className={a.postponed_overdue ? 'text-red-600 dark:text-red-400 font-semibold' : ''}>
+                  📞 مؤجلة مستحقة: <b>{a.postponed_due ?? 0}</b>{a.postponed_overdue ? <> (متأخرة {a.postponed_overdue})</> : null}
+                </span>
                 <span>استراحة: <b>{a.break.used_minutes}</b>/30 د · <b>{a.break.sessions_used}</b>/2</span>
                 {a.break.active_until && <span className="text-sky-700 dark:text-sky-300">حتى {hm(a.break.active_until)}</span>}
               </div>
