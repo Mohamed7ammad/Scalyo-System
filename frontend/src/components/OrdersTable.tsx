@@ -62,6 +62,10 @@ const addDaysYmd = (ymd: string, n: number) => {
 const daysBetween = (fromYmd: string, toYmd: string) =>
   Math.round((Date.parse(`${toYmd}T00:00:00Z`) - Date.parse(`${fromYmd}T00:00:00Z`)) / 86_400_000);
 
+/* Queue lock: while the agent holds a callback whose date has passed, these
+   rows are read-only for her (the server refuses with 409 OVERDUE_CALLBACKS). */
+const QUEUE_LOCK_STATUSES = new Set(['جديد', 'مراجعة جديدة', 'لا يرد']);
+
 /* ── New-order cooldown ─────────────────────────────────────────────────────
    The confirmation team must NOT call a customer in the first 15 minutes after
    they place an order. A 'جديد' order younger than this is in cooldown: its
@@ -227,6 +231,10 @@ interface Props {
        • canDelete   → the full edit modal + hard-delete row action (admin only). */
   canReassign?:     boolean;
   canDelete?:       boolean;
+  /* Queue lock (agents): a callback whose date has passed must be handled first —
+     «جديد» / «مراجعة جديدة» / «لا يرد» rows show a lock instead of the status
+     control and the attempt logger is disabled. */
+  queueLocked?:     boolean;
   /* Inline total-price edit (admin + team-leader). Defaults to role==='admin' so
      existing call-sites are unchanged; pass true to also grant a supervisor. */
   canEditPrice?:    boolean;
@@ -268,6 +276,7 @@ function OrdersTable({
   orders, role,
   canReassign = role === 'admin',
   canDelete   = role === 'admin',
+  queueLocked = false,
   canEditPrice     = role === 'admin',
   canEditFullOrder = role === 'admin',
   exactOrderTime   = false,
@@ -346,8 +355,9 @@ function OrdersTable({
       } else {
         setAttemptMsg(`تم تسجيل المحاولة (${data.count}) — العمولة مُحتسبة بالفعل`);
       }
-    } catch {
-      setAttemptMsg('تعذّر تسجيل المحاولة، حاول مرة أخرى');
+    } catch (err: unknown) {
+      setAttemptMsg((err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        || 'تعذّر تسجيل المحاولة، حاول مرة أخرى');
     } finally {
       setLoggingAttempt(false);
     }
@@ -368,8 +378,9 @@ function OrdersTable({
       } else {
         onToast?.(`تم تسجيل المحاولة (${data.count}) — العمولة مُحتسبة بالفعل`, 'success');
       }
-    } catch {
-      onToast?.('تعذّر تسجيل المحاولة، حاول مرة أخرى', 'error');
+    } catch (err: unknown) {
+      onToast?.((err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        || 'تعذّر تسجيل المحاولة، حاول مرة أخرى', 'error');
     } finally {
       setInlineLoggingId(null);
     }
@@ -635,6 +646,7 @@ function OrdersTable({
                     rowRef={virtualizer.measureElement}
                     role={role}
                     canReassign={canReassign}
+                    queueLocked={queueLocked}
                     canDelete={canDelete}
                     canEditPrice={canEditPrice}
                     canEditFullOrder={canEditFullOrder}
@@ -851,7 +863,7 @@ function OrdersTable({
               <button
                 type="button"
                 onClick={() => handleLogAttempt(quickEdit.id)}
-                disabled={loggingAttempt}
+                disabled={loggingAttempt || (queueLocked && QUEUE_LOCK_STATUSES.has(normStatus(quickEdit.Status)))}
                 className="w-full inline-flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold
                   bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white
                   disabled:opacity-50 disabled:cursor-not-allowed transition active:scale-[0.98]"
@@ -1584,6 +1596,7 @@ interface OrderRowProps {
   rowRef:               (node: Element | null) => void;
   role:                 'admin' | 'agent';
   canReassign:          boolean;   // row checkbox + inline reassignment dropdown
+  queueLocked:          boolean;   // overdue callback held → queue rows read-only
   canDelete:            boolean;   // full edit modal + hard-delete action (admin)
   canEditPrice:         boolean;   // inline total-price editor (admin + team-leader)
   canEditFullOrder:     boolean;   // "تعديل الطلب" full edit modal (admin + team-leader)
@@ -1621,6 +1634,7 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
     prev.index === next.index &&
     prev.role === next.role &&
     prev.canReassign === next.canReassign &&
+    prev.queueLocked === next.queueLocked &&
     prev.canDelete === next.canDelete &&
     prev.canEditPrice === next.canEditPrice &&
     prev.canEditFullOrder === next.canEditFullOrder &&
@@ -1636,7 +1650,7 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
 }
 
 const OrderRow = memo(function OrderRow({
-  order, index, rowRef, role, canReassign, canDelete, canEditPrice, canEditFullOrder, exactTime, lostMode, now, selected, saving, agents, attemptLogs, inlineLogging,
+  order, index, rowRef, role, canReassign, queueLocked, canDelete, canEditPrice, canEditFullOrder, exactTime, lostMode, now, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onCityChange, onShippingNotesBlur, onInlineAttempt,
   onQuickEdit, onEditModal, onDelete, onPriceChange,
@@ -1670,12 +1684,21 @@ const OrderRow = memo(function OrderRow({
   const elapsedLabel = exactTime
     ? formatOrderTimeArabic(order.createdAt, now)
     : timeAgoArabic(order.createdAt, now);
+  /* Queue lock — an overdue callback is handled before any queue order. */
+  const locked = queueLocked && QUEUE_LOCK_STATUSES.has(normStatus(order.Status));
+  /* Due callbacks stand out wherever they show: overdue red, today amber. */
+  const callbackLate = normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate)
+    ? daysBetween(toDateInput(order.PostponedDate), cairoYmd(now))
+    : null;
+  const callbackTint = callbackLate === null ? ''
+    : callbackLate > 0 ? 'bg-red-50/60 dark:bg-red-950/20'
+    : callbackLate === 0 ? 'bg-amber-50/50 dark:bg-amber-950/20' : '';
 
   return (
     <tr
       ref={rowRef}
       data-index={index}
-      className={`hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${saving ? 'opacity-60 pointer-events-none' : ''}`}
+      className={`hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${callbackTint} ${saving ? 'opacity-60 pointer-events-none' : ''}`}
     >
       {/* Row checkbox — reassign-capable users (admin + team-leaders) */}
       {canReassign && onToggleSelect && (
@@ -1871,6 +1894,19 @@ const OrderRow = memo(function OrderRow({
               {elapsedLabel} · متبقٍ {toArabicNum(remainingMin)} {remainingMin === 2 ? 'دقيقتان' : remainingMin >= 3 && remainingMin <= 10 ? 'دقائق' : 'دقيقة'}
             </span>
           </div>
+        ) : locked ? (
+          /* ── Queue lock — read-only until the overdue callback is handled ── */
+          <div className="flex flex-col items-start gap-1">
+            <span
+              title="عندك مكالمة مؤجلة فات ميعادها — لازم تتعمل الأول"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+                bg-red-50 text-red-700 border border-red-200
+                dark:bg-red-900/30 dark:text-red-300 dark:border-red-800/50 select-none cursor-not-allowed"
+            >
+              <span aria-hidden>🔒</span> {normStatus(order.Status)}
+            </span>
+            <span className="text-[10px] text-red-600 dark:text-red-400/80 leading-tight">المؤجلات المتأخرة الأول</span>
+          </div>
         ) : inlineStatusOptions(order.Status).includes(normStatus(order.Status)) ? (
           <>
             <select
@@ -1937,15 +1973,16 @@ const OrderRow = memo(function OrderRow({
           </div>
         )}
 
-        {normStatus(order.Status) === 'مؤجل' && toDateInput(order.PostponedDate) && (() => {
+        {callbackLate !== null && (() => {
           /* Overdue = red (it turns «لا يرد» the night after its date), today = amber, later = grey. */
-          const late = daysBetween(toDateInput(order.PostponedDate), cairoYmd(now));
+          const late = callbackLate;
           const tone = late > 0
             ? 'text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-800/50'
             : late === 0
               ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-800/40'
               : 'text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700';
           return (
+          <>
           <div
             title={late > 0 ? `مكالمة متأخرة ${late} يوم — تتحول «لا يرد» الليلة لو متعملتش` : late === 0 ? 'مكالمة مستحقة اليوم' : 'تاريخ المتابعة'}
             className={`mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs border rounded-md mx-auto leading-snug ${tone}`}
@@ -1959,6 +1996,16 @@ const OrderRow = memo(function OrderRow({
             {late > 0 && <span dir="rtl" className="font-bold">· متأخر {late} يوم</span>}
             {late === 0 && <span dir="rtl" className="font-bold">· اليوم</span>}
           </div>
+          {/* Brought back to its current date by the backlog cleanup — the date it had missed. */}
+          {order.postponed_overdue_since && (
+            <div
+              title="فات ميعادها الأصلي ورجعت لميعاد جديد — آخر فرصة قبل ما تتحول «لا يرد»"
+              className="mt-1 text-[10px] font-semibold text-red-600 dark:text-red-400 leading-tight"
+            >
+              كانت متأخرة منذ {CAIRO_DAY_MONTH.format(new Date(`${order.postponed_overdue_since}T12:00:00Z`))}
+            </div>
+          )}
+          </>
           );
         })()}
 
@@ -1971,8 +2018,9 @@ const OrderRow = memo(function OrderRow({
             <button
               type="button"
               onClick={() => onInlineAttempt(order.id)}
-              disabled={inlineLogging}
-              title={prior > 0 ? `تسجيل محاولة اتصال — و${prior} محاولات سابقة لموظف آخر لا تُحتسب لك` : 'تسجيل محاولة اتصال'}
+              disabled={inlineLogging || locked}
+              title={locked ? 'عندك مكالمة مؤجلة فات ميعادها — لازم تتعمل الأول'
+                : prior > 0 ? `تسجيل محاولة اتصال — و${prior} محاولات سابقة لموظف آخر لا تُحتسب لك` : 'تسجيل محاولة اتصال'}
               className={`mt-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
                 transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
                 ${done

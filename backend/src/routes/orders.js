@@ -315,8 +315,8 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_resend BOOLEAN NOT NU
    Filters:
      agent     — exact "AssignedTo" match (admins only)
      status    — btrim'd "Status" equality (webhook/import rows can carry stray whitespace)
-     reconfirm — postponed orders whose follow-up date is within the next 3 days
-                 (mirrors the frontend's needsReconfirmation window)
+     reconfirm — due callbacks: «مؤجل» dated today or earlier (Cairo) —
+                 mirrors the frontend's needsReconfirmation
      resend    — orders flagged is_resend (sent back by the returns team)
      product   — ILIKE containment on "ProductName": the UI passes the 3-word
                  "short name" (see getShortName in page.tsx), which appears
@@ -553,7 +553,38 @@ router.get('/', authenticate, async (req, res) => {
       ? `${last.createdAt instanceof Date ? last.createdAt.toISOString() : last.createdAt}|${last.id}`
       : null;
 
-    res.json({ orders: rows, nextCursor, hasMore: nextCursor !== null });
+    /* ── Due callbacks pinned above the queue (agents) ─────────────────────────
+       ?pin_due=true on page 1: every due «مؤجل» callback the caller holds in
+       this queue (live / lost) whatever the tab / product / date filters, so
+       the dashboard pins them at the top — plus the queue-lock state (callbacks
+       whose date has passed, both queues). See services/postponedCallbacks.js. */
+    let pinned = null;
+    let callbackGate = null;
+    if (!cursorClause && String(req.query.pin_due).toLowerCase() === 'true'
+        && !canSeeAllOrders(req.user) && !hasRole(req.user, 'moderator')) {
+      const pin = await pool.query(
+        `SELECT ${LIST_COLUMNS}, ${FREQ_COLS}
+           FROM orders o
+           ${FREQ_JOIN}
+          WHERE o.business_id = $1 AND o.is_lost_order = $2 AND o."AssignedTo" = $3
+            AND (${RECONFIRM_PREDICATE})
+          ORDER BY left(o."PostponedDate"::text, 10), o.id
+          LIMIT 500`,
+        [req.user.business_id, String(req.query.lost).toLowerCase() === 'true', req.user.email]
+      );
+      pinned = pin.rows;
+      const exempt = postponed.gateExempt(req.user);
+      callbackGate = {
+        exempt,
+        overdue: exempt ? [] : await postponed.overdueHeld(pool, req.user.business_id, req.user.email),
+      };
+    }
+    await postponed.decorateOverdueSince(pinned ? [...rows, ...pinned] : rows);
+
+    res.json({
+      orders: rows, nextCursor, hasMore: nextCursor !== null,
+      ...(pinned ? { pinned, callbackGate } : {}),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'خطأ في الخادم' });
@@ -1773,6 +1804,20 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
     if (r.postpone_count != null) updates.postpone_count = r.postpone_count;
   }
 
+  /* ── Queue lock ───────────────────────────────────────────────────────────────
+     While she holds a callback whose date has passed, an agent can't change
+     the status of a «جديد» / «مراجعة جديدة» / «لا يرد» order (see
+     postponedCallbacks.gateCheck). Fails open — a lookup error never blocks work. */
+  if (Object.prototype.hasOwnProperty.call(updates, 'Status')
+      && String(updates.Status ?? '').trim() !== String(currentStatus ?? '').trim()) {
+    try {
+      const g = await postponed.gateCheck(req.user, currentStatus);
+      if (g) return res.status(g.status).json({ error: g.error, code: g.code, overdue: g.overdue });
+    } catch (e) {
+      console.error('[PATCH /:id] callback queue-lock check failed (allowed):', e.message);
+    }
+  }
+
   /* ── Inline reassignment guard ──────────────────────────────────────────────
      If this PATCH changes AssignedTo (the inline "الموظف المسؤول" dropdown), a
      NON-admin (team-leader) may NOT move an order that is already committed —
@@ -2213,6 +2258,12 @@ router.post('/:id/no-answer-attempt', authenticate, async (req, res) => {
       if (!cur) return res.status(404).json({ error: 'الطلب غير موجود' });
       const blocked = noAnswer.terminalGuard(req.user, { currentStatus: cur.Status, currentAssignedTo: cur.AssignedTo });
       if (blocked) return res.status(403).json({ error: blocked });
+      /* Queue lock — a callback whose date has passed comes first (fails open). */
+      const g = await postponed.gateCheck(req.user, cur.Status).catch((e) => {
+        console.error('[no-answer-attempt] callback queue-lock check failed (allowed):', e.message);
+        return null;
+      });
+      if (g) return res.status(g.status).json({ error: g.error, code: g.code, overdue: g.overdue });
     }
     /* Append the current timestamp to the JSONB array atomically. */
     const upd = await pool.query(

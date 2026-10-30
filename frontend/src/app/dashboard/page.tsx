@@ -11,7 +11,7 @@ import {
   getBostaFollowUps, saveFollowUpAction,
   bulkImportOrders, BulkImportResult,
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
-  BostaFollowUps, BostaFollowUpOrder, OrderStats,
+  BostaFollowUps, BostaFollowUpOrder, OrderStats, CallbackGate,
   ChatSource, CHAT_SOURCES, CHAT_SOURCE_LABELS,
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
@@ -103,6 +103,29 @@ const getShortName = (name?: string) => {
    and the pill/stat counts so they can never diverge. */
 const normStatus = (s?: string | null) => (s ?? '').normalize('NFC').trim();
 
+/* «مؤجل» callbacks by Cairo calendar day: due = dated today or earlier,
+   overdue = dated before today (it turns «لا يرد» tonight and locks her queue). */
+const callbackDay = (o: Order) =>
+  normStatus(o.Status) === 'مؤجل' && o.PostponedDate ? String(o.PostponedDate).slice(0, 10) : null;
+const isDueCallback = (o: Order) => {
+  const d = callbackDay(o);
+  return d !== null && d <= CAIRO_YMD.format(new Date());
+};
+const isOverdueCallback = (o: Order) => {
+  const d = callbackDay(o);
+  return d !== null && d < CAIRO_YMD.format(new Date());
+};
+/* The agent's working-queue tabs — they open with her due callbacks pinned on top. */
+const PIN_DUE_TABS = new Set(['الكل', 'جديد', 'مراجعة جديدة', 'لا يرد']);
+/* Page rows + the agent's pinned due callbacks (GET /orders ?pin_due), deduped. */
+const withPinned = (page: Order[], pinned?: Order[]) => {
+  if (!pinned?.length) return page;
+  const ids = new Set(page.map((o) => o.id));
+  return [...page, ...pinned.filter((o) => !ids.has(o.id))];
+};
+const callbacksAr = (n: number) => (n === 1 ? 'مكالمة مؤجلة' : n === 2 ? 'مكالمتين مؤجلتين'
+  : n <= 10 ? `${n} مكالمات مؤجلة` : `${n} مكالمة مؤجلة`);
+
 interface Toast { message: string; type: 'success' | 'error' }
 
 const todayStr = () => new Date().toLocaleDateString('en-CA');
@@ -158,6 +181,9 @@ export default function DashboardPage() {
      over the WHOLE tenant scope so the cards are correct and paint immediately,
      without waiting for any order rows to arrive. */
   const [serverStats, setServerStats] = useState<OrderStats | null>(null);
+  /* Queue lock (agents): her callbacks whose date has passed — refreshed with
+     every page-1 fetch / 30 s poll. null for admins / Team Leaders. */
+  const [callbackGate, setCallbackGate] = useState<CallbackGate | null>(null);
   const [inTransit,   setInTransit]   = useState<InTransitSummary | null>(null);
   const [activeAgent,   setActiveAgent]   = useState('كل الفريق');
   const [activeProduct, setActiveProduct] = useState('كل المنتجات');
@@ -299,9 +325,10 @@ export default function DashboardPage() {
     try {
       if (!isSilent) setLoading(true);
       setError('');
-      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE });
+      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE, pinDue: true });
       if (seq !== fetchSeq.current) return;   // superseded by a newer fetch
-      setOrders(res.data.orders);             // REPLACE — restart the scroll chain
+      setOrders(withPinned(res.data.orders, res.data.pinned));   // REPLACE — restart the scroll chain
+      setCallbackGate(res.data.callbackGate ?? null);
       setNextCursor(res.data.nextCursor);
       setHasMore(res.data.hasMore);
     } catch (err: unknown) {
@@ -334,9 +361,17 @@ export default function DashboardPage() {
   const silentRefresh = useCallback(async () => {
     const seq = fetchSeq.current;
     try {
-      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE });
+      const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE, pinDue: true });
       if (seq !== fetchSeq.current) return;   // filters changed mid-flight → stale
-      setOrders((prev) => mergeFirstPage(prev, res.data.orders));
+      const { pinned } = res.data;
+      setOrders((prev) => {
+        /* `pinned` is authoritative for her due callbacks: drop loaded ones it no
+           longer carries (handled elsewhere, moved by the 11:30 rebalance …). */
+        const keep = pinned ? new Set(pinned.map((o) => o.id)) : null;
+        const base = keep ? prev.filter((o) => !isDueCallback(o) || keep.has(o.id)) : prev;
+        return mergeFirstPage(base, withPinned(res.data.orders, pinned));
+      });
+      setCallbackGate(res.data.callbackGate ?? null);
       // Only adopt the fresh cursor when nothing beyond page 1 is loaded —
       // otherwise this would rewind the append chain's progress.
       setNextCursor((prev) => (prev === null ? res.data.nextCursor : prev));
@@ -566,10 +601,12 @@ export default function DashboardPage() {
         const snapshot = prevOrder;
         setOrders((prev) => prev.map((o) => (o.id === id ? snapshot : o)));
       }
-      const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'فشل في الحفظ — تم التراجع';
+      const data = (err as { response?: { data?: { error?: string; code?: string } } })?.response?.data;
+      const msg = data?.error || 'فشل في الحفظ — تم التراجع';
       setTimeout(() => showToast(msg, 'error'), 0);
+      /* Queue lock the page didn't know about yet (e.g. a callback was just
+         moved to her) — pull the pinned callbacks + lock state now. */
+      if (data?.code === 'OVERDUE_CALLBACKS') silentRefresh();
     }
   };
 
@@ -1168,10 +1205,25 @@ export default function DashboardPage() {
   const dateScoped = productFiltered.filter(isInDateRange);
 
   // 3a. Helper — a postponed order whose callback date is today or overdue (Cairo)
-  const needsReconfirmation = (o: Order): boolean => {
-    if (normStatus(o.Status) !== 'مؤجل' || !o.PostponedDate) return false;
-    return String(o.PostponedDate).slice(0, 10) <= CAIRO_YMD.format(new Date());
-  };
+  const needsReconfirmation = isDueCallback;
+
+  /* Due callbacks ride on top of the agent's working queue (owner, 2026-10-30):
+     every due «مؤجل» she holds — whatever the product / date filter — overdue
+     first. Admins / Team Leaders keep the dedicated tab instead. */
+  const pinnedDue: Order[] = user && !canSeeAllOrders && PIN_DUE_TABS.has(activeFilter)
+    ? roleScoped.filter(isDueCallback).sort((a, b) =>
+        (callbackDay(a) ?? '').localeCompare(callbackDay(b) ?? '') || a.id - b.id)
+    : [];
+
+  /* Queue lock — the server's list of her callbacks whose date has passed,
+     minus any she has just handled on this page, so it lifts the moment the
+     last one is done (the server re-checks every status change anyway). */
+  const gateOverdue = (callbackGate && !callbackGate.exempt ? callbackGate.overdue : []).filter((g) => {
+    const o = orders.find((x) => x.id === g.id);
+    return !o || isOverdueCallback(o);
+  });
+  const queueLocked = gateOverdue.length > 0;
+  const gateElsewhere = gateOverdue.filter((g) => g.lost !== lostMode).length;
 
   // Badge count — scoped to current agent + product selection. Server value is
   // exact over the whole history; loaded-rows count is the fallback until the
@@ -1181,8 +1233,8 @@ export default function DashboardPage() {
   const resendCount        = serverStats?.resend ?? 0;
   const resendPendingCount = serverStats?.resendPending ?? 0;
 
-  // 3b. Status + date — final display set
-  const filtered = (() => {
+  // 3b. Status + date — final display set (due callbacks pinned on top, see pinnedDue)
+  const tabRows = (() => {
     if (activeFilter === RECONFIRM_FILTER) {
       // Special path: ignore date range; sort closest postponed date first
       return [...productFiltered.filter(needsReconfirmation)].sort(
@@ -1205,6 +1257,9 @@ export default function DashboardPage() {
       (o) => activeFilter === 'الكل' || normStatus(o.Status) === normStatus(activeFilter)
     );
   })();
+  const filtered: Order[] = pinnedDue.length
+    ? [...pinnedDue, ...tabRows.filter((o) => !pinnedDue.includes(o))]
+    : tabRows;
 
   // 4. Search — final layer; composable on top of every other filter.
   //    MUST accept everything the server's ?search= matches (name, phone,
@@ -3455,6 +3510,49 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* ── Due callbacks: queue lock / pinned notice (agents) ───────── */}
+        {!loading && queueLocked && (
+          <div role="alert" className="rounded-2xl border border-red-300 dark:border-red-800/60
+            bg-red-50 dark:bg-red-950/40 px-4 py-3 text-red-800 dark:text-red-200 shadow-sm">
+            <p className="text-sm font-bold">
+              🔒 الأوردرات مقفولة — عندك {callbacksAr(gateOverdue.length)} فات ميعادها
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-red-700 dark:text-red-300">
+              لازم تتعمل الأول: تأكيد / رفض / لا يرد / ميعاد جديد — وأول ما تخلص الأوردرات تفتح لوحدها.
+              {' '}من غير ما تتعمل، بتتحول «لا يرد» الساعة 11 بالليل.
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {gateOverdue.map((g) => (
+                <span key={g.id} dir="rtl"
+                  className="rounded-full bg-white/80 dark:bg-red-900/40 px-2 py-0.5 text-xs font-semibold tabular-nums
+                    text-red-700 dark:text-red-200 ring-1 ring-red-200 dark:ring-red-800/60">
+                  #{g.id} · {g.date.slice(8, 10)}/{g.date.slice(5, 7)}
+                  {g.lost !== lostMode && (g.lost ? ' · المفقودة' : ' · الرئيسية')}
+                </span>
+              ))}
+              {pinnedDue.length === 0 && activeFilter !== RECONFIRM_FILTER && gateElsewhere < gateOverdue.length && (
+                <button onClick={() => setActiveFilter(RECONFIRM_FILTER)}
+                  className="rounded-full bg-red-600 hover:bg-red-700 px-3 py-0.5 text-xs font-semibold text-white transition">
+                  اعرضها
+                </button>
+              )}
+              {gateElsewhere > 0 && (
+                <a href={lostMode ? '/dashboard?filter=reconfirm' : '/dashboard/lost-orders?filter=reconfirm'}
+                  className="rounded-full bg-red-600 hover:bg-red-700 px-3 py-0.5 text-xs font-semibold text-white transition">
+                  {lostMode ? 'افتح صفحة الأوردرات' : 'افتح الأوردرات المفقودة'}
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+        {!loading && !queueLocked && pinnedDue.length > 0 && (
+          <div className="rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/30
+            px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300">
+            📌 {pinnedDue.length === 1 ? 'أول صف في الجدول مكالمة مؤجلة' : `أول ${pinnedDue.length} صفوف في الجدول مكالمات مؤجلة`} ميعادها النهارده — قبل الأوردرات الجديدة.
+            {' '}لو اتسابت لبكرة، الأوردرات بتتقفل لحد ما تتعمل.
+          </div>
+        )}
+
         {/* ── Table ────────────────────────────────────────────────── */}
         {/* Skeleton rows (not a spinner): the layout paints at its final shape
             immediately, rows fill in when the (independent) fetch resolves. */}
@@ -3484,6 +3582,7 @@ export default function DashboardPage() {
             orders={displayOrders}
             role={user?.role === 'admin' ? 'admin' : 'agent'}
             canReassign={canReassign}
+            queueLocked={queueLocked}
             canDelete={isAdmin}
             canEditPrice={canEditPrice}
             canEditFullOrder={canEditFullOrder}

@@ -22,6 +22,8 @@
      • LIMITS: at most 7 days ahead (≤7 d: 22–24% confirmed; 8–14 d: 10%;
               15+ d: 3%, nothing delivered) and at most 2 postponements per
               order. Admins / Team Leaders may override both.
+     • QUEUE: due callbacks are pinned at the top of the agent's queue; one
+              whose date has passed locks her queue until it's handled.
 
    Every automated change is written to order_auto_actions (there is no status
    history), and moves also to order_assignment_log.                         */
@@ -110,6 +112,69 @@ function checkPatch(user, { currentStatus, currentPostponedDate, currentPostpone
     return { status: 403, error: 'تم تأجيل هذا الأوردر مرتين — لازم قرار نهائي (تأكيد / رفض / لا يرد) أو تأجيل من التيم ليدر' };
   }
   return { postpone_count: count };
+}
+
+/* ── Queue lock (owner, 2026-10-30) ────────────────────────────────────────────
+   Due callbacks are pinned at the top of the agent's queue (GET /orders
+   ?pin_due). One whose date has PASSED — missed yesterday, it turns «لا يرد»
+   tonight — locks her queue: no status change on a «جديد» / «مراجعة جديدة» /
+   «لا يرد» order and no no-answer attempt until it's handled (any outcome, or a
+   new date). Today's due callbacks never lock: the customer may have asked for
+   the evening, and a lock on them would only buy blind «لا يرد». Admins / Team
+   Leaders are exempt. */
+const GATED_STATUSES = ['جديد', 'مراجعة جديدة', NO_ANSWER];
+const gateExempt = (user) => hasAnyRole(user, 'admin', 'supervisor');
+
+/* Callbacks she holds whose date has passed — live and lost queues alike. */
+async function overdueHeld(db, businessId, email) {
+  if (!email) return [];
+  const { rows } = await db.query(
+    `SELECT id, to_char(${pdSql()}, 'YYYY-MM-DD') AS date, COALESCE(is_lost_order, FALSE) AS lost
+       FROM orders
+      WHERE business_id = $1 AND "AssignedTo" = $2 AND btrim("Status") = '${POSTPONED}'
+        AND ${pdSql()} < ${CAIRO_TODAY}
+      ORDER BY 2, id
+      LIMIT 100`, [businessId, email]);
+  return rows;
+}
+
+const callbacksAr = (n) => (n === 1 ? 'مكالمة مؤجلة' : n === 2 ? 'مكالمتين مؤجلتين'
+  : n <= 10 ? `${n} مكالمات مؤجلة` : `${n} مكالمة مؤجلة`);
+
+/* null = go ahead; otherwise { status: 409, code, error, overdue } to refuse
+   touching an order whose current status is `currentStatus`. */
+async function gateCheck(user, currentStatus, db = pool) {
+  if (gateExempt(user)) return null;
+  if (!GATED_STATUSES.includes(String(currentStatus ?? '').trim())) return null;
+  const overdue = await overdueHeld(db, user.business_id, user.email);
+  if (!overdue.length) return null;
+  const ids = overdue.slice(0, 4).map((o) => `#${o.id}`).join('، ') + (overdue.length > 4 ? '…' : '');
+  return {
+    status: 409, code: 'OVERDUE_CALLBACKS', overdue,
+    error: `🔒 عندك ${callbacksAr(overdue.length)} فات ميعادها (${ids}) — لازم تتعمل الأول، وبعدها الأوردرات تفتح`,
+  };
+}
+
+/* «كانت متأخرة منذ …» — on «مؤجل» rows whose current date was set by the
+   backlog cleanup, the callback date they had originally missed. Decorates
+   the rows in place; best-effort (a failure leaves them untagged). */
+async function decorateOverdueSince(rows, db = pool) {
+  const ids = rows.filter((r) => String(r.Status ?? '').trim() === POSTPONED).map((r) => r.id);
+  if (!ids.length) return;
+  try {
+    const { rows: acts } = await db.query(
+      `SELECT DISTINCT ON (order_id) order_id, detail->>'callback_date' AS since, detail->>'new_date' AS new_date
+         FROM order_auto_actions
+        WHERE order_id = ANY($1::int[]) AND action = 'postponed_backlog_redate'
+        ORDER BY order_id, id DESC`, [ids]);
+    const byOrder = new Map(acts.map((a) => [a.order_id, a]));
+    for (const r of rows) {
+      const a = byOrder.get(r.id);
+      if (a?.since && ymdOf(r.PostponedDate) === a.new_date) r.postponed_overdue_since = a.since;
+    }
+  } catch (e) {
+    console.error('[postponed] overdue-since tag failed:', e.message);
+  }
 }
 
 /* ── Rebalance ─────────────────────────────────────────────────────────────────
@@ -267,4 +332,5 @@ async function backlogCleanup({ businessId = 1, apply = false } = {}) {
 module.exports = {
   schemaReady, POSTPONED, MAX_AHEAD_DAYS, MAX_POSTPONES, pdSql, cairoToday,
   checkPatch, rebalanceDue, expireOverdue, backlogCleanup,
+  GATED_STATUSES, gateExempt, overdueHeld, gateCheck, decorateOverdueSince,
 };

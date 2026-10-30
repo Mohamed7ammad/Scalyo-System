@@ -29,6 +29,9 @@ export interface Order {
   AssignedTo?: string;
   PostponedDate?: string;
   postpone_count?: number;     // how many times it was postponed (max 2 for agents)
+  /* «كانت متأخرة منذ …» — the callback date it originally missed, when the
+     backlog cleanup moved it to its current (due) date. Computed by GET /orders. */
+  postponed_overdue_since?: string | null;
   BostaTrackingCode?: string;   // set after successful Bosta shipment
   shipped_at?: string | null;   // exact ISO timestamp the order first reached 'تم الشحن'
   rejectionReason?: string;     // set when Status is 'تم الرفض'
@@ -132,11 +135,23 @@ export interface RegisterPayload {
 export const register = (payload: RegisterPayload) =>
   api.post<{ token: string; user: User }>('/api/auth/register', payload);
 
+/** Queue lock: callbacks the caller holds whose date has passed (live + lost
+ *  queues). While any remain, her «جديد» / «مراجعة جديدة» / «لا يرد» orders
+ *  are locked server-side (409 OVERDUE_CALLBACKS). Admins / Team Leaders: exempt. */
+export interface CallbackGate {
+  exempt:  boolean;
+  overdue: { id: number; date: string; lost: boolean }[];
+}
+
 /** Paginated response shape from GET /api/orders when `limit` is passed. */
 export interface PaginatedOrders {
   orders:     Order[];
   nextCursor: string | null;
   hasMore:    boolean;
+  /* Only with `pinDue` on page 1, for agents (own-queue callers): every due
+     callback she holds in this queue + the queue-lock state. */
+  pinned?:       Order[];
+  callbackGate?: CallbackGate;
 }
 
 /** Server-side filters shared by getOrders and getOrderStats. Every field is
@@ -152,8 +167,9 @@ export interface OrderListQuery {
   product?:   string;   // short product name → ILIKE containment on ProductName
   dateFrom?:  string;   // YYYY-MM-DD inclusive
   dateTo?:    string;   // YYYY-MM-DD inclusive
-  reconfirm?: boolean;  // postponed orders due for re-confirmation within 3 days
+  reconfirm?: boolean;  // due callbacks: «مؤجل» dated today or earlier (Cairo)
   resend?:    boolean;  // orders the returns team sent back (is_resend)
+  pinDue?:    boolean;  // page 1 also returns `pinned` + `callbackGate` (agents only)
 }
 
 /** Fetch a page of the tenant's orders (keyset pagination + server-side
@@ -181,6 +197,7 @@ export const getOrders = (q: OrderListQuery) =>
       ...(q.dateTo    ? { dateTo: q.dateTo }     : {}),
       ...(q.reconfirm ? { reconfirm: true }      : {}),
       ...(q.resend    ? { resend: true }         : {}),
+      ...(q.pinDue    ? { pin_due: true }        : {}),
     },
   }).then((res) => {
     if (Array.isArray(res.data)) {
