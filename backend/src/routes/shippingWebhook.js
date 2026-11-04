@@ -3,6 +3,7 @@
 const express = require('express');
 const pool    = require('../config/db');
 const { captureActualShippingFee } = require('../services/bostaShippingFee');
+const returnPickups = require('../services/returnPickups');
 
 const router = express.Router();
 
@@ -605,11 +606,30 @@ router.post('/bosta', async (req, res) => {
     );
 
     if (!rows.length) {
-      /* Bosta already received 200 — just log and exit cleanly.           */
-      console.warn(
-        `[Bosta Webhook] ⚠️  No order found for tracking code "${trackingNumber}" — ` +
-        `event acknowledged (200) but no DB action taken.`
-      );
+      /* A post-delivery return travels on its OWN Bosta delivery (Customer
+         Return Pickup / Exchange, created in Bosta's dashboard) whose tracking
+         number is on no order. services/returnPickups.js records it, links it
+         to the customer's delivered order and restocks once it's received. */
+      let handled = false;
+      try {
+        handled = await returnPickups.handleUnmatchedWebhook({
+          trackingNumber,
+          type:      req.body?.type,
+          stateCode,
+          received:  FINAL_RETURN_STATUSES.has(canonical),
+          payload:   req.body,
+          incomingSecret: req.headers['x-bosta-signature'] ?? req.headers['x-webhook-secret'] ?? null,
+        });
+      } catch (pickupErr) {
+        console.error(`[Bosta Webhook] return-pickup handling failed for "${trackingNumber}":`, pickupErr.message);
+      }
+      if (!handled) {
+        /* Bosta already received 200 — just log and exit cleanly.         */
+        console.warn(
+          `[Bosta Webhook] ⚠️  No order found for tracking code "${trackingNumber}" — ` +
+          `event acknowledged (200) but no DB action taken.`
+        );
+      }
       return;
     }
 

@@ -873,6 +873,10 @@ export interface DashboardOverviewStats {
   total_pending:   number;
   /** Sum of ProductPrice for delivered orders. */
   total_revenue:   number;
+  /** Money paid back after delivery on these orders (placement-day cohort). */
+  total_refunds?:  number;
+  /** Delivered orders in the window with at least one refund. */
+  refunded_orders?: number;
   /** Logistics pipeline (LIVE snapshot, not date-bound): forward-moving orders
    *  physically in Bosta toward the customer (Status = 'تم الشحن'). */
   in_transit_count?: number;
@@ -907,6 +911,8 @@ export interface DailyChartStat {
   delivered:  number;
   /** Sum of ProductPrice for delivered orders on this day. */
   revenue:    number;
+  /** Refunds paid after delivery on this day's orders (whenever paid). */
+  refunds?:   number;
   /** Sum of Meta expense rows for this date. */
   ads_spend:  number;
 }
@@ -1058,9 +1064,19 @@ export interface ProductProfitability {
   attributed_ad_spend: number;
   /** cost_price × units_delivered */
   cogs:                number;
+  /** Cost of units that came back to the shelf after delivery (already
+   *  subtracted from `cogs`). */
+  cogs_recovered?:     number;
+  /** Money paid back to customers after delivery (on the orders' own day). */
+  refunds?:            number;
+  /** Delivered orders of this product with at least one refund. */
+  refunded_orders?:    number;
   /** Exact per-AWB Bosta shipping (Σ orders.actual_shipping_fee) for delivered
-   *  orders — the real shipping cost folded into this product's margin. */
+   *  orders — the real shipping cost folded into this product's margin.
+   *  Includes return pickups / exchanges (return_shipping_cost). */
   shipping_cost?:      number;
+  /** Of shipping_cost: Bosta pickup / exchange fees net of COD collected. */
+  return_shipping_cost?: number;
   /** Path A+ OPEX allocated to this product (exact commission + shared OPEX split
    *  by delivered-order count) — folded into net_profit, mirroring the dashboard. */
   opex_allocated?:     number;
@@ -1068,7 +1084,7 @@ export interface ProductProfitability {
   actual_cpp?:         number;
   /** Affiliate only: MAX CPP (break-even) = avg commission × CR × DR. */
   max_cpp?:            number;
-  /** delivered_revenue − cogs − attributed_ad_spend − shipping_cost − opex_allocated.
+  /** delivered_revenue − refunds − cogs − attributed_ad_spend − shipping_cost − opex_allocated.
    *  Matches the top KPI Net Profit card for the same product/date range. */
   net_profit:          number;
   /** Affiliate only: Σ commission of confirmed-not-delivered orders (in-pipeline). */
@@ -1598,8 +1614,16 @@ export interface ReclassifySuggestion {
   suggested_period_month: string;   // YYYY-MM
   reason:                 string;
 }
+/** A past manual expense that is really a customer refund — link it to its order. */
+export interface RefundCandidate {
+  id:               number;
+  amount:           number;
+  source:           string;
+  description:      string | null;
+  transaction_date: string;
+}
 export const getReclassifySuggestions = () =>
-  api.get<{ suggestions: ReclassifySuggestion[] }>('/api/treasury/reclassify-suggestions');
+  api.get<{ suggestions: ReclassifySuggestion[]; refund_candidates?: RefundCandidate[] }>('/api/treasury/reclassify-suggestions');
 /** All-or-nothing: a 400 carries `problems` and changes nothing. */
 export const applyReclassification = (items: { id: number; source: string; period_month?: string | null }[]) =>
   api.post<{ updated: number }>('/api/treasury/reclassify', { items });
@@ -1634,6 +1658,100 @@ export interface MonthlyStatement {
 }
 export const getMonthlyStatement = (month?: string) =>
   api.get<MonthlyStatement>('/api/monthly-statement', { params: month ? { month } : {} });
+
+/* ── Post-delivery refunds («رد فلوس مرتجع») — finance only ─────────────── */
+export interface RefundOrder {
+  id:             number;
+  customer:       string | null;
+  phone:          string | null;
+  status:         string;
+  product:        string | null;
+  quantity:       number;
+  price:          number;
+  deposit:        number;
+  tracking:       string | null;
+  placed_on:      string;          // YYYY-MM-DD (Cairo) — the day the refund lands on
+  delivered_on:   string | null;
+  refunded_total: number;
+  refunds_count:  number;
+  refundable:     boolean;         // delivered
+}
+export interface CreateRefundPayload {
+  order_id:        number;
+  amount?:         number;         // omitted when linking an existing row
+  refunded_on?:    string;         // YYYY-MM-DD
+  note?:           string;
+  request_id?:     number;         // after-sales «استرجاع» request
+  treasury_tx_id?: number;         // link an EXISTING manual expense row instead of a new one
+}
+export interface RefundResult {
+  refund: { id: number; order_id: number; refund_amount: number; refunded_on: string; treasury_tx_id: number; converted_from_source: string | null };
+  order:  { id: number; product: string | null; placed_on: string };
+}
+export const searchRefundOrders = (q: string) =>
+  api.get<{ orders: RefundOrder[] }>('/api/refunds/order-search', { params: { q } });
+export const createRefund = (data: CreateRefundPayload) =>
+  api.post<RefundResult>('/api/refunds', data);
+/** Undo a refund, addressed by its treasury row. */
+export const undoRefundByTreasury = (txId: number) =>
+  api.delete<{ id: number; treasury_tx_id: number; restored_source: string | null }>(`/api/refunds/by-treasury/${txId}`);
+
+/* ── Bosta pickups / exchanges received back (physical restock) ──────────── */
+export interface PickupCandidate {
+  id: number; product: string | null; quantity: number; placed_on: string; customer: string | null;
+}
+export interface ReturnPickup {
+  id:              number;
+  tracking_number: string;
+  kind:            'pickup' | 'exchange';
+  state_code:      number | null;
+  received_at:     string | null;
+  customer_phone:  string | null;
+  customer_name:   string | null;
+  return_desc:     string | null;
+  return_qty:      number;
+  forward_desc:    string | null;
+  forward_qty:     number;
+  pickup_fee:      number | null;
+  collected_cod:   number;
+  order_id:        number | null;
+  link_method:     'auto' | 'manual' | null;
+  linked_by:       string | null;
+  restocked_at:    string | null;
+  ignored_at:      string | null;
+  note:            string | null;
+  unit_cost:       number | null;
+  details_fetched_at: string | null;
+  order_product:   string | null;
+  order_customer:  string | null;
+  order_placed_on: string | null;
+  return_product:  string | null;
+  forward_product: string | null;
+  candidates?:     PickupCandidate[];
+}
+export type PickupStatus = 'review' | 'done' | 'transit' | 'ignored' | 'all';
+export interface PickupList {
+  pickups: ReturnPickup[];
+  counts:  { review: number; done: number; transit: number; ignored: number };
+}
+export const getReturnPickups = (status: PickupStatus = 'review') =>
+  api.get<PickupList>('/api/return-pickups', { params: { status } });
+export const linkReturnPickup = (id: number, orderId: number, forwardProductId?: string | null) =>
+  api.post<{ id: number; order_id: number; applied?: boolean; reason?: string }>(
+    `/api/return-pickups/${id}/link`, { order_id: orderId, forward_product_id: forwardProductId || undefined });
+export const unlinkReturnPickup = (id: number) =>
+  api.post<{ id: number; reversed: boolean }>(`/api/return-pickups/${id}/unlink`);
+export const ignoreReturnPickup = (id: number, note?: string) =>
+  api.post<{ id: number }>(`/api/return-pickups/${id}/ignore`, { note });
+export const refreshReturnPickup = (id: number) =>
+  api.post<{ id: number; order_id: number | null; restocked_at: string | null; note: string | null }>(
+    `/api/return-pickups/${id}/refresh`);
+
+/** A manual expense that is really a customer refund — mirrors pnl.looksLikeRefund. */
+export const looksLikeRefund = (description?: string | null) => {
+  const d = String(description || '');
+  return /(مرتجع|مررتجع|استرجاع|استرداد)/.test(d) && !/(راتب|عمول)/.test(d);
+};
 
 /** Manually add a revenue or expense entry (order_id = NULL). Admin only. */
 export const addTreasuryEntry = (data: AddTreasuryEntryPayload) =>

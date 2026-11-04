@@ -656,6 +656,9 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 
   const sourceCode = String(source).trim();
   const category   = MANUAL_CATEGORIES[sourceCode];
+  if (RESERVED_AUTO_SOURCES.has(sourceCode)) {
+    return res.status(400).json({ error: 'لا يمكن استخدام تصنيف مُولّد تلقائياً لعملية يدوية' });
+  }
 
   /* Derive the authoritative type: a known category dictates revenue/expense;
      a free-text source falls back to the validated client-supplied type.      */
@@ -718,6 +721,8 @@ const RESERVED_AUTO_SOURCES = new Set([
   /* Auto-posted by the returns module (returnCollections.js) — settled/reverted
      there, never editable here (some carry order_id = NULL, so guard by source). */
   'return_collection', 'return_review_commission', 'agent_commission_payout',
+  /* Post-delivery refund — written/undone only via services/orderRefunds.js. */
+  'CUSTOMER_REFUND',
 ]);
 
 /* Load a tenant-scoped, MANUAL (order_id IS NULL) transaction or send the right
@@ -856,8 +861,12 @@ const RECLASSIFY_TARGETS = new Set([
   ...pnl.MONTHLY_SOURCES, ...pnl.DISTRIBUTION_SOURCES, ...pnl.DAILY_MANUAL_SOURCES,
 ]);
 
-/* GET /api/treasury/reclassify-suggestions — admin only. Manual rows filed under
-   a daily category whose description looks like a fixed cost / distribution. */
+/* GET /api/treasury/reclassify-suggestions — admin only.
+     suggestions       manual rows filed under a daily category whose description
+                       looks like a fixed cost / distribution;
+     refund_candidates manual rows that are really customer refunds («مرتجع» …,
+                       incl. ones filed under ads) — they belong to an ORDER, so
+                       the treasury links each through the refund dialog. */
 router.get('/reclassify-suggestions', authenticate, requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -869,9 +878,11 @@ router.get('/reclassify-suggestions', authenticate, requireAdmin, async (req, re
           AND order_id IS NULL AND purchase_order_id IS NULL
           AND source = ANY($2::text[])
         ORDER BY transaction_date DESC, id DESC`,
-      [req.user.business_id, pnl.DAILY_MANUAL_SOURCES]);
+      [req.user.business_id, [...pnl.DAILY_MANUAL_SOURCES, 'AD_SPEND']]);
     const suggestions = [];
+    const refund_candidates = [];
     for (const r of rows) {
+      if (pnl.looksLikeRefund(r.description)) { refund_candidates.push(r); continue; }
       const s = pnl.suggestCategory(r);
       if (s) {
         suggestions.push({
@@ -882,7 +893,7 @@ router.get('/reclassify-suggestions', authenticate, requireAdmin, async (req, re
         });
       }
     }
-    res.json({ suggestions });
+    res.json({ suggestions, refund_candidates });
   } catch (err) {
     console.error('[treasury/reclassify-suggestions] Error:', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });

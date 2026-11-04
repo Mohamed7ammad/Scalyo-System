@@ -98,4 +98,4 @@ async function captureActualShippingFee(trackingNumber, businessId, { onlyIfNull
   return rowCount > 0 ? fee : null;
 }
 
-module.exports = { extractPriceAfterVat, fetchActualShippingFee, captureActualShippingFee };
+module.exports = { extractPriceAfterVat, fetchActualShippingFee, captureActualShippingFee, readApiKey, INT_BASE };

@@ -164,19 +164,23 @@ export default function MonthlyStatementPage() {
   const n = useMemo(() => {
     const ov = dash?.overview;
     const revenue  = ov?.total_revenue ?? 0;
+    const refunds  = ov?.total_refunds ?? 0;
+    const cogsBack = prof.reduce((s, p) => s + (Number.isFinite(p.cogs_recovered) ? (p.cogs_recovered as number) : 0), 0);
+    const returnShip = prof.reduce((s, p) => s + (Number.isFinite(p.return_shipping_cost) ? (p.return_shipping_cost as number) : 0), 0);
     const ads      = ov?.total_expenses ?? 0;
     const opex     = ov?.operating_expenses ?? 0;
     const delivered = ov?.total_delivered ?? 0;
     const cogs     = prof.reduce((s, p) => s + (Number.isFinite(p.cogs) ? p.cogs : 0), 0);
     const shipping = prof.reduce((s, p) => s + (Number.isFinite(p.shipping_cost) ? (p.shipping_cost as number) : 0), 0);
-    const ordersProfit = revenue - cogs - ads - shipping - opex;
+    const ordersProfit = revenue - refunds - cogs - ads - shipping - opex;
     const fixed = st?.fixed.total ?? 0;
     const dist  = st?.distributions.total ?? 0;
     const operating = ordersProfit - fixed;
     const retained  = operating - dist;
     const perOrder  = delivered > 0 ? ordersProfit / delivered : 0;
     const breakEven = perOrder > 0 ? Math.ceil(fixed / perOrder) : null;
-    return { revenue, ads, opex, delivered, cogs, shipping, ordersProfit, fixed, dist, operating, retained, perOrder, breakEven };
+    return { revenue, refunds, refundedOrders: ov?.refunded_orders ?? 0, cogsBack, returnShip,
+      ads, opex, delivered, cogs, shipping, ordersProfit, fixed, dist, operating, retained, perOrder, breakEven };
   }, [dash, prof, st]);
 
   const thisMonth = cairoToday().slice(0, 7);
@@ -282,8 +286,15 @@ export default function MonthlyStatementPage() {
           ) : (
             <>
               <Row sign="+" label="الإيرادات" sub="طلبات اتعملت الشهر ده واتسلّمت" amount={n.revenue} />
-              <Row sign="−" label="تكلفة البضاعة" amount={-n.cogs} />
-              <Row sign="−" label="الشحن (Bosta)" amount={-n.shipping} />
+              <Row sign="−" label="مرتجعات بعد التسليم"
+                sub={n.refunds > 0 ? `فلوس رجعت لعملاء — ${n.refundedOrders} طلب من طلبات الشهر ده` : 'مفيش فلوس رجعت لعملاء على طلبات الشهر ده'}
+                amount={-n.refunds} />
+              <Row sign="−" label="تكلفة البضاعة"
+                sub={n.cogsBack !== 0 ? `بعد خصم ${fmtEGP(n.cogsBack)} — بضاعة رجعت المخزن بعد التسليم` : undefined}
+                amount={-n.cogs} />
+              <Row sign="−" label="الشحن (Bosta)"
+                sub={n.returnShip !== 0 ? `منه ${fmtEGP(n.returnShip)} شحن مرتجعات واستبدال` : undefined}
+                amount={-n.shipping} />
               <Row sign="−" label="الإعلانات (Meta)" amount={-n.ads} />
               <Row sign="−" label="المصاريف اليومية" sub="عمولات، تغليف، مصاريف تشغيل يومية" amount={-n.opex} />
               <Row sign="=" label="ربح الطلبات" amount={n.ordersProfit} strong tone="auto" />

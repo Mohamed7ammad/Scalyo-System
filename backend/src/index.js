@@ -67,6 +67,8 @@ const afterSalesRoutes        = require('./routes/afterSales');
 const exchangeReturnsRoutes   = require('./routes/exchangeReturns');
 const disciplineRoutes        = require('./routes/discipline');
 const monthlyStatementRoutes  = require('./routes/monthlyStatement');
+const refundsRoutes           = require('./routes/refunds');
+const returnPickupsRoutes     = require('./routes/returnPickups');
 const trackAction             = require('./middleware/trackAction');
 
 const app = express();
@@ -106,6 +108,8 @@ app.use('/api/after-sales',      afterSalesRoutes); // post-delivery customer is
 app.use('/api/exchange-returns', exchangeReturnsRoutes); // exchange/return requests with video evidence (الاستبدال والاسترجاع)
 app.use('/api/discipline',       disciplineRoutes); // confirmation-team checkpoints, check-in, breaks (Stage 1)
 app.use('/api/monthly-statement', monthlyStatementRoutes); // «التقرير الشهري» — fixed costs + distributions by month
+app.use('/api/refunds',          refundsRoutes);        // «رد فلوس مرتجع» — post-delivery refunds (finance only)
+app.use('/api/return-pickups',   returnPickupsRoutes);  // Bosta pickups/exchanges received back → restock review
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 

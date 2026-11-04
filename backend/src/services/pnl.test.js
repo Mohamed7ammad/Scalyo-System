@@ -24,7 +24,7 @@ test('every system-posted source the code writes has an explicit treatment', () 
   const written = [
     'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
     'deposit', 'bosta_cod', 'return_collection', 'return_review_commission',
-    'agent_commission_payout', 'return_shipping_fee',
+    'agent_commission_payout', 'return_shipping_fee', 'CUSTOMER_REFUND',
   ];
   for (const s of written) {
     assert.ok(pnl.AUTO_SOURCES[s], `${s} missing from AUTO_SOURCES`);
@@ -38,6 +38,10 @@ test('daily profit keeps exactly today\'s expense set, minus the new monthly cat
   for (const s of ['AD_SPEND', 'INVENTORY_PURCHASE']) assert.ok(nonDaily.has(s), s);
   // the new month-level categories
   for (const s of ['SALARIES', 'SUBSCRIPTIONS', 'FIXED_OPEX', 'PROFIT_DISTRIBUTION']) assert.ok(nonDaily.has(s), s);
+  // a post-delivery refund lands on its ORDER's day (order_refunds), never as a daily cost
+  assert.ok(nonDaily.has('CUSTOMER_REFUND'), 'CUSTOMER_REFUND must not be daily OPEX');
+  assert.equal(pnl.treatmentOf('CUSTOMER_REFUND'), T.ORDER_REFUND);
+  assert.ok(!pnl.MANUAL_CATEGORIES.CUSTOMER_REFUND, 'refunds are posted only through the refund dialog');
   // everything that counted daily before still does
   for (const s of ['OPERATIONAL_EXPENSE', 'PACKAGING_COST', 'SHIPPING_PACKAGE_SUBSCRIPTION',
     'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
@@ -110,6 +114,11 @@ test('suggestions: real daily costs are left alone', () => {
   assert.equal(sug('راتب', 5000, '2026-10-31', 'SALARIES'), null);
   assert.equal(sug('راتب', 5000, '2026-10-31', 'AD_SPEND'), null);
   assert.equal(sug('راتب', 5000, '2026-10-31', 'comm_confirmed'), null);
+});
+
+test('refund-looking descriptions (link to an order, not a category)', () => {
+  for (const d of ['مرتجع', 'مررتجع', 'استرجاع مفرمة ( نيفين )', 'مرتجعين كشاف', '2 استرجاع']) assert.ok(pnl.looksLikeRefund(d), d);
+  for (const d of ['راتب المرتجعات', 'تسديد عمولة مرتجعات — 27', 'ايزي اوردر', '']) assert.ok(!pnl.looksLikeRefund(d), d || '(empty)');
 });
 
 test('period from text picks the nearest year', () => {

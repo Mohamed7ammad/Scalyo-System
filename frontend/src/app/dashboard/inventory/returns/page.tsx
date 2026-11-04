@@ -7,6 +7,7 @@ import {
   getProducts, Product, DailyReturn,
   getReturnsReconciliation, ReconciliationReport, ReconciliationRow, reconcileFix,
 } from '@/lib/api';
+import PostDeliveryReturns from '@/components/PostDeliveryReturns';
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -491,6 +492,9 @@ export default function ReturnsPage() {
           </div>
         </div>
       )}
+
+      {/* ── Post-delivery returns (Bosta pickups / exchanges) — admin ─────── */}
+      {isAdmin && <PostDeliveryReturns />}
 
       {/* ── Summary cards ─────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">

@@ -22,6 +22,10 @@
                   (they become COGS when the order is delivered), ad spend typed
                   into the treasury (ads are counted from the Meta-synced
                   expenses table), revenue-side cash rows (deposits, COD, fees).
+     order_refund A refund paid back to a customer AFTER delivery
+                  (CUSTOMER_REFUND, posted only by services/orderRefunds.js). Not
+                  a daily cost: the analytics queries take it from order_refunds
+                  and charge it to the refunded ORDER's placement day + product.
 
    An expense source that is not listed (a custom free-text category) counts as
    daily — exactly how every non-ads, non-stock expense counted before.
@@ -41,6 +45,7 @@ const T = Object.freeze({
   MONTHLY:      'monthly',
   DISTRIBUTION: 'distribution',
   EXCLUDED:     'excluded',
+  ORDER_REFUND: 'order_refund',
 });
 
 /* Categories the admin picks by hand. `type` fixes the sign (the server derives
@@ -71,6 +76,7 @@ const AUTO_SOURCES = Object.freeze({
   deposit:                  { label: 'عربون',              treatment: T.EXCLUDED },
   return_collection:        { label: 'تحصيل مرتجع',        treatment: T.EXCLUDED },
   return_shipping_fee:      { label: 'رسوم شحن مرتجع',     treatment: T.EXCLUDED },
+  CUSTOMER_REFUND:          { label: 'رد فلوس مرتجع',      treatment: T.ORDER_REFUND },
 });
 
 const ALL_SOURCES = Object.freeze({ ...MANUAL_CATEGORIES, ...AUTO_SOURCES });
@@ -168,6 +174,13 @@ function periodFromText(description, transactionDate) {
   return ymFromIndex(best);
 }
 
+/* A manual expense that is really a customer refund («مرتجع» …) — it belongs to
+   an ORDER (link it through the refund dialog), not to a category. */
+const looksLikeRefund = (description) => {
+  const d = String(description || '');
+  return /(مرتجع|مررتجع|استرجاع|استرداد)/.test(d) && !/(راتب|عمول)/.test(d);
+};
+
 /* Suggest a category for a past manual row, or null when it looks like a real
    daily cost. Only rows filed under a DAILY manual category are candidates. */
 function suggestCategory({ description, source, amount, transaction_date }) {
@@ -247,8 +260,41 @@ function monthlyRows(db, { businessId, month }) {
   `, [businessId, [...MONTHLY_SOURCES, ...DISTRIBUTION_SOURCES], `${month}-01`]);
 }
 
+/* ── After-delivery SQL fragments (Phase 2) ──────────────────────────────────
+   Refunds, units back on the shelf and pickup/exchange fees, as correlated
+   sub-selects on an orders alias. They read order_refunds / return_pickups,
+   which the refund + pickup services create at startup — until both exist
+   (first seconds after a deploy, or a DB without them) every fragment is a
+   literal 0 / FALSE, so the dashboard keeps working exactly as before. */
+let afterDeliveryOk = false;
+async function afterDeliverySql(db) {
+  if (!afterDeliveryOk) {
+    try {
+      const { rows: [r] } = await db.query(
+        `SELECT (to_regclass('order_refunds') IS NOT NULL AND to_regclass('return_pickups') IS NOT NULL) AS ok`);
+      afterDeliveryOk = Boolean(r && r.ok);
+    } catch { afterDeliveryOk = false; }
+  }
+  const on = afterDeliveryOk;
+  return {
+    enabled: on,
+    /* money paid back to the customer after delivery */
+    refundOf:  (o) => (on ? `(SELECT COALESCE(SUM(rf.refund_amount), 0) FROM order_refunds rf WHERE rf.order_id = ${o}.id)` : '0'),
+    hasRefund: (o) => (on ? `EXISTS (SELECT 1 FROM order_refunds rf WHERE rf.order_id = ${o}.id)` : 'FALSE'),
+    /* units back on the shelf × the order's cost snapshot, minus an exchange's replacement */
+    cogsBackOf: (o) => (on ? `(SELECT COALESCE(SUM(rp.return_qty * COALESCE(rp.unit_cost, 0)
+                                  - rp.forward_qty * COALESCE(rp.forward_unit_cost, 0)), 0)
+                                FROM return_pickups rp WHERE rp.order_id = ${o}.id AND rp.restocked_at IS NOT NULL)` : '0'),
+    /* Bosta fee of the pickup / exchange, net of any COD it collected */
+    returnShipOf: (o) => (on ? `(SELECT COALESCE(SUM(COALESCE(rp.pickup_fee, 0) - COALESCE(rp.collected_cod, 0)), 0)
+                                  FROM return_pickups rp WHERE rp.order_id = ${o}.id
+                                   AND rp.received_at IS NOT NULL AND rp.ignored_at IS NULL)` : '0'),
+  };
+}
+
 module.exports = {
   T,
+  afterDeliverySql,
   MANUAL_CATEGORIES,
   AUTO_SOURCES,
   treatmentOf,
@@ -261,6 +307,7 @@ module.exports = {
   DAILY_MANUAL_SOURCES,
   normalizePeriodMonth,
   suggestCategory,
+  looksLikeRefund,
   periodFromText,
   cairoToday,
   dailyOpexBySource,

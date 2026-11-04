@@ -855,6 +855,9 @@ export default function AnalyticsDashboard() {
   const outstandingCash = isAffiliate ? 0 : (ov?.outstanding_cash ?? 0);
   /* Revenue: affiliate plan uses the combined external-platform revenue. */
   const totalRevenue   = isAffiliate ? affRevenue   : (ov?.total_revenue   ?? 0);
+  /* Money paid back to customers after delivery, charged to the orders' own
+     placement day (P&L Phase 2). Product-scoped server-side like revenue. */
+  const totalRefunds   = isAffiliate ? 0 : (ov?.total_refunds ?? 0);
   const totalExpenses  = ov?.total_expenses  ?? 0;
   const metaSpend      = ov?.meta_spend      ?? 0;
   /* Meta-attributed purchases — used ONLY for ad-efficiency (CPP/CPA), NOT the
@@ -954,6 +957,7 @@ export default function AnalyticsDashboard() {
      per-AWB fees are the exact surcharge/post-bundle hits on each product's
      margin. All operands guarded to finite numbers above / via ?? 0. */
   const netProfit = (Number.isFinite(totalRevenue)     ? totalRevenue     : 0)
+                  - (Number.isFinite(totalRefunds)     ? totalRefunds     : 0)
                   - (Number.isFinite(effectiveCogs)    ? effectiveCogs    : 0)
                   - (Number.isFinite(totalExpenses)    ? totalExpenses    : 0)
                   - (Number.isFinite(effectiveOpex)    ? effectiveOpex    : 0)
@@ -979,6 +983,7 @@ export default function AnalyticsDashboard() {
      Profit forecast so both use one identical definition. */
   const netProfitBeforeAds =
       (Number.isFinite(totalRevenue)      ? totalRevenue      : 0)
+    - (Number.isFinite(totalRefunds)      ? totalRefunds      : 0)
     - (Number.isFinite(effectiveCogs)     ? effectiveCogs     : 0)
     - (Number.isFinite(effectiveShipping) ? effectiveShipping : 0)
     - (Number.isFinite(effectiveOpex)     ? effectiveOpex     : 0);
@@ -1014,7 +1019,7 @@ export default function AnalyticsDashboard() {
     const avgOpexPer = totalDelivered > 0 ? effectiveOpex     / totalDelivered : 0;
     const avgShipPer = totalDelivered > 0 ? effectiveShipping / totalDelivered : 0;
     return dashStats.daily_chart_stats.map((s) => {
-      const dayRevenue    = s.revenue;
+      const dayRevenue    = s.revenue - (s.refunds ?? 0);   // refunds land on the order's own day
       const dayCogsEst    = Math.round(s.delivered * avgCogsPer);
       const dayOpexEst    = Math.round(s.delivered * avgOpexPer);
       const dayShipEst    = Math.round(s.delivered * avgShipPer);
@@ -1437,7 +1442,11 @@ export default function AnalyticsDashboard() {
               label="إجمالي الإيرادات"
               value={loadingDash ? '...' : fmtEGP(Math.round(totalRevenue))}
               subValue={dashStats
-                ? (isAffiliate ? 'إجمالي إيرادات منصات الأفليت ✓' : 'إيرادات الطلبات المُسلَّمة ✓')
+                ? (isAffiliate
+                    ? 'إجمالي إيرادات منصات الأفليت ✓'
+                    : totalRefunds > 0
+                      ? `منها مرتجعات بعد التسليم: −${fmtEGP(Math.round(totalRefunds))} (${ov?.refunded_orders ?? 0} طلب)`
+                      : 'إيرادات الطلبات المُسلَّمة ✓')
                 : 'في انتظار البيانات...'}
               trend={15}
               accent="text-emerald-600 dark:text-emerald-400"
@@ -1451,7 +1460,7 @@ export default function AnalyticsDashboard() {
               subValue={dashStats
                 ? (isAffiliate
                     ? 'قبل الرواتب والمصاريف الثابتة — إيرادات الأفليت − المصاريف اليومية والإعلانات ✓'
-                    : 'قبل الرواتب والمصاريف الثابتة — إيرادات − البضاعة − الإعلانات − الشحن − المصاريف اليومية ✓')
+                    : 'قبل الرواتب والمصاريف الثابتة — إيرادات − المرتجعات − البضاعة − الإعلانات − الشحن − المصاريف اليومية ✓')
                 : 'في انتظار البيانات...'}
               trend={18}
               highlight

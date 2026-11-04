@@ -22,6 +22,7 @@ import {
   EXCHANGE_RETURN_TYPES, EXCHANGE_RETURN_STATUSES, Product,
   RefundMethod, REFUND_METHOD_LABELS,
 } from '@/lib/api';
+import RefundDialog from '@/components/RefundDialog';
 
 /* Refund-method badge colours. */
 const REFUND_METHOD_BADGE: Record<RefundMethod, string> = {
@@ -108,6 +109,10 @@ export default function ExchangeReturnsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [toast,    setToast]    = useState<Toast | null>(null);
+
+  /* «تسجيل رد الفلوس» — the treasury refund dialog, pre-searched by the
+     customer's phone (admin only; finance-only, no stock change). */
+  const [refundFor, setRefundFor] = useState<ExchangeReturnRequest | null>(null);
 
   /* Top-bar filters */
   const [typeFilter,   setTypeFilter]   = useState<string>(ALL_TYPES);
@@ -526,6 +531,15 @@ export default function ExchangeReturnsPage() {
                                 dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60 disabled:opacity-50">
                               تحديث
                             </button>
+                            {isAdmin && r.request_type === 'استرجاع' && (r.status === 'تمت الموافقة' || r.status === 'مكتمل') && (
+                              <button onClick={() => setRefundFor(r)} disabled={busy}
+                                title="سجّل الفلوس اللي رجعت للعميل — تتخصم من ربح يوم الطلب"
+                                className="px-3 py-1.5 text-xs rounded-lg font-medium transition whitespace-nowrap
+                                  bg-orange-50 text-orange-700 hover:bg-orange-100
+                                  dark:bg-orange-900/30 dark:text-orange-300 dark:hover:bg-orange-900/60 disabled:opacity-50">
+                                تسجيل رد الفلوس
+                              </button>
+                            )}
                             {isAdmin && (
                               <button onClick={() => handleDelete(r)} disabled={busy} title="حذف نهائي" aria-label="حذف"
                                 className="p-1.5 text-xs rounded-lg transition text-red-500 hover:text-white hover:bg-red-500
@@ -630,6 +644,18 @@ export default function ExchangeReturnsPage() {
       )}
 
       {/* ══ Review / status modal ══════════════════════════════════════════ */}
+      {refundFor && (
+        <RefundDialog
+          initialQuery={refundFor.customer_phone}
+          requestId={refundFor.id}
+          onClose={() => setRefundFor(null)}
+          onSaved={(res) => {
+            setRefundFor(null);
+            showToast(`تم تسجيل رد ${res.refund.refund_amount.toLocaleString('en-US')} ج على طلب #${res.order.id}`, 'success');
+          }}
+        />
+      )}
+
       {editTarget && (
         <Modal
           onClose={() => !editSaving && setEditTarget(null)}

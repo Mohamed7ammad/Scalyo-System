@@ -1128,6 +1128,10 @@ router.get('/products-profitability', authenticate, async (req, res) => {
     campNameIdx = `$${params.length}`;
   }
 
+  /* After-delivery fragments (refunds / units back / pickup fees) — 0 until the
+     Phase-2 tables exist, so a fresh deploy never breaks this endpoint. */
+  const ad = await pnl.afterDeliverySql(pool);
+
   /* Inline price parser for delivered revenue (references orders alias "o") */
   const PRICE_O = `
     COALESCE(
@@ -1188,7 +1192,20 @@ router.get('/products-profitability', authenticate, async (req, res) => {
            only ever populated for parcels that actually shipped (captured per AWB
            by tracking number), so a plain SUM is exact: orders that never left the
            warehouse carry NULL → 0 and contribute nothing. */
-        COALESCE(SUM(COALESCE(o."actual_shipping_fee"::numeric, 0)), 0)      AS shipping_cost
+        COALESCE(SUM(COALESCE(o."actual_shipping_fee"::numeric, 0)), 0)      AS shipping_cost,
+        /* ── After delivery (P&L Phase 2) — all charged to THIS order's placement
+           day + product, never to the day the money moved:
+             refunds         money paid back to the customer (order_refunds);
+             cogs_recovered  units physically back on the shelf × the order's own
+                             cost snapshot, minus an exchange's replacement unit
+                             (return_pickups, only once restocked);
+             return_shipping Bosta fee of the pickup / exchange, net of any COD
+                             Bosta collected on it.
+           Fragments from services/pnl.js afterDeliverySql (0 until the tables exist). */
+        COALESCE(SUM(CASE WHEN o."Status" = 'تم التوصيل' THEN ${ad.refundOf('o')} ELSE 0 END), 0) AS refunds,
+        COUNT(DISTINCT o.id) FILTER (WHERE o."Status" = 'تم التوصيل' AND ${ad.hasRefund('o')})   AS refunded_orders,
+        COALESCE(SUM(${ad.cogsBackOf('o')}), 0)                              AS cogs_recovered,
+        COALESCE(SUM(${ad.returnShipOf('o')}), 0)                            AS return_shipping
       FROM   products p
       JOIN   orders   o ON (
         o.business_id = ${bizIdx}::integer
@@ -1246,6 +1263,10 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       COALESCE(os.delivered_revenue,    0)     AS delivered_revenue,
       COALESCE(os.cogs,                 0)     AS cogs,
       COALESCE(os.shipping_cost,        0)     AS shipping_cost,
+      COALESCE(os.refunds,              0)     AS refunds,
+      COALESCE(os.refunded_orders,      0)     AS refunded_orders,
+      COALESCE(os.cogs_recovered,       0)     AS cogs_recovered,
+      COALESCE(os.return_shipping,      0)     AS return_shipping,
       COALESCE(es.attributed_spend,     0)     AS attributed_ad_spend,
       COALESCE(es.meta_orders_total,    0)     AS meta_orders_total
     FROM   products p
@@ -1333,12 +1354,19 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       const metaOrders  = parseInt(r.meta_orders_total, 10) || 0;
       /* COGS now comes straight from SQL: Σ(snapshot unit cost × delivered qty).
          No longer cost_price × delivered-order-count (which ignored quantity and
-         the historical snapshot). costPrice above is kept only for display. */
-      const cogs        = parseFloat((parseFloat(r.cogs) || 0).toFixed(2));
-      /* Exact per-AWB shipping for this product's delivered orders (Option C).
+         the historical snapshot). costPrice above is kept only for display.
+         NET of units that came back to the shelf after delivery (cogs_recovered):
+         those units weren't sold, so their cost leaves this day's COGS. */
+      const cogsRecovered = parseFloat((parseFloat(r.cogs_recovered) || 0).toFixed(2));
+      const cogs        = parseFloat(((parseFloat(r.cogs) || 0) - cogsRecovered).toFixed(2));
+      /* Money paid back to customers after delivery, on the orders' own day. */
+      const refunds     = parseFloat((parseFloat(r.refunds) || 0).toFixed(2));
+      /* Exact per-AWB shipping for this product's delivered orders (Option C)
+         + the Bosta fee of post-delivery pickups / exchanges (net of COD).
          Folded into the product margin so net_profit reflects the TRUE cost of
          selling this product: revenue − COGS − ad spend − real shipping. */
-      const shippingCost = parseFloat((parseFloat(r.shipping_cost) || 0).toFixed(2));
+      const returnShipping = parseFloat((parseFloat(r.return_shipping) || 0).toFixed(2));
+      const shippingCost = parseFloat(((parseFloat(r.shipping_cost) || 0) + returnShipping).toFixed(2));
       /* Path A+ OPEX for THIS product = exact commission + shared × (units ÷ total).
          Identical to the dashboard's effectiveOpex for a selected product, so this
          row's net profit equals the top KPI Net Profit card when filtered to it. */
@@ -1348,8 +1376,8 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         : 0;
       const opexAllocated  = parseFloat((opexCommission + opexShared).toFixed(2));
       /* TRUE net profit — now includes OPEX, matching /dashboard exactly:
-         revenue − COGS − ad spend − per-AWB shipping − allocated OPEX. */
-      const netProfit   = parseFloat((deliveredRevenue - cogs - attributedSpend - shippingCost - opexAllocated).toFixed(2));
+         revenue − refunds − COGS − ad spend − per-AWB shipping − allocated OPEX. */
+      const netProfit   = parseFloat((deliveredRevenue - refunds - cogs - attributedSpend - shippingCost - opexAllocated).toFixed(2));
       const cpa         = metaOrders > 0
         ? parseFloat((attributedSpend / metaOrders).toFixed(2))
         : null;
@@ -1367,8 +1395,12 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         erp_orders:          erpOrderCount,       // alias kept for pixel-efficiency calc
         delivered_revenue:   deliveredRevenue,
         attributed_ad_spend: attributedSpend,
-        cogs,
-        shipping_cost:       shippingCost,       // exact per-AWB Bosta fee (Option C)
+        cogs,                                    // net of units back on the shelf
+        cogs_recovered:      cogsRecovered,      // post-delivery returns restocked (Phase 2)
+        refunds,                                 // money paid back after delivery
+        refunded_orders:     parseInt(r.refunded_orders, 10) || 0,
+        shipping_cost:       shippingCost,       // exact per-AWB Bosta fee (Option C) + return pickups
+        return_shipping_cost: returnShipping,    // of which: pickups / exchanges, net of COD
         opex_allocated:      opexAllocated,      // Path A+ OPEX folded into net_profit
         net_profit:          netProfit,
         cpa,
@@ -1608,6 +1640,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
      "still floating NOW", not "was in transit at the close of that day". */
   const FORWARD_PIPELINE = `${FORWARD_STATIC} AND ${CR}`;
 
+  /* After-delivery fragments (refunds) — 0 until the Phase-2 tables exist. */
+  const ad = await pnl.afterDeliverySql(pool);
+
   /* ── 1. Overview: order counts + delivered revenue ── */
   const overviewSql = `
     SELECT
@@ -1620,6 +1655,12 @@ router.get('/dashboard', authenticate, async (req, res) => {
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جاري الإعادة','تم الإرجاع'))   AS total_returned,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN ('جديد','لا يرد'))              AS total_pending,
       COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${CR} THEN ${P} ELSE 0 END), 0) AS total_revenue,
+      /* Money paid back after delivery on THESE orders (P&L Phase 2) — charged
+         to the order's placement day, whenever it was paid. */
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' AND ${CR}
+        THEN ${ad.refundOf('orders')} ELSE 0 END), 0)                                 AS total_refunds,
+      COUNT(id) FILTER (WHERE ${CR} AND "Status" = 'تم التوصيل'
+        AND ${ad.hasRefund('orders')})                                                AS refunded_orders,
       /* ── Logistics pipeline (CURRENT snapshot — intentionally NOT date-bound) ──
          Forward-moving orders physically in Bosta toward the customer, plus the COD
          the courier will collect for them. Both use the SHARED FORWARD_PIPELINE
@@ -1689,7 +1730,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
         'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
       ))                                                               AS confirmed,
       COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل')               AS delivered,
-      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0) AS revenue
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0) AS revenue,
+      COALESCE(SUM(CASE WHEN "Status"='تم التوصيل'
+        THEN ${ad.refundOf('orders')} ELSE 0 END), 0)                  AS refunds
     FROM orders
     WHERE 1=1${ordFilter} AND ${CR}
     GROUP BY TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD')
@@ -1887,6 +1930,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
       total_returned:  parseInt(ov.total_returned,  10) || 0,
       total_pending:   parseInt(ov.total_pending,   10) || 0,
       total_revenue:   parseFloat(parseFloat(ov.total_revenue  || 0).toFixed(2)),
+      /* Refunds paid after delivery on the window's orders (placement-day cohort). */
+      total_refunds:   parseFloat(parseFloat(ov.total_refunds  || 0).toFixed(2)),
+      refunded_orders: parseInt(ov.refunded_orders, 10) || 0,
       /* Logistics pipeline (live snapshot) — forward-moving orders + their COD. */
       in_transit_count: parseInt(ov.in_transit_count, 10) || 0,
       outstanding_cash: parseFloat(parseFloat(ov.outstanding_cash || 0).toFixed(2)),
@@ -1934,6 +1980,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         confirmed:  parseInt(row.confirmed, 10) || 0,
         delivered:  parseInt(row.delivered, 10) || 0,
         revenue:    parseFloat(row.revenue)     || 0,
+        refunds:    parseFloat(row.refunds)     || 0,
       });
     }
 
@@ -1947,7 +1994,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
          intentional — we never substitute ERP orders for Meta orders, so the
          "Total Orders" line on the chart stays strictly Meta-sourced.          */
       const exp = expByDate.get(dateKey) ?? { ads_spend: 0, meta_orders: 0 };
-      const erp = erpByDate.get(dateKey) ?? { erp_orders: 0, confirmed: 0, delivered: 0, revenue: 0 };
+      const erp = erpByDate.get(dateKey) ?? { erp_orders: 0, confirmed: 0, delivered: 0, revenue: 0, refunds: 0 };
       return {
         date:       dateKey,
         orders:     exp.meta_orders,    // ← strictly Meta purchases; NEVER falls back to erp_orders
@@ -1955,6 +2002,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         confirmed:  erp.confirmed,
         delivered:  erp.delivered,      // ← cohort: delivered orders attributed to their createdAt day
         revenue:    parseFloat(erp.revenue.toFixed(2)),
+        refunds:    parseFloat((erp.refunds || 0).toFixed(2)),   // paid back after delivery, on the order's day
         ads_spend:  parseFloat(exp.ads_spend.toFixed(2)),
       };
     });

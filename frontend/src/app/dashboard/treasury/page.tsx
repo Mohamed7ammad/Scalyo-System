@@ -12,15 +12,19 @@ import {
   getBostaWallet,
   getReclassifySuggestions,
   applyReclassification,
+  undoRefundByTreasury,
   TreasuryTransaction,
   TreasurySummary,
   CommissionBreakdownDay,
   AddTreasuryEntryPayload,
   BostaWallet,
   ReclassifySuggestion,
+  RefundCandidate,
   MANUAL_CATEGORIES,
   usesPeriodMonth,
+  looksLikeRefund,
 } from '@/lib/api';
+import RefundDialog from '@/components/RefundDialog';
 
 /* ─────────────────────────────────────────────────────────────────────────────
    Spinner
@@ -217,6 +221,10 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
     label: 'عمولة تحصيل مرتجع',
     cls: 'bg-violet-100 text-violet-700 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-700/40',
   },
+  CUSTOMER_REFUND: {
+    label: 'رد فلوس مرتجع',
+    cls: 'bg-orange-100 text-orange-800 border-orange-200 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-700/40',
+  },
 };
 
 /* Auto-generated sources (reconciled from orders) — NOT editable/deletable from
@@ -227,6 +235,8 @@ const RESERVED_AUTO_SOURCES = new Set([
   'comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer',
   /* Auto-posted by the returns module — settled/reverted there, never edited here. */
   'return_collection', 'return_review_commission', 'agent_commission_payout',
+  /* Post-delivery refund — recorded/undone through the refund dialog only. */
+  'CUSTOMER_REFUND',
 ]);
 function isEditableTxn(t: TreasuryTransaction): boolean {
   /* Locked when linked to an order (commission/deposit/COD), a reserved auto
@@ -547,10 +557,14 @@ function AddEntryModal({
   onClose,
   onSaved,
   editing,
+  onRefundInstead,
 }: {
   onClose: () => void;
   onSaved: (entry: TreasuryTransaction) => void;
   editing?: TreasuryTransaction | null;
+  /** «مرتجع» typed as an expense → record it as an order refund instead
+   *  (new payment, or link THIS row when editing). */
+  onRefundInstead?: (linkRow?: TreasuryTransaction) => void;
 }) {
   const initialDate = editing?.transaction_date?.slice(0, 10) ?? todayStr();
   const [form,   setForm]   = useState<AddEntryForm>({
@@ -579,7 +593,11 @@ function AddEntryModal({
   const payMonth = /^\d{4}-\d{2}/.test(form.date) ? form.date.slice(0, 7) : todayStr().slice(0, 7);
 
   /* Description looks like a fixed cost but the category is a daily one → nudge. */
-  const nudge = (!form.category || MANUAL_CATEGORIES[form.category]?.treatment === 'daily')
+  const isDailyOrUnset = !form.category || MANUAL_CATEGORIES[form.category]?.treatment === 'daily'
+    || form.category === 'AD_SPEND';
+  /* A customer refund belongs to its ORDER — offer the refund dialog first. */
+  const refundNudge = Boolean(onRefundInstead) && isDailyOrUnset && looksLikeRefund(form.description);
+  const nudge = (!refundNudge && isDailyOrUnset && form.category !== 'AD_SPEND')
     ? NUDGES.find((n) => n.re.test(form.description)) ?? null
     : null;
 
@@ -799,6 +817,21 @@ function AddEntryModal({
               onChange={handle('description')}
               className={`${inputCls} resize-none`}
             />
+            {refundNudge && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-orange-200 dark:border-orange-700/40
+                bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-[11px] text-orange-800 dark:text-orange-300">
+                <span>
+                  ده رد فلوس لعميل؟ {editing ? 'اربطه بطلبه' : 'سجّله كرد فلوس مرتجع'} عشان يتخصم من ربح يوم الطلب نفسه — مش من يوم الدفع.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onRefundInstead?.(editing ?? undefined)}
+                  className="px-2 py-0.5 rounded-md bg-orange-600 hover:bg-orange-700 text-white font-semibold"
+                >
+                  {editing ? 'ربط بطلب' : 'رد فلوس مرتجع'}
+                </button>
+              </div>
+            )}
             {nudge && (
               <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 dark:border-amber-700/40
                 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
@@ -1236,6 +1269,73 @@ function ReclassifyModal({
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+   RefundCandidatesModal — past «مرتجع» entries typed as ordinary expenses.
+   Each one is linked to its order through the refund dialog (link mode): the
+   row keeps its amount + date (cash unchanged) and moves to the order's day.
+───────────────────────────────────────────────────────────────────────────── */
+function RefundCandidatesModal({
+  candidates,
+  onClose,
+  onLink,
+}: {
+  candidates: RefundCandidate[];
+  onClose: () => void;
+  onLink:  (row: RefundCandidate) => void;
+}) {
+  const total = candidates.reduce((s, r) => s + r.amount, 0);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/50 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92dvh] flex flex-col border border-slate-200 dark:border-slate-700" dir="rtl">
+        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
+          <div className="min-w-0">
+            <h2 className="text-base font-bold text-slate-900 dark:text-white">مرتجعات محتاجة تتربط بطلباتها</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+              {candidates.length} قيد ({fmt(total)} ج) متسجلين مصروف عادي، فبيخصموا من ربح يوم الدفع. اربط كل قيد بطلبه
+              عشان يتخصم من يوم الطلب — المبلغ والتاريخ ورصيد الخزينة مش بيتغيروا. لو القيد فيه أكتر من مرتجع، قسّمه الأول.
+            </p>
+          </div>
+          <button onClick={onClose}
+            className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-slate-800 transition-colors shrink-0">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {candidates.length === 0 ? (
+            <p className="py-12 text-center text-sm text-slate-400">مفيش مرتجعات محتاجة ربط ✓</p>
+          ) : (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800">
+              {candidates.map((r) => (
+                <div key={r.id} className="flex items-center gap-3 px-3 py-2.5">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-800 dark:text-slate-100 truncate" title={r.description ?? ''}>{r.description || '—'}</p>
+                    <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span>{fmtDate(r.transaction_date)}</span>
+                      <SourceBadge source={r.source} />
+                    </p>
+                  </div>
+                  <span className="text-sm font-bold tabular-nums text-red-600 dark:text-red-400 whitespace-nowrap">−{fmt(r.amount)} ج</span>
+                  <button
+                    onClick={() => onLink(r)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white shrink-0"
+                  >
+                    ربط بطلب
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
    Page
 ───────────────────────────────────────────────────────────────────────────── */
 interface Toast { message: string; type: 'success' | 'error' }
@@ -1283,16 +1383,27 @@ export default function TreasuryPage() {
 
   /* ── Reclassification review («مراجعة التصنيفات») ─────────────── */
   const [suggestions,    setSuggestions]    = useState<ReclassifySuggestion[]>([]);
+  const [refundCandidates, setRefundCandidates] = useState<RefundCandidate[]>([]);
   const [isReviewOpen,   setIsReviewOpen]   = useState(false);
+  const [isRefundListOpen, setIsRefundListOpen] = useState(false);
   const loadSuggestions = useCallback(async () => {
     try {
       const res = await getReclassifySuggestions();
       setSuggestions(res.data.suggestions);
+      setRefundCandidates(res.data.refund_candidates ?? []);
     } catch {
       setSuggestions([]);   // optional helper — never blocks the page
+      setRefundCandidates([]);
     }
   }, []);
   useEffect(() => { loadSuggestions(); }, [loadSuggestions]);
+
+  /* ── Post-delivery refund dialog («رد فلوس مرتجع») ─────────────── */
+  const [refundDialog, setRefundDialog] = useState<null | {
+    convertTx?: { id: number; amount: number; transaction_date: string; description: string | null };
+  }>(null);
+  const openRefundFor = (row?: { id: number; amount: number; transaction_date: string; description: string | null }) =>
+    setRefundDialog(row ? { convertTx: { id: row.id, amount: row.amount, transaction_date: row.transaction_date.slice(0, 10), description: row.description } } : {});
 
   /* ── Live Bosta wallet state ──────────────────────────────────── */
   const [wallet,        setWallet]        = useState<BostaWallet | null>(null);
@@ -1400,6 +1511,31 @@ export default function TreasuryPage() {
     loadSuggestions();
   };
 
+  /* ── Refund recorded / linked ─────────────────────────────────── */
+  const handleRefundSaved = (r: { refund: { refund_amount: number; converted_from_source: string | null }; order: { id: number; placed_on: string } }) => {
+    setRefundDialog(null);
+    showToast(
+      `${r.refund.converted_from_source ? 'تم ربط المرتجع' : 'تم تسجيل رد الفلوس'}: ${fmt(r.refund.refund_amount)} ج على طلب #${r.order.id} — يتخصم من يوم ${fmtDate(r.order.placed_on)}`,
+      'success',
+    );
+    loadTreasury();
+    loadSuggestions();
+  };
+
+  /* ── Undo a refund (its treasury row) ─────────────────────────── */
+  const handleUndoRefund = async (t: TreasuryTransaction) => {
+    if (!window.confirm(`تراجع عن رد الفلوس (${fmt(t.amount)} ج على طلب #${t.order_id})؟`)) return;
+    try {
+      const res = await undoRefundByTreasury(t.id);
+      showToast(res.data.restored_source ? 'تم فك الربط — القيد رجع مصروف عادي' : 'تم حذف رد الفلوس', 'success');
+      loadTreasury();
+      loadSuggestions();
+    } catch (ex: unknown) {
+      const msg = (ex as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      showToast(msg || 'فشل التراجع', 'error');
+    }
+  };
+
   /* ── Delete callback — throws on failure so the modal can surface it ── */
   const handleDelete = async () => {
     if (!deletingTxn) return;
@@ -1483,6 +1619,7 @@ export default function TreasuryPage() {
         <AddEntryModal
           onClose={() => setIsManualEntryOpen(false)}
           onSaved={handleEntrySaved}
+          onRefundInstead={() => { setIsManualEntryOpen(false); openRefundFor(); }}
         />
       )}
 
@@ -1492,6 +1629,25 @@ export default function TreasuryPage() {
           editing={editingTxn}
           onClose={() => setEditingTxn(null)}
           onSaved={handleEntrySaved}
+          onRefundInstead={(row) => { setEditingTxn(null); if (row) openRefundFor(row); }}
+        />
+      )}
+
+      {/* ── Post-delivery refund dialog ─────────────────────────── */}
+      {refundDialog && (
+        <RefundDialog
+          convertTx={refundDialog.convertTx}
+          onClose={() => setRefundDialog(null)}
+          onSaved={handleRefundSaved}
+        />
+      )}
+
+      {/* ── Past «مرتجع» rows to link ──────────────────────────── */}
+      {isRefundListOpen && !refundDialog && (
+        <RefundCandidatesModal
+          candidates={refundCandidates}
+          onClose={() => setIsRefundListOpen(false)}
+          onLink={(r) => openRefundFor(r)}
         />
       )}
 
@@ -1837,6 +1993,23 @@ export default function TreasuryPage() {
             </div>
           )}
 
+          {/* ── Past refunds to link to their orders ────────────── */}
+          {refundCandidates.length > 0 && (
+            <div className="mb-4 flex flex-wrap items-center gap-3 px-4 py-3 rounded-xl border text-sm
+              bg-orange-50 text-orange-800 border-orange-200 dark:bg-orange-900/20 dark:text-orange-300 dark:border-orange-700/40">
+              <span className="flex-1 min-w-[200px] leading-snug">
+                {refundCandidates.length} مرتجع ({fmt(refundCandidates.reduce((s, x) => s + x.amount, 0))} ج) متسجلين مصروف عادي —
+                اربطهم بطلباتهم عشان يتخصموا من ربح يوم الطلب، مش يوم الدفع.
+              </span>
+              <button
+                onClick={() => setIsRefundListOpen(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white shadow-sm"
+              >
+                ربط المرتجعات
+              </button>
+            </div>
+          )}
+
           {/* ── Unlogged-deposit callout ─────────────────────────── */}
           {unloggedDeposits > 0.01 && (
             <div className="mb-6">
@@ -1914,10 +2087,23 @@ export default function TreasuryPage() {
               {transactions.length}{hasMore ? '+' : ''} معاملة
             </span>
 
+            {/* ── "رد فلوس مرتجع" — money back to a customer after delivery ── */}
+            <button
+              onClick={() => openRefundFor()}
+              className="mr-auto flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold border
+                border-orange-300 dark:border-orange-700/50 text-orange-700 dark:text-orange-300
+                bg-white dark:bg-slate-900 hover:bg-orange-50 dark:hover:bg-orange-900/20 transition-all"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+              </svg>
+              رد فلوس مرتجع
+            </button>
+
             {/* ── "إضافة معاملة" button — opens AddEntryModal ─────── */}
             <button
               onClick={() => setIsManualEntryOpen(true)}
-              className="mr-auto flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold
                 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
                 text-white shadow-sm shadow-indigo-500/20 transition-all"
             >
@@ -2023,8 +2209,27 @@ export default function TreasuryPage() {
                           {fmtDate(t.transaction_date)}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          {isEditableTxn(t) ? (
+                          {t.source === 'CUSTOMER_REFUND' ? (
+                            <button
+                              onClick={() => handleUndoRefund(t)}
+                              title="تراجع عن رد الفلوس"
+                              className="px-2 py-1 rounded-lg text-[11px] font-semibold text-orange-700 dark:text-orange-300
+                                hover:bg-orange-50 dark:hover:bg-orange-900/30 transition-colors"
+                            >
+                              تراجع
+                            </button>
+                          ) : isEditableTxn(t) ? (
                             <div className="flex items-center gap-1">
+                              {t.type === 'expense' && looksLikeRefund(t.description) && (
+                                <button
+                                  onClick={() => openRefundFor(t)}
+                                  title="ربط بطلب — يتخصم من يوم الطلب"
+                                  className="px-2 py-1 rounded-lg text-[11px] font-semibold text-orange-700 dark:text-orange-300
+                                    hover:bg-orange-50 dark:hover:bg-orange-900/30 transition-colors whitespace-nowrap"
+                                >
+                                  ربط بطلب
+                                </button>
+                              )}
                               <button
                                 onClick={() => setEditingTxn(t)}
                                 title="تعديل"
@@ -2093,6 +2298,7 @@ export default function TreasuryPage() {
                   {key === 'SUBSCRIPTIONS'                 && 'سيرفر، كلود، سيستمات — في التقرير الشهري بس'}
                   {key === 'FIXED_OPEX'                    && 'إيجار، تأمين، خطوط — في التقرير الشهري بس'}
                   {key === 'PROFIT_DISTRIBUTION'           && 'أرباح الإدارة والشركاء — تحت صافي الربح الشهري'}
+                  {key === 'CUSTOMER_REFUND'               && 'فلوس رجعت لعميل بعد الاستلام — تتخصم من يوم الطلب'}
                   {key === 'INVENTORY_PURCHASE'            && 'شراء مخزون — يُخصم من النقد ولا يدخل ضمن مصاريف التشغيل'}
                 </span>
               </div>
