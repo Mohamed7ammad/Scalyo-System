@@ -130,7 +130,7 @@ const ORDERS_SERIES = [
 const PROFIT_SERIES = [
   { key: 'adsSpend',    name: 'الإنفاق الإعلاني',    color: '#f43f5e', dash: '6 3',   isEGP: true },
   { key: 'grossMargin', name: 'هامش الربح الإجمالي', color: '#10b981', dash: undefined, isEGP: true },
-  { key: 'netProfit',   name: 'صافي الربح',           color: '#6366f1', dash: undefined, isEGP: true },
+  { key: 'netProfit',   name: 'ربح الطلبات',          color: '#6366f1', dash: undefined, isEGP: true },
 ] as const;
 
 type ChartView = 'orders' | 'profit';
@@ -1442,11 +1442,16 @@ export default function AnalyticsDashboard() {
               trend={15}
               accent="text-emerald-600 dark:text-emerald-400"
             />
+            {/* «ربح الطلبات» — unit economics only. Salaries, subscriptions, other
+                fixed costs and profit distributions are NOT in it (backend
+                services/pnl.js); they live in the monthly statement. */}
             <KPICard
-              label="صافي الربح النهائي"
+              label="ربح الطلبات"
               value={loadingDash ? '...' : fmtEGP(Math.round(netProfit))}
               subValue={dashStats
-                ? (isAffiliate ? 'إيرادات الأفليت − المصروفات والإعلانات ✓' : 'إيرادات − تكلفة البضاعة − الإعلانات − الشحن الفعلي − المصاريف التشغيلية ✓')
+                ? (isAffiliate
+                    ? 'قبل الرواتب والمصاريف الثابتة — إيرادات الأفليت − المصاريف اليومية والإعلانات ✓'
+                    : 'قبل الرواتب والمصاريف الثابتة — إيرادات − البضاعة − الإعلانات − الشحن − المصاريف اليومية ✓')
                 : 'في انتظار البيانات...'}
               trend={18}
               highlight
@@ -1457,12 +1462,23 @@ export default function AnalyticsDashboard() {
             <KPICard
               label="إجمالي الربح المتوقع"
               value={loadingDash ? '...' : fmtEGP(Math.round(totalProjectedProfit))}
-              subValue={loadingDash ? '' : 'الصافي المُحقق + أرباح الطلبات قيد التوصيل'}
+              subValue={loadingDash ? '' : 'ربح الطلبات المُحقق + أرباح الطلبات قيد التوصيل'}
               trend={20}
               accent="text-indigo-600 dark:text-indigo-400"
               onClick={loadingDash ? undefined : () => setShowExpectedProfit(true)}
             />
             </div>
+            {!isAffiliate && (
+              <a
+                href="/dashboard/monthly-statement"
+                className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+              >
+                الرواتب والاشتراكات وتوزيع الأرباح بتتحسب شهرياً — التقرير الشهري
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+              </a>
+            )}
           </div>
         )}
         {/* ═══ end TOP SECTION — BELOW renders for EVERYONE ═══ */}
@@ -1587,7 +1603,7 @@ export default function AnalyticsDashboard() {
                 costs split by delivered-order count. */}
             {!isAffiliate && (
               <KPICard
-                label="المصاريف التشغيلية (OPEX)"
+                label="المصاريف اليومية (OPEX)"
                 value={loadingDash ? '...' : fmtEGP(Math.round(effectiveOpex))}
                 subValue={opexCardSub}
                 trend={6.5}
@@ -1601,7 +1617,7 @@ export default function AnalyticsDashboard() {
             <KPICard
               label="متوسط ربح القطعة (التشغيلي)"
               value={(loadingDash || loadingProfitability) ? '...' : fmtEGP(Math.round(avgNetProfitPerOrder))}
-              subValue={(loadingDash || loadingProfitability) ? '' : `الصافي النهائي للقطعة: ${fmtEGP(Math.round(avgProfit))}`}
+              subValue={(loadingDash || loadingProfitability) ? '' : `بعد الإعلانات: ${fmtEGP(Math.round(avgProfit))}`}
               trend={3.8}
               accent="text-emerald-600 dark:text-emerald-400"
             />
@@ -2743,11 +2759,11 @@ export default function AnalyticsDashboard() {
             </div>
             {/* Receipt: realised net profit + in-transit expected profit = total. */}
             <div className="p-5 space-y-4 text-sm">
-              {/* صافي الربح المُحقق */}
+              {/* ربح الطلبات المُحقق */}
               <div className="flex items-start justify-between gap-3">
                 <span className="text-slate-600 dark:text-slate-300">
-                  صافي الربح المُحقق
-                  <span className="block text-[10px] text-slate-400 dark:text-slate-500">نفس كارت صافي الربح النهائي للفترة</span>
+                  ربح الطلبات المُحقق
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-500">نفس كارت ربح الطلبات للفترة</span>
                 </span>
                 <span className={`font-bold whitespace-nowrap ${netProfit < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-800 dark:text-slate-100'}`} dir="ltr">
                   {fmtEGP(Math.round(netProfit))}

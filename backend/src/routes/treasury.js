@@ -4,6 +4,7 @@ const express          = require('express');
 const pool             = require('../config/db');
 const authenticate     = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
+const pnl              = require('../services/pnl');
 
 const router = express.Router();
 
@@ -20,32 +21,22 @@ const PRICE_EXPR = `
   )
 `;
 
-/* The four commission expense sources — mirrors the old JS startsWith('comm_')
-   so total_commissions is byte-for-byte identical after moving to SQL. */
-const COMMISSION_SOURCES = ['comm_confirmed', 'comm_delivered', 'comm_rejected', 'comm_no_answer'];
+/* The four commission expense sources (one definition, in services/pnl.js). */
+const COMMISSION_SOURCES = pnl.COMMISSION_SOURCES;
 
 /* ── Manual transaction categories (the "corporate vault" ledger) ───────────
    Each manual entry the admin adds is tagged with one of these category codes
    in treasury_transactions.source.  The category is the single source of truth
    for whether the entry is money IN (revenue / credit) or money OUT
    (expense / debit) — the client never decides the sign on its own, the server
-   derives `type` from the category below.  Codes are stored, Arabic labels are
-   for display only.  source is VARCHAR(50) so every code fits comfortably.
+   derives `type` from the category — AND for where it counts in profit (daily
+   «ربح الطلبات», the monthly statement, or not at all). Defined once in
+   services/pnl.js; source is VARCHAR(50) so every code fits comfortably.
 
    Mirrored on the frontend in:
      • frontend/src/lib/api.ts          (MANUAL_CATEGORIES type)
      • dashboard/treasury/page.tsx      (AddEntryModal dropdown + SOURCE_META)  */
-const MANUAL_CATEGORIES = {
-  OPENING_BALANCE:               { type: 'revenue', label: 'رصيد افتتاحي'      },
-  PACKAGING_COST:                { type: 'expense', label: 'تغليف'             },
-  AD_SPEND:                      { type: 'expense', label: 'مصاريف إعلانات'    },
-  SHIPPING_PACKAGE_SUBSCRIPTION: { type: 'expense', label: 'باقة شحن'          },
-  OPERATIONAL_EXPENSE:           { type: 'expense', label: 'مصروفات تشغيلية'   },
-  /* Stock CapEx: deducts cash from the drawer like any expense, but is EXCLUDED
-     from the dashboard P&L OPEX (analytics.js) — inventory becomes COGS on
-     delivery, it is not an operating cost. Still counted in the cash balance.  */
-  INVENTORY_PURCHASE:            { type: 'expense', label: 'شراء مخزون'        },
-};
+const MANUAL_CATEGORIES = pnl.MANUAL_CATEGORIES;
 
 /* ── Idempotent schema bootstrap ──────────────────────────────────────────
    treasury.js owns the full migration chain for treasury_transactions.
@@ -67,6 +58,12 @@ pool.query(`
     created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
   )
 `)
+/* «يخص شهر» — the month a FIXED cost or a profit distribution belongs to (1st of
+   that month), e.g. a salary paid on Sep 29 «مقدم لشهر 10» → 2026-10-01. Set only
+   on monthly / distribution categories (services/pnl.js); NULL means "the
+   payment month". Profit views only — the cash ledger never reads it. Early in
+   the chain so the list query can select it right after a restart. */
+.then(() => pool.query(`ALTER TABLE treasury_transactions ADD COLUMN IF NOT EXISTS period_month DATE`))
 .then(() => pool.query(`
   CREATE UNIQUE INDEX IF NOT EXISTS treasury_bosta_cod_order_uidx
     ON treasury_transactions (order_id)
@@ -387,6 +384,10 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
   if (typeFilter) { params.push(typeFilter); where.push(`type = $${params.length}`); }
   if (sourceFilter === 'commission') {
     params.push(COMMISSION_SOURCES); where.push(`source = ANY($${params.length}::text[])`);
+  } else if (sourceFilter === 'monthly') {
+    /* Month-level rows: fixed costs + profit distributions (monthly statement only). */
+    params.push([...pnl.MONTHLY_SOURCES, ...pnl.DISTRIBUTION_SOURCES]);
+    where.push(`source = ANY($${params.length}::text[])`);
   } else if (sourceFilter) {
     params.push(sourceFilter); where.push(`source = $${params.length}`);
   }
@@ -415,7 +416,9 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
   try {
     const listQ = pool.query(`
       SELECT id, order_id, amount::float AS amount, type, source, description, purchase_order_id,
-             TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, created_at
+             TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
+             TO_CHAR(period_month, 'YYYY-MM')        AS period_month,
+             created_at
         FROM treasury_transactions
        WHERE ${where.join(' AND ')}
        ORDER BY created_at DESC, id DESC
@@ -617,7 +620,7 @@ router.get('/commissions-breakdown', authenticate, requireAdmin, async (req, res
    Intended for the corporate-vault ledger: opening balance, packaging, ad
    spend, shipping subscriptions, and other operational expenses.
 
-   Body: { amount, source, type?, description?, transaction_date? }
+   Body: { amount, source, type?, description?, transaction_date?, period_month? }
 
    `source` is the single source of truth for the sign of the entry:
      • If it matches a known category in MANUAL_CATEGORIES, the server forces
@@ -626,10 +629,22 @@ router.get('/commissions-breakdown', authenticate, requireAdmin, async (req, res
      • Otherwise (free-text custom category) the client MUST pass a valid
        `type` of 'revenue' or 'expense', preserving backward compatibility.
 
+   period_month («يخص شهر», 'YYYY-MM') is kept only for monthly / distribution
+   categories (default: the payment month) and forced NULL for every other one.
+
    Admin only.
    ══════════════════════════════════════════════════════════════════════════ */
+
+/* «يخص شهر» for a category + payment date → { ok, value } (value NULL when the
+   category has no month). Shared by POST and PUT. */
+function resolvePeriodMonth(sourceCode, periodMonth, txDate) {
+  if (!pnl.usesPeriodMonth(sourceCode)) return { ok: true, value: null };
+  return pnl.normalizePeriodMonth(periodMonth, txDate);
+}
+const isYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+
 router.post('/', authenticate, requireAdmin, async (req, res) => {
-  const { amount, type, source, description, transaction_date } = req.body;
+  const { amount, type, source, description, transaction_date, period_month } = req.body;
 
   const parsed = parseFloat(amount);
   if (!amount || isNaN(parsed) || parsed <= 0) {
@@ -653,11 +668,15 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'النوع يجب أن يكون revenue أو expense' });
   }
 
+  const period = resolvePeriodMonth(sourceCode, period_month,
+    isYmd(transaction_date) ? transaction_date : pnl.cairoToday());
+  if (!period.ok) return res.status(400).json({ error: period.error });
+
   try {
     const { rows } = await pool.query(
       `INSERT INTO treasury_transactions
-         (order_id, amount, type, source, description, transaction_date, business_id)
-       VALUES (NULL, $1, $2, $3, $4, COALESCE($5::date, CURRENT_DATE), $6)
+         (order_id, amount, type, source, description, transaction_date, business_id, period_month)
+       VALUES (NULL, $1, $2, $3, $4, COALESCE($5::date, CURRENT_DATE), $6, $7::date)
        RETURNING
          id,
          order_id,
@@ -666,6 +685,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
          source,
          description,
          TO_CHAR(transaction_date, 'YYYY-MM-DD')  AS transaction_date,
+         TO_CHAR(period_month, 'YYYY-MM')          AS period_month,
          created_at`,
       [
         parsed.toFixed(2),
@@ -674,6 +694,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
         description ? String(description).trim() || null : null,
         transaction_date || null,
         req.user.business_id,
+        period.value,
       ]
     );
 
@@ -708,7 +729,10 @@ async function loadEditableTxn(req, res) {
     return null;
   }
   const { rows } = await pool.query(
-    `SELECT id, order_id, source, type, purchase_order_id FROM treasury_transactions
+    `SELECT id, order_id, source, type, purchase_order_id,
+            TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
+            TO_CHAR(period_month, 'YYYY-MM')        AS period_month
+       FROM treasury_transactions
       WHERE id = $1 AND business_id = $2::integer`,
     [id, req.user.business_id]);
   const row = rows[0];
@@ -731,13 +755,14 @@ async function loadEditableTxn(req, res) {
 
 /* ── Edit a manual treasury transaction ───────────────────────────────────────
    PUT /api/treasury/:id  — admin only, tenant-scoped, manual rows only.
-   Body: { amount, type, source, description, transaction_date } (same shape as
-   POST). type is re-derived from a known category, else the supplied type.     */
+   Body: { amount, type, source, description, transaction_date, period_month }
+   (same shape as POST). type is re-derived from a known category, else the
+   supplied type; period_month is re-resolved for the (possibly new) category. */
 router.put('/:id', authenticate, requireAdmin, async (req, res) => {
   const row = await loadEditableTxn(req, res);
   if (!row) return;
 
-  const { amount, type, source, description, transaction_date } = req.body;
+  const { amount, type, source, description, transaction_date, period_month } = req.body;
 
   const parsed = parseFloat(amount);
   if (amount === undefined || amount === null || isNaN(parsed) || parsed <= 0) {
@@ -761,6 +786,12 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'النوع يجب أن يكون revenue أو expense' });
   }
 
+  /* period_month omitted (not null) → keep the row's month (e.g. an older client). */
+  const period = resolvePeriodMonth(sourceCode,
+    period_month === undefined ? row.period_month : period_month,
+    isYmd(transaction_date) ? transaction_date : row.transaction_date);
+  if (!period.ok) return res.status(400).json({ error: period.error });
+
   try {
     const { rows } = await pool.query(
       `UPDATE treasury_transactions
@@ -768,16 +799,19 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
               type             = $2,
               source           = $3,
               description      = $4,
-              transaction_date = COALESCE($5::date, transaction_date)
+              transaction_date = COALESCE($5::date, transaction_date),
+              period_month     = $8::date
         WHERE id = $6 AND business_id = $7::integer AND order_id IS NULL
         RETURNING
           id, order_id, amount::float AS amount, type, source, description,
-          TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, created_at`,
+          TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
+          TO_CHAR(period_month, 'YYYY-MM')        AS period_month, created_at`,
       [
         parsed.toFixed(2), resolvedType, sourceCode,
         description ? String(description).trim() || null : null,
         transaction_date || null,
         row.id, req.user.business_id,
+        period.value,
       ]);
     if (!rows[0]) return res.status(404).json({ error: 'العملية غير موجودة' });
     console.log(`✏️   Treasury entry #${row.id} edited → ${resolvedType} ${parsed.toFixed(2)} EGP "${sourceCode}"`);
@@ -804,6 +838,123 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('[treasury DELETE] Error:', err.message, err.stack);
     res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Reclassification review — «مراجعة التصنيفات»
+   ══════════════════════════════════════════════════════════════════════════
+   Salaries, subscriptions and profit shares used to be typed as «مصروفات
+   تشغيلية», so they hit the day they were paid. The admin reviews suggestions
+   (keyword rules in services/pnl.js) and applies the ones they agree with.
+   Only the category and «يخص شهر» change — amount, date and type stay as they
+   are, so the cash balance is identical before and after.                    */
+
+/* Categories a reviewed row may move to: the month-level ones, or back to a
+   daily one (undo). Never AD_SPEND / INVENTORY_PURCHASE / revenue. */
+const RECLASSIFY_TARGETS = new Set([
+  ...pnl.MONTHLY_SOURCES, ...pnl.DISTRIBUTION_SOURCES, ...pnl.DAILY_MANUAL_SOURCES,
+]);
+
+/* GET /api/treasury/reclassify-suggestions — admin only. Manual rows filed under
+   a daily category whose description looks like a fixed cost / distribution. */
+router.get('/reclassify-suggestions', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, amount::float AS amount, source, description,
+              TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date
+         FROM treasury_transactions
+        WHERE business_id = $1::integer
+          AND type = 'expense'
+          AND order_id IS NULL AND purchase_order_id IS NULL
+          AND source = ANY($2::text[])
+        ORDER BY transaction_date DESC, id DESC`,
+      [req.user.business_id, pnl.DAILY_MANUAL_SOURCES]);
+    const suggestions = [];
+    for (const r of rows) {
+      const s = pnl.suggestCategory(r);
+      if (s) {
+        suggestions.push({
+          ...r,
+          suggested_source:       s.source,
+          suggested_period_month: s.period_month,
+          reason:                 s.reason,
+        });
+      }
+    }
+    res.json({ suggestions });
+  } catch (err) {
+    console.error('[treasury/reclassify-suggestions] Error:', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* POST /api/treasury/reclassify — admin only.
+   Body: { items: [{ id, source, period_month? }] }. All-or-nothing: every row
+   must be a manual, unlocked expense and every target a reviewable category,
+   else nothing changes and the problems come back as 400.                    */
+router.post('/reclassify', authenticate, requireAdmin, async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : null;
+  if (!items || items.length === 0) {
+    return res.status(400).json({ error: 'لا توجد عمليات لإعادة تصنيفها' });
+  }
+  if (items.length > 500) {
+    return res.status(400).json({ error: 'الحد الأقصى 500 عملية في المرة' });
+  }
+  const ids = items.map((it) => parseInt(it?.id, 10));
+  if (ids.some((id) => !Number.isInteger(id) || id <= 0) || new Set(ids).size !== ids.length) {
+    return res.status(400).json({ error: 'معرّفات العمليات غير صالحة أو مكررة' });
+  }
+
+  const businessId = req.user.business_id;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, order_id, purchase_order_id, source, type,
+              TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date
+         FROM treasury_transactions
+        WHERE business_id = $1::integer AND id = ANY($2::int[])
+        FOR UPDATE`,
+      [businessId, ids]);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    const problems = [];
+    const updates  = [];
+    items.forEach((it, i) => {
+      const id  = ids[i];
+      const row = byId.get(id);
+      const target = String(it?.source || '').trim();
+      if (!row) return problems.push({ id, error: 'العملية غير موجودة' });
+      if (row.order_id !== null || row.purchase_order_id !== null || RESERVED_AUTO_SOURCES.has(row.source)) {
+        return problems.push({ id, error: 'عملية تلقائية — لا يمكن تعديلها' });
+      }
+      if (row.type !== 'expense') return problems.push({ id, error: 'ليست مصروفاً' });
+      if (!RECLASSIFY_TARGETS.has(target)) return problems.push({ id, error: `تصنيف غير مسموح: ${target}` });
+      const period = resolvePeriodMonth(target, it?.period_month, row.transaction_date);
+      if (!period.ok) return problems.push({ id, error: period.error });
+      updates.push({ id, source: target, period: period.value });
+    });
+    if (problems.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'لم يتم تطبيق أي تعديل — راجع العمليات المرفوضة', problems });
+    }
+
+    for (const u of updates) {
+      await client.query(
+        `UPDATE treasury_transactions SET source = $1, period_month = $2::date
+          WHERE id = $3 AND business_id = $4::integer AND order_id IS NULL`,
+        [u.source, u.period, u.id, businessId]);
+    }
+    await client.query('COMMIT');
+    console.log(`🏷️   Treasury reclassify: ${updates.length} row(s) re-categorised (tenant ${businessId})`);
+    res.json({ updated: updates.length });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[treasury/reclassify] Error:', err.message, err.stack);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  } finally {
+    client.release();
   }
 });
 

@@ -15,6 +15,7 @@ const HEARTBEAT_INTERVAL_MS = 90_000; // 90s
 const AFFILIATE_BLOCKED_PREFIXES = [
   '/dashboard/inventory',
   '/dashboard/treasury',
+  '/dashboard/monthly-statement',
   '/dashboard/integrations/bosta',
   '/dashboard/easyorder',
   '/dashboard/whatsapp',

@@ -1488,6 +1488,8 @@ export interface TreasuryTransaction {
    *  Non-null ⇒ the row is locked (no manual edit/delete). */
   purchase_order_id?: string | null;
   transaction_date: string;   // YYYY-MM-DD
+  /** «يخص شهر» ('YYYY-MM') — only on monthly / distribution categories. */
+  period_month?:    string | null;
   created_at:       string;   // ISO timestamp
 }
 
@@ -1537,24 +1539,41 @@ export const getCommissionsBreakdown = () =>
 
 /* ── Manual treasury entry ───────────────────────────────────────────── */
 
+/** Where a category counts in profit (mirrors services/pnl.js):
+ *  daily → «ربح الطلبات» on the payment day · monthly → the monthly statement
+ *  in the month it belongs to · distribution → monthly statement, below
+ *  operating profit · excluded → cash only (capital, stock, ads via Meta). */
+export type PnlTreatment = 'daily' | 'monthly' | 'distribution' | 'excluded';
+
 /** Known manual-entry categories (mirrors MANUAL_CATEGORIES in
- *  backend/src/routes/treasury.js). The category code is stored in `source`
+ *  backend/src/services/pnl.js). The category code is stored in `source`
  *  and dictates whether the entry is income (revenue) or expense — the server
- *  derives the sign, so the client need only send the code. */
+ *  derives the sign, so the client need only send the code — and where it
+ *  counts in profit. */
 export const MANUAL_CATEGORIES: Record<
   string,
-  { type: 'revenue' | 'expense'; label: string }
+  { type: 'revenue' | 'expense'; label: string; treatment: PnlTreatment }
 > = {
-  OPENING_BALANCE:               { type: 'revenue', label: 'رصيد افتتاحي'     },
-  AD_SPEND:                      { type: 'expense', label: 'مصاريف إعلانات'   },
-  PACKAGING_COST:                { type: 'expense', label: 'تغليف'            },
-  SHIPPING_PACKAGE_SUBSCRIPTION: { type: 'expense', label: 'باقة شحن'         },
-  OPERATIONAL_EXPENSE:           { type: 'expense', label: 'مصروفات تشغيلية'  },
+  OPENING_BALANCE:               { type: 'revenue', label: 'رصيد افتتاحي',        treatment: 'excluded'     },
+  OPERATIONAL_EXPENSE:           { type: 'expense', label: 'مصاريف تشغيل يومية',   treatment: 'daily'        },
+  PACKAGING_COST:                { type: 'expense', label: 'تغليف',               treatment: 'daily'        },
+  SHIPPING_PACKAGE_SUBSCRIPTION: { type: 'expense', label: 'باقة شحن',            treatment: 'daily'        },
+  SALARIES:                      { type: 'expense', label: 'رواتب',               treatment: 'monthly'      },
+  SUBSCRIPTIONS:                 { type: 'expense', label: 'اشتراكات وسيستمات',    treatment: 'monthly'      },
+  FIXED_OPEX:                    { type: 'expense', label: 'مصاريف ثابتة أخرى',    treatment: 'monthly'      },
+  PROFIT_DISTRIBUTION:           { type: 'expense', label: 'توزيع أرباح',          treatment: 'distribution' },
+  AD_SPEND:                      { type: 'expense', label: 'مصاريف إعلانات',       treatment: 'excluded'     },
   /* Stock CapEx: deducts drawer cash but is excluded from the dashboard P&L OPEX
-     (becomes COGS on delivery). Mirrors MANUAL_CATEGORIES in backend treasury.js. */
-  INVENTORY_PURCHASE:            { type: 'expense', label: 'شراء مخزون'       },
+     (becomes COGS on delivery). */
+  INVENTORY_PURCHASE:            { type: 'expense', label: 'شراء مخزون',           treatment: 'excluded'     },
 };
 export type ManualCategory = keyof typeof MANUAL_CATEGORIES;
+
+/** Categories that carry «يخص شهر». */
+export const usesPeriodMonth = (code: string) => {
+  const t = MANUAL_CATEGORIES[code]?.treatment;
+  return t === 'monthly' || t === 'distribution';
+};
 
 export interface AddTreasuryEntryPayload {
   amount:             number;
@@ -1563,7 +1582,58 @@ export interface AddTreasuryEntryPayload {
   source:             string;
   description?:       string;
   transaction_date?:  string;   // YYYY-MM-DD; defaults to today on server
+  /** «يخص شهر» 'YYYY-MM' — monthly / distribution categories only
+   *  (default: the payment month). Ignored for every other category. */
+  period_month?:      string | null;
 }
+
+/* ── Reclassification review («مراجعة التصنيفات») ─────────────────────── */
+export interface ReclassifySuggestion {
+  id:                     number;
+  amount:                 number;
+  source:                 string;   // current (daily) category
+  description:            string | null;
+  transaction_date:       string;   // YYYY-MM-DD
+  suggested_source:       string;
+  suggested_period_month: string;   // YYYY-MM
+  reason:                 string;
+}
+export const getReclassifySuggestions = () =>
+  api.get<{ suggestions: ReclassifySuggestion[] }>('/api/treasury/reclassify-suggestions');
+/** All-or-nothing: a 400 carries `problems` and changes nothing. */
+export const applyReclassification = (items: { id: number; source: string; period_month?: string | null }[]) =>
+  api.post<{ updated: number }>('/api/treasury/reclassify', { items });
+
+/* ── Monthly statement («التقرير الشهري») ──────────────────────────────── */
+export interface MonthlyStatementEntry {
+  id:               number;
+  transaction_date: string;
+  amount:           number;
+  description:      string | null;
+  /** true when no «يخص شهر» was set (the payment month was used). */
+  period_defaulted: boolean;
+}
+export interface MonthlyStatementLine {
+  source:  string;
+  label:   string;
+  amount:  number;
+  count:   number;
+  entries: MonthlyStatementEntry[];
+}
+export interface MonthlyStatement {
+  month:       string;   // YYYY-MM
+  start:       string;   // YYYY-MM-DD
+  end:         string;
+  /** Late deliveries / late entries can still move the numbers. */
+  provisional: boolean;
+  final_from:  string;   // YYYY-MM-DD
+  fixed:         { total: number; lines: MonthlyStatementLine[] };
+  distributions: { total: number; count: number; entries: MonthlyStatementEntry[] };
+  /** Daily-category rows paid this month that look like fixed costs. */
+  review:        { count: number; amount: number };
+}
+export const getMonthlyStatement = (month?: string) =>
+  api.get<MonthlyStatement>('/api/monthly-statement', { params: month ? { month } : {} });
 
 /** Manually add a revenue or expense entry (order_id = NULL). Admin only. */
 export const addTreasuryEntry = (data: AddTreasuryEntryPayload) =>

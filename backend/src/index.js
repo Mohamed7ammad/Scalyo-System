@@ -66,6 +66,7 @@ const returnCollectionsRoutes = require('./routes/returnCollections');
 const afterSalesRoutes        = require('./routes/afterSales');
 const exchangeReturnsRoutes   = require('./routes/exchangeReturns');
 const disciplineRoutes        = require('./routes/discipline');
+const monthlyStatementRoutes  = require('./routes/monthlyStatement');
 const trackAction             = require('./middleware/trackAction');
 
 const app = express();
@@ -104,6 +105,7 @@ app.use('/api/return-collections', returnCollectionsRoutes); // returned-parcel 
 app.use('/api/after-sales',      afterSalesRoutes); // post-delivery customer issue tracking (خدمة ما بعد البيع)
 app.use('/api/exchange-returns', exchangeReturnsRoutes); // exchange/return requests with video evidence (الاستبدال والاسترجاع)
 app.use('/api/discipline',       disciplineRoutes); // confirmation-team checkpoints, check-in, breaks (Stage 1)
+app.use('/api/monthly-statement', monthlyStatementRoutes); // «التقرير الشهري» — fixed costs + distributions by month
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 

@@ -10,12 +10,16 @@ import {
   updateTreasuryEntry,
   deleteTreasuryEntry,
   getBostaWallet,
+  getReclassifySuggestions,
+  applyReclassification,
   TreasuryTransaction,
   TreasurySummary,
   CommissionBreakdownDay,
   AddTreasuryEntryPayload,
   BostaWallet,
+  ReclassifySuggestion,
   MANUAL_CATEGORIES,
+  usesPeriodMonth,
 } from '@/lib/api';
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -186,8 +190,24 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
     cls: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-700/40',
   },
   OPERATIONAL_EXPENSE: {
-    label: 'مصروفات تشغيلية',
+    label: 'مصاريف تشغيل يومية',
     cls: 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700/40',
+  },
+  SALARIES: {
+    label: 'رواتب',
+    cls: 'bg-sky-100 text-sky-700 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-700/40',
+  },
+  SUBSCRIPTIONS: {
+    label: 'اشتراكات وسيستمات',
+    cls: 'bg-indigo-100 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700/40',
+  },
+  FIXED_OPEX: {
+    label: 'مصاريف ثابتة أخرى',
+    cls: 'bg-slate-200 text-slate-700 border-slate-300 dark:bg-slate-700/60 dark:text-slate-200 dark:border-slate-600',
+  },
+  PROFIT_DISTRIBUTION: {
+    label: 'توزيع أرباح',
+    cls: 'bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-700/40',
   },
   INVENTORY_PURCHASE: {
     label: 'شراء مخزون',
@@ -258,6 +278,23 @@ function fmtDate(d: string) {
   }
 }
 
+/* 'YYYY-MM' → «أكتوبر ٢٠٢٦». */
+function fmtMonth(ym: string) {
+  try {
+    const [y, m] = ym.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, 15)).toLocaleDateString('ar-EG', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  } catch {
+    return ym;
+  }
+}
+
+/* 'YYYY-MM' shifted by n months. */
+function shiftMonth(ym: string, n: number) {
+  const [y, m] = ym.split('-').map(Number);
+  const i = y * 12 + (m - 1) + n;
+  return `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    Source filter constants
 ───────────────────────────────────────────────────────────────────────────── */
@@ -266,6 +303,8 @@ const SOURCE_FILTERS = [
   { value: 'bosta_cod',  label: 'Bosta COD' },
   { value: 'deposit',    label: 'عربونات' },
   { value: 'commission', label: 'عمولات' },
+  /* Salaries, subscriptions, other fixed costs + profit distributions. */
+  { value: 'monthly',    label: 'مصاريف شهرية' },
 ] as const;
 type SourceFilter = (typeof SOURCE_FILTERS)[number]['value'];
 
@@ -455,16 +494,38 @@ function CommissionsModal({
 /* ─────────────────────────────────────────────────────────────────────────────
    AddEntryModal
 ───────────────────────────────────────────────────────────────────────────── */
-/* Category options for the dropdown, in display order. The leading value ''
-   is the "choose a category" placeholder. Each known code carries its own
-   revenue/expense sign via MANUAL_CATEGORIES — the user never picks the sign. */
-const CATEGORY_OPTIONS: { code: string; label: string }[] = [
-  { code: 'OPENING_BALANCE',               label: 'رصيد افتتاحي' },
-  { code: 'AD_SPEND',                      label: 'مصاريف إعلانات' },
-  { code: 'PACKAGING_COST',                label: 'تغليف' },
-  { code: 'SHIPPING_PACKAGE_SUBSCRIPTION', label: 'باقة شحن' },
-  { code: 'OPERATIONAL_EXPENSE',           label: 'مصروفات تشغيلية' },
-  { code: 'INVENTORY_PURCHASE',            label: 'شراء مخزون (لا يُحتسب ضمن مصاريف التشغيل)' },
+/* Category dropdown, grouped by WHERE the entry counts in profit (services/pnl.js
+   on the backend). The leading value '' is the "choose a category" placeholder.
+   Each known code carries its own revenue/expense sign via MANUAL_CATEGORIES —
+   the user never picks the sign. */
+const CATEGORY_GROUPS: { label: string; codes: string[] }[] = [
+  { label: 'مصاريف يومية — بتتخصم من ربح اليوم',  codes: ['OPERATIONAL_EXPENSE', 'PACKAGING_COST', 'SHIPPING_PACKAGE_SUBSCRIPTION'] },
+  { label: 'مصاريف شهرية — في التقرير الشهري بس', codes: ['SALARIES', 'SUBSCRIPTIONS', 'FIXED_OPEX'] },
+  { label: 'توزيع أرباح',                         codes: ['PROFIT_DISTRIBUTION'] },
+  { label: 'حركة نقدية بس',                       codes: ['AD_SPEND', 'INVENTORY_PURCHASE', 'OPENING_BALANCE'] },
+];
+
+/* One line under the dropdown: what this category does to profit. */
+const CATEGORY_HINT: Record<string, string> = {
+  OPERATIONAL_EXPENSE:           'بيتخصم من ربح يوم الدفع (مواصلات، عمالة يومية، ايزي اوردر…) ويتوزع على المنتجات حسب الطلبات المُسلَّمة.',
+  PACKAGING_COST:                'بيتخصم من ربح يوم الدفع ويتوزع على المنتجات حسب الطلبات المُسلَّمة.',
+  SHIPPING_PACKAGE_SUBSCRIPTION: 'بيتخصم من ربح يوم الدفع ويتوزع على المنتجات حسب الطلبات المُسلَّمة.',
+  SALARIES:                      'مش بيأثر على ربح اليوم ولا ربح المنتجات — بيظهر في التقرير الشهري للشهر اللي يخصه.',
+  SUBSCRIPTIONS:                 'مش بيأثر على ربح اليوم ولا ربح المنتجات — بيظهر في التقرير الشهري للشهر اللي يخصه.',
+  FIXED_OPEX:                    'إيجار، تأمين، خطوط وباقات موبايل… بيظهر في التقرير الشهري بس.',
+  PROFIT_DISTRIBUTION:           'مش مصروف تشغيل — بيظهر في التقرير الشهري تحت صافي الربح.',
+  AD_SPEND:                      'الإعلانات بتتحسب في الربح من Meta مباشرة — التسجيل هنا بيخصم من الخزينة بس.',
+  INVENTORY_PURCHASE:            'بيخصم من الخزينة بس — تكلفة البضاعة بتتحسب لما الطلب يتسلّم.',
+  OPENING_BALANCE:               'رأس مال — بيزوّد رصيد الخزينة ومش بيتحسب إيراد.',
+};
+
+/* Typed «راتب…» under a daily category? Offer the right one (mirrors the
+   backend review rules in services/pnl.js, simplified). */
+const NUDGES: { re: RegExp; code: string }[] = [
+  { re: /(ارباح|أرباح)/,                                       code: 'PROFIT_DISTRIBUTION' },
+  { re: /(راتب|رواتب|مرتب|بونص|حافز)/,                         code: 'SALARIES' },
+  { re: /(كلود|claude|سيرفر|server|اشتراك|وينر|دومين|gpt)/i,     code: 'SUBSCRIPTIONS' },
+  { re: /(ايجار|إيجار|تامين|تأمين|انترنت|إنترنت)/,              code: 'FIXED_OPEX' },
 ];
 
 interface AddEntryForm {
@@ -472,6 +533,8 @@ interface AddEntryForm {
   amount:      string;
   description: string;
   date:        string;   // YYYY-MM-DD — the ACTUAL expense date (defaults to today)
+  period:      string;   // YYYY-MM — «يخص شهر» (monthly / distribution categories)
+  periodTouched: boolean; // false → «يخص شهر» follows the payment date
 }
 
 /* Local (not UTC) YYYY-MM-DD, so a late-night entry keeps the operator's own day. */
@@ -489,28 +552,41 @@ function AddEntryModal({
   onSaved: (entry: TreasuryTransaction) => void;
   editing?: TreasuryTransaction | null;
 }) {
+  const initialDate = editing?.transaction_date?.slice(0, 10) ?? todayStr();
   const [form,   setForm]   = useState<AddEntryForm>({
     category:    editing?.source ?? '',
     amount:      editing ? String(editing.amount) : '',
     description: editing?.description ?? '',
-    date:        editing?.transaction_date?.slice(0, 10) ?? todayStr(),
+    date:        initialDate,
+    period:      editing?.period_month ?? initialDate.slice(0, 7),
+    periodTouched: Boolean(editing?.period_month && editing.period_month !== initialDate.slice(0, 7)),
   });
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState('');
 
-  const handle = (k: keyof AddEntryForm) =>
+  const handle = (k: 'category' | 'amount' | 'description') =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
       setForm((f) => ({ ...f, [k]: e.target.value }));
+  /* The payment date drives «يخص شهر» until the user picks a month themselves. */
+  const setDate = (date: string) =>
+    setForm((f) => ({ ...f, date, period: f.periodTouched || !/^\d{4}-\d{2}/.test(date) ? f.period : date.slice(0, 7) }));
+  const setPeriod = (period: string) => setForm((f) => ({ ...f, period, periodTouched: true }));
 
   /* Derived sign of the currently selected category (drives the +/− preview). */
   const selected = form.category ? MANUAL_CATEGORIES[form.category] : null;
   const isIncome = selected?.type === 'revenue';
+  const showPeriod = usesPeriodMonth(form.category);
+  const payMonth = /^\d{4}-\d{2}/.test(form.date) ? form.date.slice(0, 7) : todayStr().slice(0, 7);
+
+  /* Description looks like a fixed cost but the category is a daily one → nudge. */
+  const nudge = (!form.category || MANUAL_CATEGORIES[form.category]?.treatment === 'daily')
+    ? NUDGES.find((n) => n.re.test(form.description)) ?? null
+    : null;
 
   /* When editing a row whose source is a custom/free-text code not in the preset
      list, surface it as a selectable option so the dropdown reflects reality. */
-  const categoryOptions = editing && !CATEGORY_OPTIONS.some((c) => c.code === editing.source)
-    ? [{ code: editing.source, label: editing.source }, ...CATEGORY_OPTIONS]
-    : CATEGORY_OPTIONS;
+  const knownCodes = CATEGORY_GROUPS.flatMap((g) => g.codes);
+  const customCode = editing && !knownCodes.includes(editing.source) ? editing.source : null;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -525,6 +601,9 @@ function AddEntryModal({
     if (!/^\d{4}-\d{2}-\d{2}$/.test(form.date)) {
       return setErr('يرجى اختيار تاريخ صالح للمصروف');
     }
+    if (showPeriod && !/^\d{4}-\d{2}$/.test(form.period)) {
+      return setErr('يرجى اختيار الشهر اللي يخصه المصروف');
+    }
     setSaving(true);
     try {
       const known = MANUAL_CATEGORIES[form.category];
@@ -533,6 +612,8 @@ function AddEntryModal({
         source:           form.category,   // server derives revenue/expense from a known category
         description:      form.description.trim() || undefined,
         transaction_date: form.date,       // ACTUAL expense date → drives ledger + analytics grouping
+        /* «يخص شهر» — the month a fixed cost / distribution belongs to. */
+        period_month:     showPeriod ? form.period : null,
         /* Custom (non-preset) source has no implicit sign → carry the explicit type
            (preserve the existing one when editing, else default to expense). */
         ...(known ? {} : { type: (editing?.type === 'revenue' ? 'revenue' : 'expense') as 'revenue' | 'expense' }),
@@ -560,11 +641,12 @@ function AddEntryModal({
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 dark:border-slate-700"
+        className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 dark:border-slate-700
+          max-h-[92dvh] flex flex-col"
         dir="rtl"
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-indigo-100 dark:bg-indigo-900/40 flex items-center justify-center">
               <svg className="w-5 h-5 text-indigo-600 dark:text-indigo-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -575,7 +657,7 @@ function AddEntryModal({
               <h2 className="text-base font-bold text-slate-900 dark:text-white">
                 {editing ? 'تعديل معاملة يدوية' : 'إضافة معاملة يدوية'}
               </h2>
-              <p className="text-xs text-slate-400">تغليف · شحن · إعلانات · غيرها</p>
+              <p className="text-xs text-slate-400">مصاريف يومية · رواتب واشتراكات · توزيع أرباح · غيرها</p>
             </div>
           </div>
           <button
@@ -589,24 +671,30 @@ function AddEntryModal({
         </div>
 
         {/* Form */}
-        <form onSubmit={submit} className="p-6 space-y-4">
+        <form onSubmit={submit} className="p-6 space-y-4 overflow-y-auto">
           {err && <Alert msg={err} type="error" />}
 
-          {/* Transaction category — drives the income/expense sign */}
+          {/* Transaction category — drives the income/expense sign AND where it
+              counts in profit (grouped accordingly). */}
           <div>
             <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
               نوع المعاملة <span className="text-red-500">*</span>
             </label>
             <select value={form.category} onChange={handle('category')} className={inputCls}>
               <option value="" disabled>— اختر نوع المعاملة —</option>
-              {categoryOptions.map((c) => (
-                <option key={c.code} value={c.code}>{c.label}</option>
+              {customCode && <option value={customCode}>{customCode}</option>}
+              {CATEGORY_GROUPS.map((g) => (
+                <optgroup key={g.label} label={g.label}>
+                  {g.codes.map((code) => (
+                    <option key={code} value={code}>{MANUAL_CATEGORIES[code]?.label ?? code}</option>
+                  ))}
+                </optgroup>
               ))}
             </select>
 
             {/* Income / expense indicator — auto-flagged from the selection */}
             {selected && (
-              <div className="mt-2">
+              <div className="mt-2 space-y-1.5">
                 <span
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${
                     isIncome
@@ -617,6 +705,9 @@ function AddEntryModal({
                   <span className={`w-1.5 h-1.5 rounded-full ${isIncome ? 'bg-emerald-500' : 'bg-red-500'}`} />
                   {isIncome ? 'إيراد (+) — يُضاف إلى رصيد الشركة' : 'مصروف (−) — يُخصم من رصيد الشركة'}
                 </span>
+                {CATEGORY_HINT[form.category] && (
+                  <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">{CATEGORY_HINT[form.category]}</p>
+                )}
               </div>
             )}
           </div>
@@ -645,15 +736,56 @@ function AddEntryModal({
                 type="date"
                 value={form.date}
                 max={todayStr()}
-                onChange={handle('date')}
+                onChange={(e) => setDate(e.target.value)}
                 className={inputCls}
                 dir="ltr"
               />
             </div>
           </div>
           <p className="-mt-2 text-[11px] text-slate-400 dark:text-slate-500 leading-snug">
-            التاريخ الفعلي للمصروف — تُجمّع التقارير عليه، وليس على تاريخ الإدخال.
+            التاريخ الفعلي للدفع — الخزينة بتتسجل عليه، وليس على تاريخ الإدخال.
           </p>
+
+          {/* «يخص شهر» — monthly / distribution categories only */}
+          {showPeriod && (
+            <div className="rounded-xl border border-sky-200 dark:border-sky-800/50 bg-sky-50/60 dark:bg-sky-900/15 p-3 space-y-2">
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300">
+                يخص شهر <span className="text-red-500">*</span>
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="month"
+                  value={form.period}
+                  onChange={(e) => setPeriod(e.target.value)}
+                  className={`${inputCls} !w-auto min-w-[150px]`}
+                  dir="ltr"
+                />
+                {[
+                  { label: 'الشهر اللي فات', ym: shiftMonth(payMonth, -1) },
+                  { label: 'شهر الدفع',      ym: payMonth },
+                  { label: 'الشهر الجاي',    ym: shiftMonth(payMonth, 1) },
+                ].map((o) => (
+                  <button
+                    key={o.label}
+                    type="button"
+                    onClick={() => setPeriod(o.ym)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors ${
+                      form.period === o.ym
+                        ? 'bg-sky-600 text-white border-sky-600'
+                        : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-sky-400'
+                    }`}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] leading-snug text-sky-800/80 dark:text-sky-300/80">
+                {/^\d{4}-\d{2}$/.test(form.period)
+                  ? `هيظهر في التقرير الشهري لشهر ${fmtMonth(form.period)} — ومش هيخصم من ربح أي يوم.`
+                  : 'اختر الشهر اللي يخصه المصروف.'}
+              </p>
+            </div>
+          )}
 
           {/* Description */}
           <div>
@@ -667,6 +799,21 @@ function AddEntryModal({
               onChange={handle('description')}
               className={`${inputCls} resize-none`}
             />
+            {nudge && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 dark:border-amber-700/40
+                bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
+                <span>
+                  يبدو إنه «{MANUAL_CATEGORIES[nudge.code]?.label}» — مكانه {MANUAL_CATEGORIES[nudge.code]?.treatment === 'distribution' ? 'توزيع الأرباح' : 'المصاريف الشهرية'} عشان ما يخصمش من ربح اليوم.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, category: nudge.code }))}
+                  className="px-2 py-0.5 rounded-md bg-amber-600 hover:bg-amber-700 text-white font-semibold"
+                >
+                  نقل لـ «{MANUAL_CATEGORIES[nudge.code]?.label}»
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Actions */}
@@ -894,6 +1041,201 @@ function WalletTxModal({
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+   ReclassifyModal — «مراجعة التصنيفات»
+   Past salaries / subscriptions / profit shares typed as daily expenses. The
+   admin ticks the ones to move; only the category and «يخص شهر» change (amount,
+   date and the cash balance stay exactly as they are). All-or-nothing on save.
+───────────────────────────────────────────────────────────────────────────── */
+const RECLASSIFY_OPTIONS = ['SALARIES', 'SUBSCRIPTIONS', 'FIXED_OPEX', 'PROFIT_DISTRIBUTION'];
+
+interface ReviewRow extends ReclassifySuggestion {
+  picked: boolean;
+  target: string;
+  period: string;
+}
+
+function ReclassifyModal({
+  suggestions,
+  onClose,
+  onApplied,
+}: {
+  suggestions: ReclassifySuggestion[];
+  onClose:   () => void;
+  onApplied: (updated: number) => void;
+}) {
+  const [rows, setRows] = useState<ReviewRow[]>(() =>
+    suggestions.map((s) => ({ ...s, picked: true, target: s.suggested_source, period: s.suggested_period_month })));
+  const [busy, setBusy] = useState(false);
+  const [err,  setErr]  = useState('');
+
+  const patch = (id: number, p: Partial<ReviewRow>) =>
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
+  const picked = rows.filter((r) => r.picked);
+  const pickedTotal = picked.reduce((s, r) => s + r.amount, 0);
+  const allPicked = picked.length === rows.length;
+
+  /* Grouped by payment month, newest first (the order the API returns). */
+  const groups: { month: string; rows: ReviewRow[] }[] = [];
+  for (const r of rows) {
+    const m = r.transaction_date.slice(0, 7);
+    if (!groups.length || groups[groups.length - 1].month !== m) groups.push({ month: m, rows: [] });
+    groups[groups.length - 1].rows.push(r);
+  }
+
+  const apply = async () => {
+    if (!picked.length) return;
+    setBusy(true);
+    setErr('');
+    try {
+      const res = await applyReclassification(picked.map((r) => ({ id: r.id, source: r.target, period_month: r.period })));
+      onApplied(res.data.updated);
+    } catch (ex: unknown) {
+      const data = (ex as { response?: { data?: { error?: string; problems?: { id: number; error: string }[] } } })?.response?.data;
+      const first = data?.problems?.[0];
+      setErr(`${data?.error || 'فشل تطبيق التعديلات'}${first ? ` — #${first.id}: ${first.error}` : ''}`);
+      setBusy(false);
+    }
+  };
+
+  const selCls =
+    'px-2 py-1 text-xs rounded-lg border bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 ' +
+    'text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/40';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/50 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <div
+        className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92dvh] flex flex-col border border-slate-200 dark:border-slate-700"
+        dir="rtl"
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
+          <div className="min-w-0">
+            <h2 className="text-base font-bold text-slate-900 dark:text-white">مراجعة التصنيفات</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+              مصاريف اتسجلت «تشغيل يومية» وشكلها رواتب أو اشتراكات أو توزيع أرباح. اللي تعلّم عليه هيتنقل
+              للتقرير الشهري ومش هيخصم من ربح اليوم — المبلغ والتاريخ ورصيد الخزينة مش بيتغيروا.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-slate-800 transition-colors shrink-0"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {rows.length === 0 ? (
+            <p className="py-12 text-center text-sm text-slate-400">مفيش مصاريف محتاجة مراجعة ✓</p>
+          ) : (
+            <>
+              <label className="flex items-center gap-2 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={allPicked}
+                  onChange={() => setRows((rs) => rs.map((r) => ({ ...r, picked: !allPicked })))}
+                  className="w-4 h-4 accent-indigo-600"
+                />
+                تحديد الكل ({rows.length})
+              </label>
+              {groups.map((g) => (
+                <div key={g.month} className="mb-3">
+                  <p className="sticky top-0 z-10 bg-white/95 dark:bg-slate-900/95 py-1.5 text-[11px] font-bold text-slate-400 dark:text-slate-500">
+                    اتدفعت في {fmtMonth(g.month)}
+                  </p>
+                  <div className="divide-y divide-slate-100 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800">
+                    {g.rows.map((r) => (
+                      <div key={r.id} className={`px-3 py-2.5 ${r.picked ? '' : 'opacity-50'}`}>
+                        <div className="flex items-start gap-2.5">
+                          <input
+                            type="checkbox"
+                            checked={r.picked}
+                            onChange={() => patch(r.id, { picked: !r.picked })}
+                            className="mt-0.5 w-4 h-4 accent-indigo-600 shrink-0"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <p className="text-sm text-slate-800 dark:text-slate-100 truncate" title={r.description ?? ''}>
+                                {r.description || '—'}
+                              </p>
+                              <span className="text-sm font-bold tabular-nums text-red-600 dark:text-red-400 whitespace-nowrap">
+                                −{fmt(r.amount)} ج
+                              </span>
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                              <span className="whitespace-nowrap">{fmtDate(r.transaction_date)}</span>
+                              <span className="text-slate-300 dark:text-slate-600">·</span>
+                              <SourceBadge source={r.source} />
+                              <span aria-hidden>←</span>
+                              <select
+                                value={r.target}
+                                disabled={!r.picked}
+                                onChange={(e) => patch(r.id, { target: e.target.value })}
+                                className={selCls}
+                              >
+                                {RECLASSIFY_OPTIONS.map((c) => (
+                                  <option key={c} value={c}>{MANUAL_CATEGORIES[c]?.label ?? c}</option>
+                                ))}
+                              </select>
+                              <span className="whitespace-nowrap">يخص</span>
+                              <input
+                                type="month"
+                                value={r.period}
+                                disabled={!r.picked}
+                                onChange={(e) => patch(r.id, { period: e.target.value })}
+                                className={`${selCls} w-[140px]`}
+                                dir="ltr"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="shrink-0 border-t border-slate-100 dark:border-slate-800 px-5 py-3 space-y-2">
+          {err && <Alert msg={err} type="error" />}
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={apply}
+              disabled={busy || picked.length === 0}
+              className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                text-white rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              {busy ? <><Spin sm /> جارٍ التطبيق…</> : `نقل ${picked.length} للتقرير الشهري`}
+            </button>
+            <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+              {fmt(pickedTotal)} ج هتطلع من ربح الأيام اللي اتدفعت فيها
+            </span>
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="mr-auto px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium
+                text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              إلغاء
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
    Page
 ───────────────────────────────────────────────────────────────────────────── */
 interface Toast { message: string; type: 'success' | 'error' }
@@ -938,6 +1280,19 @@ export default function TreasuryPage() {
   const [isManualEntryOpen, setIsManualEntryOpen] = useState(false);
   const [editingTxn,  setEditingTxn]  = useState<TreasuryTransaction | null>(null);
   const [deletingTxn, setDeletingTxn] = useState<TreasuryTransaction | null>(null);
+
+  /* ── Reclassification review («مراجعة التصنيفات») ─────────────── */
+  const [suggestions,    setSuggestions]    = useState<ReclassifySuggestion[]>([]);
+  const [isReviewOpen,   setIsReviewOpen]   = useState(false);
+  const loadSuggestions = useCallback(async () => {
+    try {
+      const res = await getReclassifySuggestions();
+      setSuggestions(res.data.suggestions);
+    } catch {
+      setSuggestions([]);   // optional helper — never blocks the page
+    }
+  }, []);
+  useEffect(() => { loadSuggestions(); }, [loadSuggestions]);
 
   /* ── Live Bosta wallet state ──────────────────────────────────── */
   const [wallet,        setWallet]        = useState<BostaWallet | null>(null);
@@ -1030,10 +1385,19 @@ export default function TreasuryPage() {
     setIsManualEntryOpen(false);
     setEditingTxn(null);
     showToast(
-      `${wasEditing ? 'تم تعديل المعاملة' : 'تم حفظ المعاملة'}: ${entry.source} — ${fmt(entry.amount)} ج`,
+      `${wasEditing ? 'تم تعديل المعاملة' : 'تم حفظ المعاملة'}: ${SOURCE_META[entry.source]?.label ?? entry.source} — ${fmt(entry.amount)} ج`,
       'success',
     );
     loadTreasury();
+    loadSuggestions();
+  };
+
+  /* ── Reclassification applied ─────────────────────────────────── */
+  const handleReclassified = (updated: number) => {
+    setIsReviewOpen(false);
+    showToast(`تم نقل ${updated} مصروف للتقرير الشهري`, 'success');
+    loadTreasury();
+    loadSuggestions();
   };
 
   /* ── Delete callback — throws on failure so the modal can surface it ── */
@@ -1140,6 +1504,15 @@ export default function TreasuryPage() {
         />
       )}
 
+      {/* ── Reclassification review modal ───────────────────────── */}
+      {isReviewOpen && (
+        <ReclassifyModal
+          suggestions={suggestions}
+          onClose={() => setIsReviewOpen(false)}
+          onApplied={handleReclassified}
+        />
+      )}
+
       {/* ── Bosta wallet transactions modal ─────────────────────── */}
       {isWalletTxOpen && (
         <WalletTxModal
@@ -1167,6 +1540,17 @@ export default function TreasuryPage() {
               Treasury — إيرادات Bosta COD · العربونات · عمولات الموظفين
             </p>
           </div>
+          <button
+            onClick={() => router.push('/dashboard/monthly-statement')}
+            className="mr-auto flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border
+              border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300
+              hover:border-indigo-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+          >
+            التقرير الشهري
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -1432,6 +1816,27 @@ export default function TreasuryPage() {
             </div>
           </div>
 
+          {/* ── Reclassification review callout ──────────────────── */}
+          {suggestions.length > 0 && (
+            <div className="mb-4 flex flex-wrap items-center gap-3 px-4 py-3 rounded-xl border text-sm
+              bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-700/40">
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              </svg>
+              <span className="flex-1 min-w-[200px] leading-snug">
+                {suggestions.length} مصروف ({fmt(suggestions.reduce((s, x) => s + x.amount, 0))} ج) شكلهم رواتب أو اشتراكات
+                أو توزيع أرباح ومتسجلين «تشغيل يومية» — فبيخصموا من ربح اليوم اللي اتدفعوا فيه.
+              </span>
+              <button
+                onClick={() => setIsReviewOpen(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white shadow-sm"
+              >
+                مراجعة التصنيفات
+              </button>
+            </div>
+          )}
+
           {/* ── Unlogged-deposit callout ─────────────────────────── */}
           {unloggedDeposits > 0.01 && (
             <div className="mb-6">
@@ -1593,6 +1998,18 @@ export default function TreasuryPage() {
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
                           <SourceBadge source={t.source} />
+                          {t.period_month && (
+                            <span
+                              className={`block mt-1 text-[10px] ${
+                                t.period_month !== t.transaction_date.slice(0, 7)
+                                  ? 'text-sky-700 dark:text-sky-300 font-semibold'
+                                  : 'text-slate-400 dark:text-slate-500'
+                              }`}
+                              title="الشهر اللي يخصه المصروف في التقرير الشهري"
+                            >
+                              يخص {fmtMonth(t.period_month)}
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-3 max-w-[260px]">
                           <span
@@ -1671,7 +2088,11 @@ export default function TreasuryPage() {
                   {key === 'AD_SPEND'                      && 'مصاريف الإعلانات الممولة'}
                   {key === 'PACKAGING_COST'                && 'تكاليف التغليف والتعبئة'}
                   {key === 'SHIPPING_PACKAGE_SUBSCRIPTION' && 'اشتراك باقة الشحن'}
-                  {key === 'OPERATIONAL_EXPENSE'           && 'مصروفات تشغيلية عامة'}
+                  {key === 'OPERATIONAL_EXPENSE'           && 'مصاريف يومية — بتتخصم من ربح يوم الدفع'}
+                  {key === 'SALARIES'                      && 'رواتب — في التقرير الشهري بس'}
+                  {key === 'SUBSCRIPTIONS'                 && 'سيرفر، كلود، سيستمات — في التقرير الشهري بس'}
+                  {key === 'FIXED_OPEX'                    && 'إيجار، تأمين، خطوط — في التقرير الشهري بس'}
+                  {key === 'PROFIT_DISTRIBUTION'           && 'أرباح الإدارة والشركاء — تحت صافي الربح الشهري'}
                   {key === 'INVENTORY_PURCHASE'            && 'شراء مخزون — يُخصم من النقد ولا يدخل ضمن مصاريف التشغيل'}
                 </span>
               </div>
