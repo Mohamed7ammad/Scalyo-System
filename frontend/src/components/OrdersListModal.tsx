@@ -41,8 +41,13 @@ interface Props {
 const egp = (n: number) => Math.round(Number(n) || 0).toLocaleString('en-US');
 const num = (v: unknown) => Number(v) || 0;
 
-/* Bosta payment type → Arabic label (unknown types show the generic one). */
-const PAY_LABEL: Record<string, string> = { flash: 'دفع إلكتروني (Flash)', card: 'دفع بالكارت', electronic: 'دفع إلكتروني' };
+/* Bosta paymentType → the method shown after «دفع إلكتروني» (types seen in real
+   Bosta docs; anything else shows the generic label). */
+const PAY_KIND: Record<string, string> = { flash: 'Flash', card: 'كارت', valu: 'ValU', wallet: 'محفظة', 'apple pay': 'Apple Pay' };
+const payLabel = (t: string) => {
+  const kind = PAY_KIND[t.trim().toLowerCase()];
+  return kind ? `دفع إلكتروني (${kind})` : 'دفع إلكتروني';
+};
 
 /* ════════════════════════════════════════════════════════════════════
    OrdersListModal — reusable drill-down list behind a dashboard metric card.
@@ -76,7 +81,7 @@ export default function OrdersListModal({
     }
     if (o.payment_type) {
       tags.push({
-        text: PAY_LABEL[o.payment_type] ?? 'دفع إلكتروني',
+        text: payLabel(o.payment_type),
         cls: 'bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
         title: num(o.electronic) > 0 ? `اتدفع إلكترونياً: ${egp(num(o.electronic))} ج.م` : undefined,
       });
@@ -135,6 +140,11 @@ export default function OrdersListModal({
                 ? 'قيمة الطلبات = يتحصّل نقداً + مدفوع مقدماً (عربون أو دفع إلكتروني عند الاستلام). انسخ رقم الشحنة (AWB) وتتبّعه في بوابة بوسطة.'
                 : 'انسخ رقم الشحنة (AWB) وتتبّعه في بوابة بوسطة.'}
             </p>
+            {!loading && orders.length > 0 && orders.length < count && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+                يعرض أحدث {orders.length.toLocaleString('en-US')} طلب من {count.toLocaleString('en-US')} — الإجماليات فوق تشمل كل الطلبات.
+              </p>
+            )}
           </div>
           <button onClick={onClose}
             className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200

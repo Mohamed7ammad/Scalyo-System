@@ -841,9 +841,13 @@ router.get('/orders-by-status', authenticate, requireAdminOrPermission('analytic
                      Bosta zeroes the cash amount for these;
          cash_gap    a DELIVERED order where Bosta collected less than
                      price − deposit with no electronic payment on record.
-       A returned/failed parcel's cash is 0 because it came back — no tag. */
+       A returned/failed parcel's cash is 0 because it came back — no tag.
+       The list shows the newest 1,000 orders, but count + totals are window sums
+       over EVERY matching order (evaluated before LIMIT), so the header always
+       equals the card even for long ranges. */
     const { rows } = await pool.query(
-      `SELECT id,
+      `WITH s AS (
+       SELECT id,
               "Phone"             AS phone,
               "FullName"          AS customer_name,
               "BostaTrackingCode" AS tracking_number,
@@ -863,25 +867,37 @@ router.get('/orders-by-status', authenticate, requireAdminOrPermission('analytic
         WHERE 1=1${ordFilter}
           AND "Status" = ANY($${statusIdx}::text[])
           AND ${CR}
-        ORDER BY "createdAt" DESC
+       )
+       SELECT s.*,
+              COUNT(*)         OVER () AS _n,
+              SUM(cod)         OVER () AS _cod,
+              SUM(order_value) OVER () AS _value,
+              SUM(deposit)     OVER () AS _deposit,
+              SUM(electronic)  OVER () AS _electronic,
+              SUM(cash_gap)    OVER () AS _gap
+         FROM s
+        ORDER BY created_at DESC
         LIMIT 1000`,
       params
     );
 
-    const sum = (k) => Math.round(rows.reduce((s, r) => s + Number(r[k] || 0), 0) * 100) / 100;
-    const totalDeposit    = sum('deposit');
-    const totalElectronic = sum('electronic');
+    const t  = rows[0] || {};
+    const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+    const orders = rows.map(({ _n, _cod, _value, _deposit, _electronic, _gap, ...o }) => o);
+    const totalDeposit    = r2(t._deposit);
+    const totalElectronic = r2(t._electronic);
     res.json({
       startDate: (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,
       endDate:   (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,
-      count:     rows.length,
-      totalCod:  sum('cod'),
-      totalValue:      sum('order_value'),   // = the revenue card for delivered orders
+      count:     Number(t._n) || 0,          // ALL matching orders (= the card), not just the rows shown
+      shown:     orders.length,              // ≤ 1000
+      totalCod:  r2(t._cod),
+      totalValue:      r2(t._value),          // = the revenue card for delivered orders
       totalDeposit,
       totalElectronic,
-      totalPrepaid:    Math.round((totalDeposit + totalElectronic) * 100) / 100,
-      totalCashGap:    sum('cash_gap'),
-      orders:    rows,
+      totalPrepaid:    r2(totalDeposit + totalElectronic),
+      totalCashGap:    r2(t._gap),
+      orders,
     });
   } catch (err) {
     console.error('[analytics/orders-by-status]', err.message);

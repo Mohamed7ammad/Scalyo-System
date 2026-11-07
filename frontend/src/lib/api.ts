@@ -1187,7 +1187,9 @@ export interface OrdersByStatusRow extends InTransitOrderDetail {
 export interface OrdersByStatusResponse {
   startDate: string | null;
   endDate:   string | null;
-  count:     number;   // matches the card's overview count for the same statuses + filters
+  count:     number;   // ALL matching orders — matches the card's overview count (rows are capped at 1,000)
+  /** Rows actually returned (≤ 1,000); totals below always cover all `count` orders. */
+  shown?:    number;
   totalCod:  number;
   /** Σ order_value — equals «إجمالي الإيرادات» for the delivered card. */
   totalValue?:      number;
