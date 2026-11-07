@@ -689,11 +689,12 @@ router.get('/order-sources', authenticate, requireAdminOrPermission('analytics')
 
 /* Per-order COD used by every drill-down list (Bosta live COD, else price−deposit).
    Kept identical to the overview so the modal totals match the cards to the piaster. */
-const DRILLDOWN_COD_EXPR = (() => {
-  const P   = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
-  const DEP = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("depositAmount"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
-  return `COALESCE("expected_cod"::numeric, GREATEST(${P} - ${DEP}, 0))`;
-})();
+const DRILLDOWN_PRICE_EXPR = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("ProductPrice"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
+const DRILLDOWN_DEP_EXPR   = `COALESCE(NULLIF(REGEXP_REPLACE(COALESCE("depositAmount"::text,''),'[^0-9.]','','g'),'')::numeric, 0)`;
+const DRILLDOWN_COD_EXPR = `COALESCE("expected_cod"::numeric, GREATEST(${DRILLDOWN_PRICE_EXPR} - ${DRILLDOWN_DEP_EXPR}, 0))`;
+/* Paid electronically at the door (Bosta «Flash» / card) — read via jsonb so the
+   list works even before the startup migration adds the column. */
+const DRILLDOWN_PAYTYPE_EXPR = `(to_jsonb(orders) ->> 'bosta_payment_type')`;
 
 /* The order statuses a drill-down may request. Whitelisting keeps an arbitrary
    status string from ever reaching the query (the values are also parameterised). */
@@ -833,13 +834,30 @@ router.get('/orders-by-status', authenticate, requireAdminOrPermission('analytic
     params.push(statuses);
     const statusIdx = params.length;
 
+    /* order_value = the order price (what the revenue card sums); cod = the cash
+       Bosta collects at the door. The difference is explained per order:
+         deposit     paid in advance (treasury «عربون»);
+         electronic  paid electronically at the door (Bosta Flash / card) —
+                     Bosta zeroes the cash amount for these;
+         cash_gap    a DELIVERED order where Bosta collected less than
+                     price − deposit with no electronic payment on record.
+       A returned/failed parcel's cash is 0 because it came back — no tag. */
     const { rows } = await pool.query(
       `SELECT id,
               "Phone"             AS phone,
               "FullName"          AS customer_name,
               "BostaTrackingCode" AS tracking_number,
               "Status"            AS status,
-              ROUND(${DRILLDOWN_COD_EXPR}, 2) AS cod,
+              ROUND(${DRILLDOWN_COD_EXPR}, 2)   AS cod,
+              ROUND(${DRILLDOWN_PRICE_EXPR}, 2) AS order_value,
+              ROUND(${DRILLDOWN_DEP_EXPR}, 2)   AS deposit,
+              ${DRILLDOWN_PAYTYPE_EXPR}         AS payment_type,
+              CASE WHEN ${DRILLDOWN_PAYTYPE_EXPR} IS NOT NULL
+                   THEN ROUND(GREATEST(${DRILLDOWN_PRICE_EXPR} - ${DRILLDOWN_DEP_EXPR} - ${DRILLDOWN_COD_EXPR}, 0), 2)
+                   ELSE 0 END                   AS electronic,
+              CASE WHEN "Status" = 'تم التوصيل' AND ${DRILLDOWN_PAYTYPE_EXPR} IS NULL
+                   THEN ROUND(GREATEST(${DRILLDOWN_PRICE_EXPR} - ${DRILLDOWN_DEP_EXPR} - ${DRILLDOWN_COD_EXPR}, 0), 2)
+                   ELSE 0 END                   AS cash_gap,
               "createdAt"         AS created_at
          FROM orders
         WHERE 1=1${ordFilter}
@@ -850,12 +868,19 @@ router.get('/orders-by-status', authenticate, requireAdminOrPermission('analytic
       params
     );
 
-    const totalCod = rows.reduce((s, r) => s + Number(r.cod || 0), 0);
+    const sum = (k) => Math.round(rows.reduce((s, r) => s + Number(r[k] || 0), 0) * 100) / 100;
+    const totalDeposit    = sum('deposit');
+    const totalElectronic = sum('electronic');
     res.json({
       startDate: (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) ? startDate : null,
       endDate:   (endDate   && /^\d{4}-\d{2}-\d{2}$/.test(endDate))   ? endDate   : null,
       count:     rows.length,
-      totalCod:  Math.round(totalCod * 100) / 100,
+      totalCod:  sum('cod'),
+      totalValue:      sum('order_value'),   // = the revenue card for delivered orders
+      totalDeposit,
+      totalElectronic,
+      totalPrepaid:    Math.round((totalDeposit + totalElectronic) * 100) / 100,
+      totalCashGap:    sum('cash_gap'),
       orders:    rows,
     });
   } catch (err) {

@@ -2,7 +2,7 @@
 
 const express = require('express');
 const pool    = require('../config/db');
-const { captureActualShippingFee } = require('../services/bostaShippingFee');
+const bostaFee = require('../services/bostaShippingFee');   // via the module object (stubbable in tests)
 const returnPickups = require('../services/returnPickups');
 
 const router = express.Router();
@@ -343,6 +343,18 @@ pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS expected_cod NUMERIC(12,
   .then(() => console.log('✅  Orders: expected_cod column ready'))
   .catch((err) => console.warn('⚠️   expected_cod migration skipped:', err.message));
 
+/* ── bosta_payment_type / bosta_payment_ref — paid ELECTRONICALLY at the door ──
+   Bosta «Flash» / card payments: the delivery doc carries paymentInfo and Bosta
+   zeroes the CASH amount (expected_cod = 0) although the order was paid in full.
+   Recorded from the doc the webhook already fetches for the shipping fee
+   (services/bostaShippingFee.js captureDeliveryFacts). Lets the delivered list
+   label the order «دفع إلكتروني» and keeps the «بدون تحصيل» rule below from
+   mistaking a paid parcel for a return. NULL = not paid electronically. */
+pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bosta_payment_type VARCHAR(30),
+                               ADD COLUMN IF NOT EXISTS bosta_payment_ref  VARCHAR(80)`)
+  .then(() => console.log('✅  Orders: bosta_payment_type/ref columns ready'))
+  .catch((err) => console.warn('⚠️   bosta_payment migration skipped:', err.message));
+
 /* ── bosta_action_required — parcel is in Bosta's "في انتظار متابعتك" bucket ───
    A delivery exception the merchant must act on (failed attempts, address issue…).
    It is NOT actively moving toward the customer, so it is EXCLUDED from the
@@ -599,8 +611,10 @@ router.post('/bosta', async (req, res) => {
        physical return restocks the EXACT number of units that were shipped.  */
     const { rows } = await pool.query(
       `SELECT id, "ProductName", "Status", "sku", "ProductPrice", "depositAmount",
-              COALESCE("quantity", 1) AS quantity, business_id
-       FROM   orders
+              COALESCE("quantity", 1) AS quantity, business_id,
+              /* via jsonb so a webhook landing before the startup migration can't fail */
+              (to_jsonb(o) ->> 'bosta_payment_type') AS bosta_payment_type
+       FROM   orders o
        WHERE  "BostaTrackingCode" = $1`,
       [trackingNumber]
     );
@@ -657,8 +671,33 @@ router.post('/bosta', async (req, res) => {
     const mappedNow = BOSTA_TO_ORDER_STATUS[canonical];
     const isForwardMapped = mappedNow === undefined || mappedNow === 'تم الشحن';
     if (codZeroed && netForwardCod > 0 && isForwardMapped) {
-      console.log(`[Bosta Webhook] Order #${order.id} COD=0 (بدون تحصيل) on a COD order in forward state → forcing "returning_to_merchant"`);
-      canonical = 'returning_to_merchant';
+      /* GUARD — a customer who paid ELECTRONICALLY (Bosta «Flash» / card) also
+         gets cod = 0, but the parcel is PAID, not return-bound. Bosta's webhook
+         never carries paymentInfo, so check the order (already recorded) or ask
+         Bosta's delivery doc once. Only when Bosta CONFIRMS there is no electronic
+         payment is the zeroed cash read as «بدون تحصيل». If the doc can't be read
+         the payment can't be ruled out → do NOT force a return; the status stays
+         as Bosta reports it and Bosta's next event (returned / delivered) decides. */
+      let paid = order.bosta_payment_type ? { type: order.bosta_payment_type } : null;
+      let unknown = false;
+      if (!paid) {
+        try {
+          const check = await bostaFee.paymentInfoFor(trackingNumber, businessId);
+          paid = check.payment;
+          unknown = !check.reachable;
+        } catch (payErr) {
+          unknown = true;
+          console.warn(`[Bosta Webhook] paymentInfo check failed for #${order.id}:`, payErr.message);
+        }
+      }
+      if (paid) {
+        console.log(`[Bosta Webhook] Order #${order.id} COD=0 but PAID ELECTRONICALLY (${paid.type}) → NOT return-bound`);
+      } else if (unknown) {
+        console.warn(`[Bosta Webhook] Order #${order.id} COD=0 but Bosta's delivery doc is unreachable — can't rule out an electronic payment → NOT forcing a return`);
+      } else {
+        console.log(`[Bosta Webhook] Order #${order.id} COD=0 (بدون تحصيل) on a COD order in forward state → forcing "returning_to_merchant"`);
+        canonical = 'returning_to_merchant';
+      }
     }
 
     const newOrderStatus = BOSTA_TO_ORDER_STATUS[canonical];
@@ -738,14 +777,19 @@ router.post('/bosta', async (req, res) => {
        src/scripts/backfillShippingFees.js.                                     */
     if (canonical === 'delivered' || isReturnCanonical) {
       try {
-        const fee = await captureActualShippingFee(trackingNumber, businessId);
+        /* ONE doc fetch → the per-AWB fee AND any electronic payment (paymentInfo:
+           Bosta «Flash» / card at the door, which zeroes the cash amount). */
+        const { fee, payment } = await bostaFee.captureDeliveryFacts(trackingNumber, businessId);
         if (fee != null) {
           console.log(`✅  Order #${order.id} actual_shipping_fee = ${fee} EGP (Bosta priceAfterVat, ${canonical}).`);
         } else {
           console.log(`[Bosta Webhook] actual_shipping_fee not captured for #${order.id} (already set or fee unavailable) — backfill will retry.`);
         }
+        if (payment) {
+          console.log(`💳  Order #${order.id} paid electronically at the door (${payment.type}${payment.ref ? ` · ${payment.ref}` : ''}).`);
+        }
       } catch (feeErr) {
-        console.warn(`[Bosta Webhook] actual_shipping_fee capture error for #${order.id}:`, feeErr.message);
+        console.warn(`[Bosta Webhook] delivery facts capture error for #${order.id}:`, feeErr.message);
       }
     }
 

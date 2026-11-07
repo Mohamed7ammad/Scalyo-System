@@ -1173,12 +1173,29 @@ export const getInTransitOrders = (startDate?: string, endDate?: string, product
 /* ── Generic status drill-down (Confirmed / Delivered / Returned cards) ──────── */
 export interface OrdersByStatusRow extends InTransitOrderDetail {
   status?: string;   // the order's current status (shipped_at is absent here)
+  /** The order price — what the revenue card sums. */
+  order_value?:  number | string;
+  /** Paid in advance (treasury «عربون»). */
+  deposit?:      number | string;
+  /** Bosta payment type when paid electronically at the door (e.g. 'flash'). */
+  payment_type?: string | null;
+  /** Paid electronically at the door (Bosta zeroes the cash amount for these). */
+  electronic?:   number | string;
+  /** Delivered, but Bosta collected less than price − deposit with no electronic payment on record. */
+  cash_gap?:     number | string;
 }
 export interface OrdersByStatusResponse {
   startDate: string | null;
   endDate:   string | null;
   count:     number;   // matches the card's overview count for the same statuses + filters
   totalCod:  number;
+  /** Σ order_value — equals «إجمالي الإيرادات» for the delivered card. */
+  totalValue?:      number;
+  totalDeposit?:    number;
+  totalElectronic?: number;
+  /** deposits + electronic payments. */
+  totalPrepaid?:    number;
+  totalCashGap?:    number;
   orders:    OrdersByStatusRow[];
 }
 /** Orders matching a set of statuses, with the SAME date/product/campaign/agency

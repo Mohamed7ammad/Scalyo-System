@@ -8,6 +8,12 @@ export interface OrdersListRow {
   phone:           string;
   tracking_number: string | null;
   cod:             number | string;
+  /* Delivered list (showOrderValue) — explain cash vs order value per order. */
+  order_value?:    number | string;
+  deposit?:        number | string;
+  payment_type?:   string | null;
+  electronic?:     number | string;
+  cash_gap?:       number | string;
 }
 
 interface Props {
@@ -24,19 +30,32 @@ interface Props {
   countNoun?: string;
   emptyText?: string;
   emptySub?:  string;
+  /** Delivered list: show «قيمة الأوردر» next to the cash collected, the
+   *  per-order reason for any difference, and the 3-number summary line. */
+  showOrderValue?: boolean;
+  totalValue?:     number;
+  totalPrepaid?:   number;
+  totalCashGap?:   number;
 }
 
 const egp = (n: number) => Math.round(Number(n) || 0).toLocaleString('en-US');
+const num = (v: unknown) => Number(v) || 0;
+
+/* Bosta payment type → Arabic label (unknown types show the generic one). */
+const PAY_LABEL: Record<string, string> = { flash: 'دفع إلكتروني (Flash)', card: 'دفع بالكارت', electronic: 'دفع إلكتروني' };
 
 /* ════════════════════════════════════════════════════════════════════
    OrdersListModal — reusable drill-down list behind a dashboard metric card.
    Presentational: the parent fetches the rows (status-filtered, date-scoped)
    and passes them in. Shows Order #, Customer Phone, Bosta AWB (click-to-copy)
    and COD — so ops can copy an AWB and track it in the Bosta portal.
+   With showOrderValue (delivered list) it also shows the order value, so the
+   list reconciles with «إجمالي الإيرادات»: value − deposits − electronic = cash.
    ════════════════════════════════════════════════════════════════════ */
 export default function OrdersListModal({
   open, onClose, title, loading, count, totalCod, orders,
   dateStart, dateEnd, countNoun = 'طلب', emptyText = 'لا توجد طلبات', emptySub,
+  showOrderValue = false, totalValue, totalPrepaid, totalCashGap,
 }: Props) {
   const [copiedAwb, setCopiedAwb] = useState<string | null>(null);
   if (!open) return null;
@@ -47,6 +66,29 @@ export default function OrdersListModal({
       setCopiedAwb(awb);
       setTimeout(() => setCopiedAwb((c) => (c === awb ? null : c)), 1500);
     });
+  };
+
+  /* Why the cash differs from the order value (delivered list only). */
+  const tagsFor = (o: OrdersListRow) => {
+    const tags: { text: string; cls: string; title?: string }[] = [];
+    if (num(o.deposit) > 0.009) {
+      tags.push({ text: `عربون ${egp(num(o.deposit))}`, cls: 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' });
+    }
+    if (o.payment_type) {
+      tags.push({
+        text: PAY_LABEL[o.payment_type] ?? 'دفع إلكتروني',
+        cls: 'bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
+        title: num(o.electronic) > 0 ? `اتدفع إلكترونياً: ${egp(num(o.electronic))} ج.م` : undefined,
+      });
+    }
+    if (num(o.cash_gap) > 0.009) {
+      tags.push({
+        text: `فرق تحصيل ${egp(num(o.cash_gap))}`,
+        cls: 'bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+        title: 'بوسطة حصّلت أقل من سعر الأوردر ومفيش دفع إلكتروني مسجّل',
+      });
+    }
+    return tags;
   };
 
   return (
@@ -64,17 +106,35 @@ export default function OrdersListModal({
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               {loading
                 ? 'جارٍ التحميل…'
-                : <>
-                    {count.toLocaleString('en-US')} {countNoun}
-                    {' · '}مستحقات {egp(totalCod)} ج.م
-                    {dateStart && (
-                      <span className="text-slate-400"> · {dateStart}
-                        {dateEnd && dateEnd !== dateStart ? ` → ${dateEnd}` : ''}
-                      </span>
-                    )}
-                  </>}
+                : showOrderValue
+                  ? <>
+                      {count.toLocaleString('en-US')} {countNoun}
+                      {' · '}قيمة الطلبات {egp(totalValue ?? 0)}
+                      {' · '}يتحصّل نقداً {egp(totalCod)}
+                      {' · '}مدفوع مقدماً {egp(totalPrepaid ?? 0)}
+                      {(totalCashGap ?? 0) > 0.009 && <span className="text-rose-600 dark:text-rose-400">{' · '}فرق تحصيل {egp(totalCashGap ?? 0)}</span>}
+                      {' '}ج.م
+                      {dateStart && (
+                        <span className="text-slate-400"> · {dateStart}
+                          {dateEnd && dateEnd !== dateStart ? ` → ${dateEnd}` : ''}
+                        </span>
+                      )}
+                    </>
+                  : <>
+                      {count.toLocaleString('en-US')} {countNoun}
+                      {' · '}مستحقات {egp(totalCod)} ج.م
+                      {dateStart && (
+                        <span className="text-slate-400"> · {dateStart}
+                          {dateEnd && dateEnd !== dateStart ? ` → ${dateEnd}` : ''}
+                        </span>
+                      )}
+                    </>}
             </p>
-            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">انسخ رقم الشحنة (AWB) وتتبّعه في بوابة بوسطة.</p>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+              {showOrderValue
+                ? 'قيمة الطلبات = يتحصّل نقداً + مدفوع مقدماً (عربون أو دفع إلكتروني عند الاستلام). انسخ رقم الشحنة (AWB) وتتبّعه في بوابة بوسطة.'
+                : 'انسخ رقم الشحنة (AWB) وتتبّعه في بوابة بوسطة.'}
+            </p>
           </div>
           <button onClick={onClose}
             className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200
@@ -101,11 +161,14 @@ export default function OrdersListModal({
                   <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">رقم الطلب</th>
                   <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">هاتف العميل</th>
                   <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">رقم الشحنة (AWB)</th>
-                  <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">قيمة التحصيل (COD)</th>
+                  {showOrderValue && <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">قيمة الأوردر</th>}
+                  <th className="text-right font-semibold px-4 py-3 whitespace-nowrap">{showOrderValue ? 'يتحصّل نقداً' : 'قيمة التحصيل (COD)'}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {orders.map((o) => (
+                {orders.map((o) => {
+                  const tags = showOrderValue ? tagsFor(o) : [];
+                  return (
                   <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                     <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap tabular-nums text-xs" dir="ltr">#{o.id}</td>
                     <td className="px-4 py-3 text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{o.phone || '—'}</td>
@@ -128,11 +191,24 @@ export default function OrdersListModal({
                         <span className="text-slate-400 text-xs">لا يوجد</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-slate-800 dark:text-slate-100 font-semibold whitespace-nowrap tabular-nums" dir="ltr">
-                      {egp(o.cod as number)} ج.م
+                    {showOrderValue && (
+                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap tabular-nums" dir="ltr">
+                        {egp(num(o.order_value))} ج.م
+                      </td>
+                    )}
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className="text-slate-800 dark:text-slate-100 font-semibold tabular-nums" dir="ltr">{egp(o.cod as number)} ج.م</span>
+                      {tags.length > 0 && (
+                        <span className="flex flex-wrap gap-1 mt-1">
+                          {tags.map((t) => (
+                            <span key={t.text} title={t.title} className={`px-1.5 py-0.5 rounded-md text-[10px] font-semibold ${t.cls}`}>{t.text}</span>
+                          ))}
+                        </span>
+                      )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}

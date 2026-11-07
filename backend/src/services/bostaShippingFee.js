@@ -50,20 +50,42 @@ function extractPriceAfterVat(d) {
   return (priceAfterVat != null && Number.isFinite(priceAfterVat)) ? +priceAfterVat.toFixed(2) : null;
 }
 
-/* GET the delivery doc and return its net shipping fee, or null on any failure. */
-async function fetchActualShippingFee(trackingNumber, apiKey) {
+/* Electronic payment at the door (Bosta «Flash» / card …): the delivery doc then
+   carries paymentInfo { paymentType, transactionId, paymentOrderId } and Bosta
+   zeroes the CASH amount (cod = 0) — the money comes through Bosta's electronic
+   channel, not as cash COD. Returns { type, ref } or null. Pure. */
+function extractPaymentInfo(d) {
+  const p = d && d.paymentInfo;
+  if (!p || typeof p !== 'object') return null;
+  const type = String(p.paymentType ?? p.type ?? '').trim();
+  const ref  = String(p.transactionId ?? p.paymentOrderId ?? '').trim();
+  if (!type && !ref) return null;
+  return { type: (type || 'electronic').slice(0, 30), ref: ref ? ref.slice(0, 80) : null };
+}
+
+/* GET the delivery doc (or null on any failure). Swappable in tests — a dev box
+   must never call Bosta. */
+async function fetchDeliveryDocLive(trackingNumber, apiKey) {
   if (!trackingNumber || !apiKey) return null;
   try {
     const r = await axios.get(`${INT_BASE}/deliveries/business/${encodeURIComponent(trackingNumber)}`, {
       headers: { Authorization: apiKey, Accept: 'application/json' },
       timeout: 20000,
     });
-    return extractPriceAfterVat(r.data && (r.data.data || r.data));
+    return (r.data && (r.data.data || r.data)) || null;
   } catch (err) {
     console.warn(`[shippingFee] fetch failed for AWB ${trackingNumber}:`,
       err.response ? `HTTP ${err.response.status}` : err.message);
     return null;
   }
+}
+let docFetcher = fetchDeliveryDocLive;
+function _setDocFetcherForTests(fn) { docFetcher = fn || fetchDeliveryDocLive; }
+const fetchDeliveryDoc = (trackingNumber, apiKey) => docFetcher(trackingNumber, apiKey);
+
+/* GET the delivery doc and return its net shipping fee, or null on any failure. */
+async function fetchActualShippingFee(trackingNumber, apiKey) {
+  return extractPriceAfterVat(await fetchDeliveryDoc(trackingNumber, apiKey));
 }
 
 /* Read the tenant's Bosta api_key from shipping_settings (env fallback). */
@@ -98,4 +120,52 @@ async function captureActualShippingFee(trackingNumber, businessId, { onlyIfNull
   return rowCount > 0 ? fee : null;
 }
 
-module.exports = { extractPriceAfterVat, fetchActualShippingFee, captureActualShippingFee, readApiKey, INT_BASE };
+/* Store an electronic payment on the order (first one wins — idempotent). */
+async function recordPaymentInfo(trackingNumber, businessId, payment) {
+  if (!payment) return false;
+  const { rowCount } = await pool.query(
+    `UPDATE orders SET bosta_payment_type = $1, bosta_payment_ref = $2
+      WHERE "BostaTrackingCode" = $3 AND business_id = $4 AND bosta_payment_type IS NULL`,
+    [payment.type, payment.ref, trackingNumber, businessId]);
+  return rowCount > 0;
+}
+
+/* ONE delivery-doc fetch → the per-AWB fee (onlyIfNull) AND any electronic
+   payment, both persisted. Used by the webhook on billable terminal states.
+   Returns { fee, payment } (fee null when nothing was written). */
+async function captureDeliveryFacts(trackingNumber, businessId, { onlyIfNull = true } = {}) {
+  const apiKey = await readApiKey(businessId);
+  const doc = await fetchDeliveryDoc(trackingNumber, apiKey);
+  if (!doc) return { fee: null, payment: null };
+  let fee = extractPriceAfterVat(doc);
+  if (fee != null) {
+    const guard = onlyIfNull ? 'AND actual_shipping_fee IS NULL' : '';
+    const { rowCount } = await pool.query(
+      `UPDATE orders SET actual_shipping_fee = $1
+        WHERE "BostaTrackingCode" = $2 AND business_id = $3 ${guard}`,
+      [fee, trackingNumber, businessId]);
+    if (!rowCount) fee = null;
+  }
+  const payment = extractPaymentInfo(doc);
+  if (payment) await recordPaymentInfo(trackingNumber, businessId, payment);
+  return { fee, payment };
+}
+
+/* Was this parcel paid electronically? Fetches the doc once (and persists the
+   payment when found). Returns { reachable, payment }: reachable=false when the
+   doc couldn't be read (no api_key / network / HTTP error), so the caller can tell
+   «not paid» (reachable, payment null) from «unknown» (not reachable). */
+async function paymentInfoFor(trackingNumber, businessId) {
+  const apiKey = await readApiKey(businessId);
+  const doc = await fetchDeliveryDoc(trackingNumber, apiKey);
+  if (!doc) return { reachable: false, payment: null };
+  const payment = extractPaymentInfo(doc);
+  if (payment) await recordPaymentInfo(trackingNumber, businessId, payment);
+  return { reachable: true, payment };
+}
+
+module.exports = {
+  extractPriceAfterVat, extractPaymentInfo, fetchActualShippingFee, fetchDeliveryDoc,
+  captureActualShippingFee, captureDeliveryFacts, paymentInfoFor, recordPaymentInfo,
+  readApiKey, INT_BASE, _setDocFetcherForTests,
+};

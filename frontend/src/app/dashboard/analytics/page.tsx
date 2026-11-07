@@ -652,7 +652,11 @@ export default function AnalyticsDashboard() {
   const [activeModal,  setActiveModal]  = useState<ModalKey | null>(null);
   /* Expected-Profit breakdown modal (transparency drill-down). */
   const [showExpectedProfit, setShowExpectedProfit] = useState(false);
-  const [modalData,    setModalData]    = useState<{ count: number; totalCod: number; orders: OrdersListRow[] } | null>(null);
+  const [modalData,    setModalData]    = useState<{
+    count: number; totalCod: number; orders: OrdersListRow[];
+    /* delivered list: order value vs cash (deposits + electronic payments explain the gap) */
+    totalValue?: number; totalPrepaid?: number; totalCashGap?: number;
+  } | null>(null);
   const [modalLoading, setModalLoading] = useState(false);
 
   /* ── White-label branding (business name + logo) ────────────────── */
@@ -804,7 +808,12 @@ export default function AnalyticsDashboard() {
       ? getInTransitOrders(startDate, endDate, product, mediaBuyer)
       : getOrdersByStatus(MODAL_STATUSES[activeModal], startDate, endDate, product, mediaBuyer);
     req
-      .then((res) => { if (alive) setModalData({ count: res.data.count, totalCod: res.data.totalCod, orders: res.data.orders }); })
+      .then((res) => {
+        if (!alive) return;
+        const d = res.data as { count: number; totalCod: number; orders: OrdersListRow[]; totalValue?: number; totalPrepaid?: number; totalCashGap?: number };
+        setModalData({ count: d.count, totalCod: d.totalCod, orders: d.orders,
+          totalValue: d.totalValue, totalPrepaid: d.totalPrepaid, totalCashGap: d.totalCashGap });
+      })
       .catch(() => { if (alive) setModalData({ count: 0, totalCod: 0, orders: [] }); })
       .finally(() => { if (alive) setModalLoading(false); });
     return () => { alive = false; };
@@ -2747,6 +2756,10 @@ export default function AnalyticsDashboard() {
         countNoun={activeModal ? MODAL_META[activeModal].countNoun : 'طلب'}
         emptyText={activeModal ? MODAL_META[activeModal].empty : ''}
         emptySub={activeModal ? MODAL_META[activeModal].emptySub : ''}
+        showOrderValue={activeModal === 'delivered'}
+        totalValue={modalData?.totalValue}
+        totalPrepaid={modalData?.totalPrepaid}
+        totalCashGap={modalData?.totalCashGap}
       />
 
       {/* ═══════ Expected-Profit breakdown (transparency drill-down) ═══════ */}
