@@ -11,6 +11,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter } from 'next/navigation';
 import {
   getReturnCollections, updateReturnCollection, payReturnCollection,
@@ -759,7 +760,7 @@ export default function ReturnsCollectionPage() {
                       <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 align-top">
                         {!isReviewer && <td className="px-4 py-3 font-mono text-xs text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">{r.tracking_number || '—'}</td>}
                         <td className="px-4 py-3 text-slate-700 dark:text-slate-200 whitespace-nowrap">{r.customer_name || '—'}</td>
-                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr">{r.phone || '—'}</td>
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr"><PhoneCall phone={r.phone} /></td>
                         <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[14rem]">
                           <span className="line-clamp-2" title={r.product_name ?? ''}>{r.product_name || '—'}</span>
                         </td>

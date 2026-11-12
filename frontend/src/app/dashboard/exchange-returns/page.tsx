@@ -13,6 +13,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter } from 'next/navigation';
 import {
   getExchangeReturnRequests, createExchangeReturnRequest,
@@ -448,7 +449,7 @@ export default function ExchangeReturnsPage() {
                         <td className="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">
                           {r.customer_name}{' '}
                           <span className="font-normal text-slate-500 dark:text-slate-400">
-                            (<span dir="ltr">{r.customer_phone}</span>)
+                            <PhoneCall phone={r.customer_phone} />
                           </span>
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">

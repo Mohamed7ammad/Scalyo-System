@@ -13,6 +13,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter } from 'next/navigation';
 import { getDelayedShipments, DelayedOrdersResponse } from '@/lib/api';
 
@@ -183,7 +184,7 @@ export default function DelayedShipmentsPage() {
                       </td>
                       <td className="px-4 py-3 text-slate-400 dark:text-slate-500 whitespace-nowrap tabular-nums text-xs" dir="ltr">#{o.id}</td>
                       <td className="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">{o.customer_name || '—'}</td>
-                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap" dir="ltr">{o.phone || '—'}</td>
+                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap" dir="ltr"><PhoneCall phone={o.phone} /></td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">{o.city || '—'}</td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         {o.tracking_number ? (

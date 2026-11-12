@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter } from 'next/navigation';
 import {
   LineChart,
@@ -1719,7 +1720,7 @@ export default function AnalyticsDashboard() {
                             {day.orders.map((o) => (
                               <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                                 <td className="px-4 py-2.5 font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">{o.name}</td>
-                                <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400 whitespace-nowrap" dir="ltr">{o.phone}</td>
+                                <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400 whitespace-nowrap" dir="ltr"><PhoneCall phone={o.phone} /></td>
                                 <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400 max-w-[220px] truncate" title={o.product}>{o.product}</td>
                                 <td className="px-4 py-2.5 text-slate-500 dark:text-slate-500 whitespace-nowrap" dir="ltr">{o.delivered_at}</td>
                                 <td className="px-4 py-2.5 font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtEGP(o.value)}</td>

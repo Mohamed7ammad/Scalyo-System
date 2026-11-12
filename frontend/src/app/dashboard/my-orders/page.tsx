@@ -21,6 +21,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter } from 'next/navigation';
 import {
   getOrders, getOrderStats, createOrder, getProducts, userHasRole,
@@ -249,7 +250,7 @@ export default function MyOrdersPage() {
                         <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                           <td className="px-4 py-3 text-slate-400 dark:text-slate-500 whitespace-nowrap tabular-nums text-xs" dir="ltr">{o.id}</td>
                           <td className="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">{o.FullName || '—'}</td>
-                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap" dir="ltr">{o.Phone || '—'}</td>
+                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap" dir="ltr"><PhoneCall phone={o.Phone} /></td>
                           <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">{o.City || '—'}</td>
                           <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[16rem]">
                             <span className="line-clamp-2" title={o.ProductName ?? ''}>{o.ProductName || '—'}</span>

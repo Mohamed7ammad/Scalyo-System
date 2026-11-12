@@ -13,6 +13,7 @@
  */
 
 import { useState, useEffect } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter } from 'next/navigation';
 import { lookupOrders, userHasRole, OrderLookupRow, OrderLookupBy } from '@/lib/api';
 
@@ -188,7 +189,7 @@ export default function OrderLookupPage() {
                     <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                       <td className="px-4 py-3 text-slate-400 dark:text-slate-500 whitespace-nowrap tabular-nums text-xs" dir="ltr">{r.id}</td>
                       <td className="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">{r.customer_name || '—'}</td>
-                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap" dir="ltr">{r.phone || '—'}</td>
+                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300 whitespace-nowrap" dir="ltr"><PhoneCall phone={r.phone} /></td>
                       <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[18rem]">
                         <span className="line-clamp-2" title={r.product_name ?? ''}>{r.product_name || '—'}</span>
                       </td>

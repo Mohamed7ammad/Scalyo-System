@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 
 /* Minimal row shape shared by every drill-down (in-transit + status cards). */
 export interface OrdersListRow {
@@ -181,7 +182,7 @@ export default function OrdersListModal({
                   return (
                   <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                     <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap tabular-nums text-xs" dir="ltr">#{o.id}</td>
-                    <td className="px-4 py-3 text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr">{o.phone || '—'}</td>
+                    <td className="px-4 py-3 text-slate-700 dark:text-slate-200 whitespace-nowrap" dir="ltr"><PhoneCall phone={o.phone} /></td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       {o.tracking_number ? (
                         <button

@@ -12,6 +12,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter } from 'next/navigation';
 import {
   getAfterSalesIssues, createAfterSalesIssue, updateAfterSalesIssue, deleteAfterSalesIssue,
@@ -337,7 +338,7 @@ export default function AfterSalesPage() {
                     return (
                       <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 align-top">
                         <td className="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">{r.customer_name}</td>
-                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr">{r.customer_phone}</td>
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr"><PhoneCall phone={r.customer_phone} /></td>
                         <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[12rem]">
                           <span className="line-clamp-2" title={r.product_name ?? ''}>{r.product_name || '—'}</span>
                         </td>

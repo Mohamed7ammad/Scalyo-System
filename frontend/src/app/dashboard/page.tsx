@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useRouter, usePathname } from 'next/navigation';
 import {
   getOrders, getOrderStats, updateOrder, updateOrderPrice, deleteOrder, createOrder,
@@ -2914,7 +2915,7 @@ export default function DashboardPage() {
                                   <tr key={key} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/30 transition-colors">
                                     <td className="px-4 py-2.5 font-mono text-xs text-indigo-600 dark:text-indigo-400 whitespace-nowrap" dir="ltr">{key || '—'}</td>
                                     <td className="px-4 py-2.5 text-xs text-slate-700 dark:text-slate-300 whitespace-nowrap">{bostaStr(r.customer) || '—'}</td>
-                                    <td className="px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr">{bostaStr(r.phone) || '—'}</td>
+                                    <td className="px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr"><PhoneCall phone={bostaStr(r.phone)} /></td>
                                     <td className="px-4 py-2.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{bostaStr(r.city) || '—'}</td>
                                     {/* Product(s) — comma-separated when the parcel covers multiple items */}
                                     <td className="px-4 py-2.5 text-xs font-medium text-slate-700 dark:text-slate-300 max-w-[14rem]">

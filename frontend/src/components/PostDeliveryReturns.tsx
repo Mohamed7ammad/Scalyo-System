@@ -15,6 +15,7 @@
    ════════════════════════════════════════════════════════════════════════════ */
 
 import { useCallback, useEffect, useState } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import {
   getReturnPickups, linkReturnPickup, unlinkReturnPickup, ignoreReturnPickup, refreshReturnPickup,
   getProducts, Product, ReturnPickup, PickupStatus, PickupList,
@@ -155,7 +156,7 @@ export default function PostDeliveryReturns() {
                       {p.received_at ? `وصل ${fmtDay(p.received_at)}` : `في الطريق${p.state_code ? ` (حالة ${p.state_code})` : ''}`}
                     </span>
                     {p.customer_name || p.customer_phone ? (
-                      <span className="text-slate-500 dark:text-slate-400">· {p.customer_name || ''} <span dir="ltr">{p.customer_phone ? `0${p.customer_phone}` : ''}</span></span>
+                      <span className="text-slate-500 dark:text-slate-400">· {p.customer_name || ''} {p.customer_phone ? <PhoneCall phone={`0${p.customer_phone}`} /> : null}</span>
                     ) : null}
                   </div>
 

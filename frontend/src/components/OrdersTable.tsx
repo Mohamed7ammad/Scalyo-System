@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, memo } from 'react';
+import PhoneCall from '@/components/PhoneCall';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
 import { GOVERNORATES, resolveGovernorate, computeLostOrderTotal } from '@/lib/shipping';
@@ -1783,7 +1784,7 @@ const OrderRow = memo(function OrderRow({
       </td>
 
       <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap" dir="ltr">
-        {order.Phone}
+        <PhoneCall phone={order.Phone} />
       </td>
 
       {/* Delivery Rate dropdown — all roles */}
