@@ -49,6 +49,9 @@ export interface Order {
   /* When the CURRENT holder got the order (set on every reassignment). Only
      no-answer attempts logged after it count toward HER commission. */
   assigned_at?: string | null;
+  /* «مغلق» (closed by the owner): the status a reopen restores, and when. */
+  closed_from_status?: string | null;
+  closed_at?: string | null;
   /* Customer frequency — per-phone history computed locally by GET /api/orders
      (digits-only phone match, scoped to the tenant; zero Bosta calls).
      Cancellations and returns are separate: a confirmation-call cancellation
@@ -491,6 +494,8 @@ export interface Product {
   image_url:      string | null;
   aliases:        string[];        // external campaign codes that map to this product
   created_at:     string;
+  /* «إيقاف المنتج» — set while the owner has stopped it (admins only receive it). */
+  stopped_at?:    string | null;
 }
 
 // The create/update payload always carries the full admin-editable shape.
@@ -515,6 +520,35 @@ export const updateProduct = (id: string, data: Partial<ProductPayload>) =>
 
 export const deleteProduct = (id: string) =>
   api.delete(`/api/products/${id}`);
+
+/* ── «إيقاف المنتج» (admin) ─────────────────────────────────────────
+   Stop: its confirmed orders → «مغلق - لن يشحن» (agents keep commission and
+   confirmation credit), open ones → «مغلق - منتج متوقف», new ones born closed
+   until reopened. Reopen can restore the orders the stop closed.
+   The product is named by ONE handle: an inventory productId, an orderId
+   ("this order's product" — works for products not in inventory), or the
+   stoppedId of a stopped non-inventory product. */
+export type ProductStopSpec = { productId: string } | { orderId: number } | { stoppedId: number };
+export interface ProductStopPreview {
+  target:         { kind: 'inventory' | 'name'; name: string; productId: string | null; stoppedId: number | null };
+  stopped:        boolean;
+  stopped_at:     string | null;
+  confirmed:      number;                  // → «مغلق - لن يشحن»
+  open:           number;                  // → «مغلق - منتج متوقف»
+  openByStatus:   Record<string, number>;
+  commissionKept: number;                  // EGP the agents keep on those orders
+  deposits:       { count: number; total: number };
+  closedByStop:   number;                  // orders a reopen can restore
+}
+export interface StoppedProduct { kind: 'inventory' | 'name'; id: string; name: string; stopped_at: string }
+export const getStoppedProducts = () =>
+  api.get<StoppedProduct[]>('/api/products/stopped');
+export const getProductStopPreview = (spec: ProductStopSpec) =>
+  api.get<ProductStopPreview>('/api/products/stop/preview', { params: spec });
+export const stopProduct = (spec: ProductStopSpec) =>
+  api.post<{ ok: boolean; closedConfirmed: number; closedOpen: number; skipped: number }>('/api/products/stop', spec);
+export const reopenProduct = (spec: ProductStopSpec, restoreOrders: boolean) =>
+  api.post<{ ok: boolean; restored: number; skipped: number }>('/api/products/reopen', { ...spec, restoreOrders });
 
 /* ── Shipping (Bosta) ────────────────────────────────────────────── */
 export const getShippingPending = () =>

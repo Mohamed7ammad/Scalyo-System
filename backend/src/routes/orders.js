@@ -12,6 +12,10 @@ const postponed = require('../services/postponedCallbacks');   // «مؤجل» l
 const orderStatus = require('../services/orderStatus');
 const { syncEarnedCommission, recordAssignmentLog } = orderStatus;
 
+/* «مغلق» — orders the owner closed (services/closedStatuses.js). */
+const closed = require('../services/closedStatuses');
+const CLOSED_SQL = closed.sqlList(closed.CLOSED_STATUSES);
+
 /* Look up ONE agent's product-routing restriction (allowed_products) by email,
    tenant-scoped. Returns [] when unrestricted / unknown → handles all products. */
 async function agentAllowedProducts(email, businessId) {
@@ -48,6 +52,7 @@ const PROTECTED_TRANSFER_STATUSES = [
   'جاري الإعادة',    // returning
   'تم الإرجاع',      // returned
   'تم الرفض',        // rejected
+  ...closed.CLOSED_STATUSES,   // closed by the owner — keeps its holder (and her commission)
 ];
 const isProtectedStatus = (s) => PROTECTED_TRANSFER_STATUSES.includes(String(s ?? '').trim());
 
@@ -303,7 +308,7 @@ function buildOrderScope(req, include = {}) {
   const {
     agent: incAgent = true, status: incStatus = true, search: incSearch = true,
     product: incProduct = true, dates: incDates = true, reconfirm: incReconfirm = true,
-    resend: incResend = true,
+    resend: incResend = true, hideClosed = true,
   } = include;
 
   const lostOnly = String(req.query.lost).toLowerCase() === 'true';
@@ -330,18 +335,27 @@ function buildOrderScope(req, include = {}) {
     where.push(`"AssignedTo" = $${params.length}`);
   }
 
-  if (incStatus && typeof req.query.status === 'string' && req.query.status.trim()) {
+  const statuses = incStatus && typeof req.query.status === 'string'
+    ? req.query.status.split(',').map((s) => s.trim()).filter(Boolean)
+    : [];
+  if (statuses.length) {
     /* Comma-separated list → set membership. Lets a virtual queue tab span
        several real statuses (e.g. returns-audit = 'جاري الإعادة' + 'تم الإرجاع')
        in one server-filtered fetch. Single value stays a plain equality. */
-    const statuses = req.query.status.split(',').map((s) => s.trim()).filter(Boolean);
     if (statuses.length === 1) {
       params.push(statuses[0]);
       where.push(`btrim("Status") = $${params.length}`);
-    } else if (statuses.length > 1) {
+    } else {
       params.push(statuses);
       where.push(`btrim("Status") = ANY($${params.length})`);
     }
+  }
+
+  /* «مغلق» orders live in their own tab only — hidden from every other view
+     (الكل, exports, bulk actions, agent pills) unless the status filter asks
+     for a closed status. /stats opts out to count them (hideClosed: false). */
+  if (hideClosed && !statuses.some(closed.isClosed)) {
+    where.push(`COALESCE(btrim("Status"), '') NOT IN (${CLOSED_SQL})`);
   }
 
   if (incReconfirm && String(req.query.reconfirm).toLowerCase() === 'true') {
@@ -479,7 +493,10 @@ router.get('/', authenticate, async (req, res) => {
       o."quantity", o."AssignedTo", o."PostponedDate", o."BostaTrackingCode",
       o."rejectionReason", o."sku", o."hasDeposit", o."depositAmount",
       o."unit_cost_price", o.no_answer_logs, o.is_lost_order, o.shipped_at,
-      o.is_resend, o.resend_note, o.resend_at, o.assigned_at`;
+      o.is_resend, o.resend_note, o.resend_at, o.assigned_at,
+      /* «مغلق»: the status to restore on reopen (jsonb — safe before the startup migration) */
+      (to_jsonb(o) ->> 'closed_from_status') AS closed_from_status,
+      (to_jsonb(o) ->> 'closed_at')          AS closed_at`;
 
     let cursorClause = '';
     if (typeof req.query.cursor === 'string' && req.query.cursor.includes('|')) {
@@ -686,7 +703,7 @@ router.get('/stats', authenticate, async (req, res) => {
     /* Main scope: honors agent/product/date filters but NOT status/search/
        reconfirm — the stat cards + status-pill counts break down BY status,
        and (matching the old client behavior) search never affected the cards. */
-    const main = buildOrderScope(req, { status: false, search: false, reconfirm: false, resend: false });
+    const main = buildOrderScope(req, { status: false, search: false, reconfirm: false, resend: false, hideClosed: false });
 
     /* Agent-pill scope: whole tenant queue, ignoring every UI filter — the
        team-filter pill for agent B must keep its real count while agent A is
@@ -698,8 +715,10 @@ router.get('/stats', authenticate, async (req, res) => {
 
     const [counters, byStatusRows, byAgentRows] = await Promise.all([
       pool.query(
+        /* «مغلق - لن يشحن» still counts as confirmed (in total + confirmedCumulative);
+           «مغلق - منتج متوقف» counts nowhere — not even in the total. */
         `SELECT
-           COUNT(*)                                                                    AS total,
+           COUNT(*) FILTER (WHERE COALESCE(btrim("Status"), '') <> '${closed.CLOSED_PRODUCT}') AS total,
            COUNT(*) FILTER (WHERE "Status" = 'جديد')                                   AS new,
            COUNT(*) FILTER (WHERE "Status" = 'تم التأكيد')                             AS confirmed,
            COUNT(*) FILTER (WHERE "Status" = 'تم الرفض')                               AS rejected,
@@ -707,7 +726,7 @@ router.get('/stats', authenticate, async (req, res) => {
            COUNT(*) FILTER (WHERE "Status" = 'لا يرد')                                 AS "noAnswer",
            COUNT(*) FILTER (WHERE "Status" = 'تم الشحن')                               AS shipped,
            COUNT(*) FILTER (
-             WHERE "Status" IN ('تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع')
+             WHERE "Status" IN ('تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'مغلق - لن يشحن')
            )                                                                            AS "confirmedCumulative",
            COUNT(*) FILTER (
              WHERE "Status" IN ('تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع')
@@ -1700,6 +1719,34 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
       nextStatus: Object.prototype.hasOwnProperty.call(updates, 'Status') ? updates.Status : undefined,
     });
     if (blocked) return res.status(403).json({ error: blocked });
+  }
+
+  /* ── «مغلق» — closing / reopening is the owner's call (admin only) ────────────
+     «مغلق - لن يشحن» only from «تم التأكيد» (commission + confirmation credit
+     stay, reserved stock goes back); «مغلق - منتج متوقف» only via «إيقاف
+     المنتج». Reopening clears the close stamp. The closed_* columns are set
+     here, AFTER the whitelist — a client can never write them. */
+  if (Object.prototype.hasOwnProperty.call(updates, 'Status')) {
+    const nextS = String(updates.Status ?? '').trim();
+    const curS  = String(currentStatus ?? '').trim();
+    if (nextS !== curS && (closed.isClosed(nextS) || closed.isClosed(curS))) {
+      if (!hasRole(req.user, 'admin')) {
+        return res.status(403).json({ error: 'قفل وفتح الأوردرات للإدارة بس' });
+      }
+      if (closed.isClosed(nextS)) {
+        if (nextS !== closed.CLOSED_CONFIRMED) {
+          return res.status(400).json({ error: `«${closed.CLOSED_PRODUCT}» بيتحط من «إيقاف المنتج» بس` });
+        }
+        if (curS !== 'تم التأكيد') {
+          return res.status(400).json({ error: 'بيتقفل الأوردر المؤكد بس (حالته «تم التأكيد»)' });
+        }
+        Object.assign(updates, {
+          closed_from_status: curS, closed_at: new Date(), closed_by: req.user.email, closed_reason: 'manual',
+        });
+      } else {
+        Object.assign(updates, { closed_from_status: null, closed_at: null, closed_by: null, closed_reason: null });
+      }
+    }
   }
 
   /* ── «مؤجل» rules ─────────────────────────────────────────────────────────────

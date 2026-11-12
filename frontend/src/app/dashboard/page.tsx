@@ -14,8 +14,10 @@ import {
   Order, User, InventoryItem, Product, ShippingResult, StaffMember,
   BostaFollowUps, BostaFollowUpOrder, OrderStats, CallbackGate,
   ChatSource, CHAT_SOURCES, CHAT_SOURCE_LABELS,
+  getStoppedProducts, StoppedProduct, ProductStopSpec,
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
+import ProductStopDialog from '@/components/ProductStopDialog';
 /* NOTE: `xlsx` (SheetJS) is intentionally NOT imported at module level — it is
    a ~446 KB chunk that was shipping with the page's first load and stalling
    low-end mobile devices on parse/compile. It is dynamically imported inside
@@ -44,6 +46,11 @@ const PASSED_SHIPPING = ['تم الشحن', 'تم التوصيل', 'جاري ا�
    view (pull tracking numbers → audit the confirmation call recordings). */
 const RETURNS_AUDIT_FILTER = 'مرتجعات (تدقيق)';
 const RETURNS_AUDIT_STATUSES = ['جاري الإعادة', 'تم الإرجاع'];
+
+/* «مغلق» — orders the owner closed (won't ship). Admin-only virtual tab; they
+   are hidden from every other tab (the server hides them unless asked). */
+const CLOSED_FILTER = 'مغلق';
+const CLOSED_STATUSES = ['مغلق - لن يشحن', 'مغلق - منتج متوقف'];
 
 /* NOTE (reporting vs operations): the card NUMBERS stay cumulative/funnel, but
    card CLICKS are an operational gesture — they filter the table to the exact
@@ -298,6 +305,7 @@ export default function DashboardPage() {
        return statuses (comma list → btrim(Status) = ANY on the server); the
        reconfirm tab maps to its own flag, not a Status value. */
     status:    activeFilter === RETURNS_AUDIT_FILTER ? RETURNS_AUDIT_STATUSES.join(',')
+             : activeFilter === CLOSED_FILTER ? CLOSED_STATUSES.join(',')
              : activeFilter !== 'الكل' && activeFilter !== RECONFIRM_FILTER && activeFilter !== RESEND_FILTER ? activeFilter
              : undefined,
     reconfirm: activeFilter === RECONFIRM_FILTER ? true : undefined,
@@ -599,6 +607,12 @@ export default function DashboardPage() {
         setOrders((prev) => prev.map((o) => (o.id === id
           ? { ...o, ...(saved.ProductPrice !== undefined ? { ProductPrice: saved.ProductPrice } : {}),
                      ...(saved.quantity !== undefined ? { quantity: saved.quantity } : {}) }
+          : o)));
+      }
+      /* «قفل» / «فتح»: the server stamps what a later reopen restores. */
+      if (saved && 'closed_from_status' in saved) {
+        setOrders((prev) => prev.map((o) => (o.id === id
+          ? { ...o, closed_from_status: saved.closed_from_status ?? null, closed_at: saved.closed_at ?? null }
           : o)));
       }
       // Success: non-blocking toast + background stock-badge refresh (deferred,
@@ -1269,9 +1283,15 @@ export default function DashboardPage() {
       // Audit queue: both courier return states in one view.
       return dateScoped.filter((o) => RETURNS_AUDIT_STATUSES.includes(normStatus(o.Status)));
     }
+    if (activeFilter === CLOSED_FILTER) {
+      return dateScoped.filter((o) => CLOSED_STATUSES.includes(normStatus(o.Status)));
+    }
     // Build on the date-scoped set so the table matches the date-aware counts.
+    // «الكل» never shows closed orders (an order closed just now drops out at once).
     return dateScoped.filter(
-      (o) => activeFilter === 'الكل' || normStatus(o.Status) === normStatus(activeFilter)
+      (o) => activeFilter === 'الكل'
+        ? !CLOSED_STATUSES.includes(normStatus(o.Status))
+        : normStatus(o.Status) === normStatus(activeFilter)
     );
   })();
   const filtered: Order[] = pinnedDue.length
@@ -1430,6 +1450,21 @@ export default function DashboardPage() {
   };
 
   const isAdmin = user?.role === 'admin';
+
+  /* «مغلق» tab (admin): the stopped products, each with «تشغيل». Refetched when
+     the tab opens and after a stop / reopen (stoppedNonce). */
+  const [stoppedProducts, setStoppedProducts] = useState<StoppedProduct[]>([]);
+  const [stoppedNonce,    setStoppedNonce]    = useState(0);
+  const [reopenSpec,      setReopenSpec]      = useState<ProductStopSpec | null>(null);
+  useEffect(() => {
+    if (!isAdmin || activeFilter !== CLOSED_FILTER) return;
+    let alive = true;
+    getStoppedProducts()
+      .then((r) => { if (alive) setStoppedProducts(r.data); })
+      .catch(() => { if (alive) setStoppedProducts([]); });
+    return () => { alive = false; };
+  }, [isAdmin, activeFilter, stoppedNonce]);
+
   // Team-leaders (supervisors) may reassign/distribute the whole order pool, but
   // NOT the admin-only destructive/financial actions (bulk delete, shipping, AWB).
   const canReassign = isAdmin || !!user?.permissions?.includes('reassign_orders');
@@ -3260,6 +3295,28 @@ export default function DashboardPage() {
             </span>
           </button>
 
+          {/* ── «مغلق» tab — orders the owner closed (admin only) ─────────── */}
+          {isAdmin && (
+            <button
+              onClick={() => setActiveFilter(CLOSED_FILTER)}
+              title="أوردرات اتقفلت ومش هتتشحن — عمولة الموظفات محفوظة"
+              className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all duration-150
+                ${activeFilter === CLOSED_FILTER
+                  ? 'bg-stone-700 text-white shadow-sm'
+                  : 'bg-stone-50 text-stone-700 border border-stone-300 hover:bg-stone-100 dark:bg-stone-900/40 dark:text-stone-300 dark:border-stone-700 dark:hover:bg-stone-800'}`}
+            >
+              <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              {CLOSED_FILTER}
+              <span className={`mr-0.5 text-xs ${activeFilter === CLOSED_FILTER ? 'text-stone-200' : 'text-stone-400'}`}>
+                ({serverStats === null ? '…'
+                  : CLOSED_STATUSES.reduce((n, s) => n + (serverStats.byStatus[s] ?? 0), 0)})
+              </span>
+            </button>
+          )}
+
           {/* ── Returns-audit tab — appears only when the staff-analytics
                 drill-down (or a manual deep link) activated it ───────────── */}
           {activeFilter === RETURNS_AUDIT_FILTER && (
@@ -3281,6 +3338,44 @@ export default function DashboardPage() {
             </button>
           )}
         </div>
+
+        {/* ── «مغلق» tab: the stopped products (admin) ───────────────── */}
+        {isAdmin && activeFilter === CLOSED_FILTER && (
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-stone-200 dark:border-stone-700 px-4 py-3.5 shadow-sm">
+            <p className="text-xs font-semibold text-stone-500 dark:text-stone-400 mb-2.5">
+              المنتجات المتوقفة — أوردراتها الجديدة بتتقفل لوحدها
+            </p>
+            {stoppedProducts.length === 0 ? (
+              <p className="text-sm text-slate-400 dark:text-slate-500">
+                مفيش منتج متوقف. توقف منتج من زرار «قفل» على أي أوردر مؤكد ← «إيقاف المنتج كله».
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {stoppedProducts.map((p) => (
+                  <span key={`${p.kind}-${p.id}`}
+                    className="inline-flex items-center gap-2 pr-3 pl-1.5 py-1.5 rounded-xl text-sm
+                      bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-200">
+                    {p.name}
+                    <button
+                      onClick={() => setReopenSpec(p.kind === 'inventory' ? { productId: p.id } : { stoppedId: Number(p.id) })}
+                      className="px-2.5 py-1 rounded-lg text-xs font-semibold transition
+                        bg-emerald-600 text-white hover:bg-emerald-700"
+                    >
+                      تشغيل
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {reopenSpec && (
+          <ProductStopDialog
+            spec={reopenSpec}
+            onClose={() => setReopenSpec(null)}
+            onDone={(msg) => { setReopenSpec(null); showToast(msg, 'success'); silentRefresh(); setStoppedNonce((n) => n + 1); }}
+          />
+        )}
 
         {/* ── Search bar ───────────────────────────────────────────── */}
         {!loading && (
@@ -3618,6 +3713,7 @@ export default function DashboardPage() {
             onEndReached={loadMoreOrders}
             hasMore={hasMore}
             loadingMore={loadingMore}
+            onBulkChanged={() => { silentRefresh(); setStoppedNonce((n) => n + 1); }}
             emptyMessage={
               searchTerm.trim()
                 ? `لا توجد نتائج مطابقة لـ "${searchTerm.trim()}"`

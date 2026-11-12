@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, memo } from 'react';
 import PhoneCall from '@/components/PhoneCall';
+import ProductStopDialog from '@/components/ProductStopDialog';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
 import { GOVERNORATES, resolveGovernorate, computeLostOrderTotal } from '@/lib/shipping';
@@ -180,6 +181,21 @@ const STATUS_STYLES: Record<string, string> = {
   'تم الإرجاع':  'bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300',
   // Closed after the no-answer cycle (2 days with her + 2 review days)
   'ملغي - عدم رد نهائي': 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
+  // Closed by the owner (won't ship) — see CLOSED_CONFIRMED below
+  'مغلق - لن يشحن':     'bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-300',
+  'مغلق - منتج متوقف':  'bg-stone-100 text-stone-500 dark:bg-stone-900 dark:text-stone-400',
+};
+
+/* «مغلق» — orders the owner closed (backend services/closedStatuses.js).
+   CLOSED_CONFIRMED: a confirmed order that won't ship — the agent keeps her
+   commission and it still counts as confirmed. CLOSED_PRODUCT: an unconfirmed
+   order of a stopped product. Only an admin closes (the «قفل» row action, from
+   «تم التأكيد») or reopens; they are never in any status dropdown. */
+const CLOSED_CONFIRMED = 'مغلق - لن يشحن';
+const CLOSED_PRODUCT   = 'مغلق - منتج متوقف';
+const isClosedStatus = (s?: string | null) => {
+  const n = normStatus(s);
+  return n === CLOSED_CONFIRMED || n === CLOSED_PRODUCT;
 };
 
 const DELIVERY_RATE_OPTIONS = ['بدون', 'جديد', 'ضعيف', 'متوسط', 'ممتاز'];
@@ -284,6 +300,8 @@ interface Props {
   onEndReached?:    () => void;
   hasMore?:         boolean;
   loadingMore?:     boolean;
+  /* Many orders changed at once (e.g. «إيقاف المنتج») — the parent refetches. */
+  onBulkChanged?:   () => void;
 }
 
 function OrdersTable({
@@ -302,6 +320,7 @@ function OrdersTable({
   emptyMessage = 'لا توجد طلبات لعرضها',
   onToast,
   onEndReached, hasMore = false, loadingMore = false,
+  onBulkChanged,
 }: Props) {
   /* Ticking clock (30s) so the "منذ …" labels stay fresh and a new order's
      15-minute cooldown flips to actionable automatically — no refetch needed, so
@@ -320,6 +339,11 @@ function OrdersTable({
   const [pendingRejection, setPendingRejection] = useState<{ id: number; reason: string; otherText: string } | null>(null);
   const [editOtherText,    setEditOtherText]    = useState('');   // «سبب آخر» typed in the edit modal
   const [pendingPostpone,  setPendingPostpone]  = useState<{ id: number; date: string } | null>(null);
+  /* «قفل» / «فتح» (admin) — the order awaiting confirmation in the dialog */
+  const [pendingClose,     setPendingClose]     = useState<Order | null>(null);
+  const [pendingReopen,    setPendingReopen]    = useState<Order | null>(null);
+  /* «إيقاف المنتج كله» from the «قفل» dialog — the order whose product to stop */
+  const [productStopFor,   setProductStopFor]   = useState<number | null>(null);
 
   /* ─── Quick-edit (customer/shipping details) modal ─────────── */
   const [quickEdit, setQuickEdit] = useState<Order | null>(null);
@@ -695,6 +719,8 @@ function OrdersTable({
                     onEditModal={openEditModal}
                     onDelete={setDeleteConfirm}
                     onPriceChange={onPriceChange}
+                    onCloseOrder={setPendingClose}
+                    onReopenOrder={setPendingReopen}
                   />
                 );
               })}
@@ -1477,6 +1503,119 @@ function OrdersTable({
         </Modal>
       )}
 
+      {/* ── «قفل» — confirmed order that won't ship (admin) ───────── */}
+      {pendingClose !== null && (
+        <Modal onClose={() => setPendingClose(null)}>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl shrink-0 flex items-center justify-center bg-stone-100 dark:bg-stone-800">
+              <svg className="w-5 h-5 text-stone-600 dark:text-stone-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="font-bold text-gray-800 dark:text-slate-100 leading-tight">قفل الأوردر #{pendingClose.id}</h2>
+              <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">هيبقى «{CLOSED_CONFIRMED}»</p>
+            </div>
+          </div>
+          <ul className="space-y-1.5 text-sm text-gray-700 dark:text-slate-300 mb-4 list-disc pr-5">
+            <li>عمولة الموظفة ونسبة التأكيد بتاعتها فاضلين زي ما هما.</li>
+            <li>هيختفي من «تم التأكيد» و«بانتظار الشحن» ومن زرار الشحن لبوسطة.</li>
+            <li>لو المنتج في المخزن، القطعة اللي كانت محجوزة له بترجع للمخزون.</li>
+            <li>تلاقيه في تاب «مغلق» وتقدر تفتحه تاني في أي وقت.</li>
+          </ul>
+          {/* The whole product — a test product the owner won't stock */}
+          <button
+            type="button"
+            onClick={() => { const id = pendingClose.id; setPendingClose(null); setProductStopFor(id); }}
+            className="w-full mb-4 px-3 py-2.5 rounded-xl text-sm font-semibold text-right transition
+              border border-dashed border-stone-300 text-stone-700 hover:bg-stone-50
+              dark:border-stone-600 dark:text-stone-300 dark:hover:bg-stone-800/60"
+          >
+            مش الأوردر ده بس؟ <span className="underline">إيقاف المنتج كله</span>
+            <span className="block text-xs font-normal text-stone-500 dark:text-stone-400 mt-0.5">
+              {pendingClose.ProductName ? `«${pendingClose.ProductName}» — ` : ''}كل أوردراته تتقفل، والجديد يتقفل لوحده
+            </span>
+          </button>
+          {(Number(pendingClose.depositAmount) || 0) > 0 && (
+            <p className="mb-4 px-3 py-2 rounded-xl text-sm font-semibold bg-amber-50 text-amber-800 border border-amber-200
+              dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-700/50">
+              الأوردر ده عليه عربون {Number(pendingClose.depositAmount).toLocaleString('en-US')} ج.م — افتكر ترجّعه للعميل.
+            </p>
+          )}
+          <div className="flex gap-3">
+            <button
+              onClick={async () => {
+                const o = pendingClose;
+                if (!o) return;
+                setSavingId(o.id);
+                await onUpdate(o.id, { Status: CLOSED_CONFIRMED });
+                setSavingId(null);
+                setPendingClose(null);
+              }}
+              disabled={savingId !== null}
+              className="flex-1 bg-stone-700 hover:bg-stone-800 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50"
+            >
+              قفل الأوردر
+            </button>
+            <button
+              onClick={() => setPendingClose(null)}
+              className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition
+                bg-gray-100 hover:bg-gray-200 text-gray-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300"
+            >
+              إلغاء
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── «إيقاف المنتج كله» — the order's product (components/ProductStopDialog) ── */}
+      {productStopFor !== null && (
+        <ProductStopDialog
+          spec={{ orderId: productStopFor }}
+          onClose={() => setProductStopFor(null)}
+          onDone={(msg) => { setProductStopFor(null); onToast?.(msg, 'success'); onBulkChanged?.(); }}
+        />
+      )}
+
+      {/* ── «فتح» — reopen a closed order (admin) ───────────────────── */}
+      {pendingReopen !== null && (() => {
+        const back = (pendingReopen.closed_from_status ?? '').trim()
+          || (normStatus(pendingReopen.Status) === CLOSED_CONFIRMED ? 'تم التأكيد' : 'جديد');
+        return (
+          <Modal onClose={() => setPendingReopen(null)}>
+            <h2 className="font-bold text-gray-800 dark:text-slate-100 leading-tight mb-2">فتح الأوردر #{pendingReopen.id}</h2>
+            <p className="text-sm text-gray-600 dark:text-slate-300 mb-5">
+              هيرجع «{back}» زي ما كان قبل القفل
+              {back === 'تم التأكيد' ? ' — ويرجع في «بانتظار الشحن».' : '.'}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={async () => {
+                  const o = pendingReopen;
+                  if (!o) return;
+                  setSavingId(o.id);
+                  await onUpdate(o.id, { Status: back });
+                  setSavingId(null);
+                  setPendingReopen(null);
+                }}
+                disabled={savingId !== null}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50"
+              >
+                فتح الأوردر
+              </button>
+              <button
+                onClick={() => setPendingReopen(null)}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition
+                  bg-gray-100 hover:bg-gray-200 text-gray-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300"
+              >
+                إلغاء
+              </button>
+            </div>
+          </Modal>
+        );
+      })()}
+
       {/* ── Postpone Date Picker ────────────────────────────────── */}
       {pendingPostpone !== null && (
         <Modal onClose={() => setPendingPostpone(null)}>
@@ -1703,6 +1842,8 @@ interface OrderRowProps {
   onEditModal:          (order: Order) => void;
   onDelete:             (id: number) => void;
   onPriceChange?:       (id: number, price: number) => Promise<void>;
+  onCloseOrder:         (order: Order) => void;   // admin «قفل» (confirmed → «مغلق - لن يشحن»)
+  onReopenOrder:        (order: Order) => void;   // admin «فتح» (back to the status it had)
 }
 
 function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
@@ -1735,7 +1876,7 @@ const OrderRow = memo(function OrderRow({
   order, index, rowRef, role, canReassign, queueLocked, canDelete, canEditPrice, canEditFullOrder, exactTime, lostMode, now, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onCityChange, onShippingNotesBlur, onInlineAttempt,
-  onQuickEdit, onEditModal, onDelete, onPriceChange,
+  onQuickEdit, onEditModal, onDelete, onPriceChange, onCloseOrder, onReopenOrder,
 }: OrderRowProps) {
   /* ── Admin inline price edit (local row state) ────────────────────────────── */
   const [editingPrice, setEditingPrice] = useState(false);
@@ -2014,7 +2155,9 @@ const OrderRow = memo(function OrderRow({
           </>
         ) : (
           <span
-            title="هذه الحالة تُضبط تلقائياً عبر شركة الشحن"
+            title={isClosedStatus(order.Status)
+              ? 'اتقفل بقرار الإدارة — مش هيتشحن (عمولة الموظفة محفوظة)'
+              : 'هذه الحالة تُضبط تلقائياً عبر شركة الشحن'}
             className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold select-none
               ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
           >
@@ -2253,6 +2396,29 @@ const OrderRow = memo(function OrderRow({
                     dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
                 >
                   حذف
+                </button>
+              )}
+              {/* «قفل» / «فتح» — admin only (canDelete is the admin-only flag) */}
+              {canDelete && normStatus(order.Status) === 'تم التأكيد' && (
+                <button
+                  onClick={() => onCloseOrder(order)}
+                  title="مش هيتشحن — العمولة ونسبة التأكيد محفوظين"
+                  className="px-2.5 py-1 text-xs rounded-lg font-medium transition
+                    bg-stone-100 text-stone-700 hover:bg-stone-200
+                    dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700"
+                >
+                  قفل
+                </button>
+              )}
+              {canDelete && isClosedStatus(order.Status) && (
+                <button
+                  onClick={() => onReopenOrder(order)}
+                  title="رجّعه للحالة اللي كان عليها"
+                  className="px-2.5 py-1 text-xs rounded-lg font-medium transition
+                    bg-emerald-50 text-emerald-700 hover:bg-emerald-100
+                    dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
+                >
+                  فتح
                 </button>
               )}
             </>

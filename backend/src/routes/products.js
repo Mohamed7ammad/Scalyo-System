@@ -3,6 +3,7 @@ const pool         = require('../config/db');
 const authenticate = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/roleGuard');
 const { hasRole } = require('../utils/roles');
+const productStop = require('../services/productStop');
 
 const router = express.Router();
 
@@ -341,6 +342,82 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
     res.json({ message: 'تم حذف المنتج بنجاح' });
   } catch (err) {
     console.error(err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── «إيقاف المنتج» — the owner drops a product (services/productStop.js) ─────
+   Admin only. The product is named by ONE handle (query for GET, body for POST):
+     productId — an inventory product (the inventory page)
+     orderId   — the product of this order, in inventory or not (the «قفل» dialog)
+     stoppedId — a stopped non-inventory product (the «مغلق» tab list)
+   GET /stopped lists stopped products; GET /stop/preview shows what a stop /
+   reopen would do; POST /stop closes its orders (confirmed → «مغلق - لن يشحن»,
+   commission and confirmation credit kept; open → «مغلق - منتج متوقف») and
+   auto-closes new ones until POST /reopen ({ restoreOrders }).               */
+productStop.ensureSchema()
+  .then(() => console.log('✅  Products: stop / closed-order schema + trigger ready'))
+  .catch((err) => console.warn('⚠️   product-stop schema skipped:', err.message));
+
+const isUuid = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s));
+const posInt = (v) => (/^[1-9]\d{0,9}$/.test(String(v ?? '')) ? Number(v) : null);
+
+/* The one handle a request names → spec, or null when none / malformed. */
+function stopSpec(src = {}) {
+  if (src.productId != null && src.productId !== '') return isUuid(src.productId) ? { productId: String(src.productId) } : null;
+  if (src.orderId   != null && src.orderId   !== '') { const n = posInt(src.orderId);   return n ? { orderId: n }   : null; }
+  if (src.stoppedId != null && src.stoppedId !== '') { const n = posInt(src.stoppedId); return n ? { stoppedId: n } : null; }
+  return null;
+}
+const actorOf = (req) => ({ email: req.user.email, id: req.user.id });
+
+router.get('/stopped', authenticate, requireAdmin, async (req, res) => {
+  try {
+    res.json(await productStop.listStopped(req.user.business_id));
+  } catch (err) {
+    console.error('[products/stopped]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+router.get('/stop/preview', authenticate, requireAdmin, async (req, res) => {
+  const spec = stopSpec(req.query);
+  if (!spec) return res.status(400).json({ error: 'منتج غير صالح' });
+  try {
+    const p = await productStop.preview(req.user.business_id, spec);
+    if (!p) return res.status(404).json({ error: 'المنتج غير موجود' });
+    res.json(p);
+  } catch (err) {
+    console.error('[products/stop/preview]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+router.post('/stop', authenticate, requireAdmin, async (req, res) => {
+  const spec = stopSpec(req.body);
+  if (!spec || spec.stoppedId) return res.status(400).json({ error: 'منتج غير صالح' });
+  try {
+    const r = await productStop.stop({ businessId: req.user.business_id, spec, actor: actorOf(req) });
+    if (!r.ok) return res.status(r.status || 400).json({ error: r.error });
+    res.json(r);
+  } catch (err) {
+    console.error('[products/stop]', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+router.post('/reopen', authenticate, requireAdmin, async (req, res) => {
+  const spec = stopSpec(req.body);
+  if (!spec) return res.status(400).json({ error: 'منتج غير صالح' });
+  try {
+    const r = await productStop.reopen({
+      businessId: req.user.business_id, spec, actor: actorOf(req),
+      restoreOrders: req.body?.restoreOrders === true,
+    });
+    if (!r.ok) return res.status(r.status || 400).json({ error: r.error });
+    res.json(r);
+  } catch (err) {
+    console.error('[products/reopen]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });

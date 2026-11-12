@@ -6,6 +6,7 @@ const { getExternalAffiliateStats, aggregateSafqaBreakdowns } = require('../serv
 const { earnedCommissionSql } = require('../utils/commission');
 const { hasRole, hasAnyRole } = require('../utils/roles');
 const pnl = require('../services/pnl');
+const { CLOSED_PRODUCT } = require('../services/closedStatuses');
 
 const router = express.Router();
 
@@ -274,7 +275,10 @@ function buildCreatedRange(params, startDate, endDate, col) {
 function buildJoinOn(params, startDate, endDate, bizIdx) {
   /* TENANT ISOLATION: only orders belonging to the caller's tenant may ever be
      joined onto a user row.  bizIdx is the $-position of req.user.business_id. */
-  const bizClause = `o.business_id = $${bizIdx}::integer`;
+  /* «مغلق - منتج متوقف» (a stopped product's unconfirmed orders) counts neither
+     for nor against the agent — kept out of every per-agent number. */
+  const bizClause = `o.business_id = $${bizIdx}::integer`
+    + ` AND COALESCE(btrim(o."Status"), '') <> '${CLOSED_PRODUCT}'`;
 
   if (!startDate && !endDate) {
     // No date filter — join ALL of the tenant's orders for the agent.
@@ -320,7 +324,7 @@ function buildAgentSql(joinOnClause, whereClause, earnedSql) {
       COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')              AS status_cancelled,
       COUNT(o.id) FILTER (WHERE o."Status" IN (
         'تم التأكيد', 'تم الشحن', 'تم التوصيل',
-        'جاري الإعادة', 'تم الإرجاع'
+        'جاري الإعادة', 'تم الإرجاع', 'مغلق - لن يشحن'
       ))                                                                AS status_confirmed,
       COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')            AS status_delivered,
       COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع'))
@@ -485,7 +489,7 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
     ORDER BY
       COUNT(o.id) FILTER (WHERE o."Status" IN (
         'تم التأكيد', 'تم الشحن', 'تم التوصيل',
-        'جاري الإعادة', 'تم الإرجاع'
+        'جاري الإعادة', 'تم الإرجاع', 'مغلق - لن يشحن'
       )) DESC,
       COUNT(o.id) DESC,
       u.email ASC
@@ -564,7 +568,7 @@ router.get('/agents', authenticate, requireAdminOrAnyPermission('analytics', 'ma
         COUNT(o.id) FILTER (WHERE o."Status" = 'مؤجل')                  AS status_postponed,
         COUNT(o.id) FILTER (WHERE o."Status" = 'تم الرفض')              AS status_cancelled,
         COUNT(o.id) FILTER (WHERE o."Status" IN (
-          'تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع'
+          'تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'مغلق - لن يشحن'
         ))                                                                AS status_confirmed,
         COUNT(o.id) FILTER (WHERE o."Status" = 'تم التوصيل')            AS status_delivered,
         COUNT(o.id) FILTER (WHERE o."Status" IN ('جاري الإعادة', 'تم الإرجاع')) AS status_returned,
@@ -665,7 +669,7 @@ router.get('/order-sources', authenticate, requireAdminOrPermission('analytics')
       `SELECT COALESCE(NULLIF(TRIM(chat_source), ''), 'unset') AS source,
               COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE "Status" IN
-                ('تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'))::int AS confirmed,
+                ('تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع','مغلق - لن يشحن'))::int AS confirmed,
               COUNT(*) FILTER (WHERE "Status" = 'تم التوصيل')::int AS delivered
          FROM orders
         WHERE business_id = $1
@@ -1206,7 +1210,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         ))                                                                  AS units_shipped,
         COUNT(DISTINCT o.id) FILTER (WHERE o."Status" IN (
           'تم التأكيد','تم الشحن','تم التوصيل',
-          'جاري الإعادة','تم الإرجاع'
+          'جاري الإعادة','تم الإرجاع','مغلق - لن يشحن'
         ))                                                                  AS total_confirmed,
         COALESCE(SUM(
           CASE WHEN o."Status" = 'تم التوصيل' THEN ${PRICE_O} ELSE 0 END
@@ -1689,7 +1693,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
     SELECT
       COUNT(id) FILTER (WHERE ${CR})                                                  AS total_orders,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" IN (
-        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
+        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع','مغلق - لن يشحن'
       ))                                                                              AS total_confirmed,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" = 'تم التوصيل')                     AS total_delivered,
       COUNT(id) FILTER (WHERE ${CR} AND "Status" = 'تم الرفض')                       AS total_rejected,
@@ -1768,7 +1772,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       TO_CHAR(("createdAt" + INTERVAL '3 hours')::date, 'YYYY-MM-DD') AS stat_date,
       COUNT(id)                                                        AS orders,
       COUNT(id) FILTER (WHERE "Status" IN (
-        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
+        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع','مغلق - لن يشحن'
       ))                                                               AS confirmed,
       COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل')               AS delivered,
       COALESCE(SUM(CASE WHEN "Status"='تم التوصيل' THEN ${P} ELSE 0 END), 0) AS revenue,
@@ -1811,7 +1815,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       COALESCE(NULLIF(TRIM("City"),''), 'غير محدد')                               AS governorate,
       COUNT(*)                                                                      AS total_orders,
       COUNT(*) FILTER (WHERE "Status" IN (
-        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع'
+        'تم التأكيد','تم الشحن','تم التوصيل','جاري الإعادة','تم الإرجاع','مغلق - لن يشحن'
       ))                                                                            AS confirmed,
       COUNT(*) FILTER (WHERE "Status" = 'تم التوصيل')                             AS delivered,
       COUNT(*) FILTER (WHERE "Status" IN ('جاري الإعادة','تم الإرجاع'))           AS returned,

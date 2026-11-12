@@ -262,7 +262,8 @@ async function backfillTreasury() {
     {
       source:    'comm_confirmed',
       rateCol:   'comm_confirmed',
-      predicate: `o."Status" IN ('تم التأكيد', 'تم الشحن')`,
+      /* «مغلق - لن يشحن» = confirmed then closed by the owner — its commission stays valid */
+      predicate: `o."Status" IN ('تم التأكيد', 'تم الشحن', 'مغلق - لن يشحن')`,
       label:     'تأكيد',
     },
     {

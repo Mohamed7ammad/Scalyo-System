@@ -21,6 +21,7 @@
 const pool = require('../config/db');
 const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
 const noAnswer = require('./noAnswerCycles');
+const { CLOSED_CONFIRMED, CLOSED_PRODUCT } = require('./closedStatuses');
 
 /* ── Schema ─────────────────────────────────────────────────────────────────
    Stamping is skipped (never fails an update) if the columns couldn't be added. */
@@ -548,6 +549,11 @@ async function applyUpdate({ businessId, orderId, current, updates, expectedStat
       [noAnswer.REVIEW_NEW]: ['comm_no_answer'], // handed to a review account → still inside the no-answer cycle
       'مؤجل':       [],   // postponed → NO automatic commission; void all (deposit kept)
       'معلق حتي الدفع': [],   // pending-until-payment → NO commission; void all (deposit kept)
+      /* «مغلق» (services/closedStatuses.js) — the owner closed it; closing never
+         takes away what the agent already earned (no delivered/COD can exist
+         on an order that never shipped). */
+      [CLOSED_CONFIRMED]: ['comm_confirmed', 'comm_no_answer', 'comm_rejected'],
+      [CLOSED_PRODUCT]:   ['comm_confirmed', 'comm_no_answer', 'comm_rejected'],
     };
     const validSources = new Set(VALID_BY_STATUS[updates.Status] || []); // جديد/ملغي/… → none
     const toVoid = STATUS_DRIVEN_SOURCES.filter((s) => !validSources.has(s));

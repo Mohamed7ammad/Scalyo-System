@@ -40,6 +40,7 @@ import {
   getProducts, createProduct, updateProduct, deleteProduct, postPurchase,
   Product, ProductPayload, PurchaseResult,
 } from '@/lib/api';
+import ProductStopDialog from '@/components/ProductStopDialog';
 
 /* ── Number helpers ─────────────────────────────────────────────────────── */
 const parseN = (v: string | number | null | undefined): number =>
@@ -186,6 +187,9 @@ export default function InventoryPage() {
   const [deleting,      setDeleting]      = useState(false);
   const [toast,         setToast]         = useState<Toast | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /* ── «إيقاف المنتج» / «تشغيل» dialog (components/ProductStopDialog) ──── */
+  const [stopTarget,  setStopTarget]  = useState<Product | null>(null);
 
   /* ── Role gate — used to show/hide cost-price column + supply button ─── */
   const [isAdmin, setIsAdmin] = useState(false);
@@ -663,6 +667,13 @@ export default function InventoryPage() {
                             <span className="font-semibold text-slate-800 dark:text-slate-200 leading-snug">
                               {product.name}
                             </span>
+                            {product.stopped_at && (
+                              <span title="المنتج متوقف — أوردراته الجديدة بتتقفل لوحدها"
+                                className="shrink-0 px-2 py-0.5 rounded-md text-[11px] font-bold
+                                  bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-300">
+                                متوقف
+                              </span>
+                            )}
                           </div>
                         </td>
 
@@ -747,6 +758,15 @@ export default function InventoryPage() {
                                 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
                             >
                               حذف
+                            </button>
+                            <button
+                              onClick={() => setStopTarget(product)}
+                              title={product.stopped_at ? 'رجّع المنتج يشتغل عادي' : 'مش هنشحن المنتج ده — اقفل أوردراته'}
+                              className={`px-3 py-1.5 text-xs rounded-lg font-medium transition whitespace-nowrap ${product.stopped_at
+                                ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/60'
+                                : 'bg-stone-100 text-stone-700 hover:bg-stone-200 dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700'}`}
+                            >
+                              {product.stopped_at ? 'تشغيل' : 'إيقاف'}
                             </button>
                           </div>
                         </td>
@@ -1228,6 +1248,15 @@ export default function InventoryPage() {
             </div>
           )}
         </Modal>
+      )}
+
+      {/* ══ «إيقاف المنتج» / «تشغيل» — components/ProductStopDialog ═══════ */}
+      {stopTarget && (
+        <ProductStopDialog
+          spec={{ productId: stopTarget.id }}
+          onClose={() => setStopTarget(null)}
+          onDone={(msg) => { showToast(msg, 'success'); setStopTarget(null); fetchProducts(); }}
+        />
       )}
 
       {/* ══ Delete Confirmation Modal ════════════════════════════════════ */}
