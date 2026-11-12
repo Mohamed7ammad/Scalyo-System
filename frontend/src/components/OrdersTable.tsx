@@ -192,6 +192,19 @@ const REJECTION_REASONS = [
   'رقم غير صحيح/لا يرد',
 ];
 
+/* «سبب آخر» — the last choice: the agent types the reason herself. The
+   statistics group these under 'سبب آخر'; her words go to «الملاحظة» (never
+   «ملاحظات شركة الشحن», which is printed on the Bosta AWB). */
+const OTHER_REASON = 'سبب آخر';
+
+/* Append the typed reason to the order's note (nothing already noted is lost).
+   One line — the inline «الملاحظة» cell is a single-line input. */
+const appendRejectionNote = (note: string | null | undefined, text: string) => {
+  const line = `سبب الرفض: ${text.replace(/\s+/g, ' ').trim()}`;
+  const prev = (note ?? '').trim();
+  return prev ? `${prev} — ${line}` : line;
+};
+
 const DELIVERY_RATE_STYLES: Record<string, string> = {
   'بدون':  'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400',
   'جديد':  'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
@@ -304,7 +317,8 @@ function OrdersTable({
   const [editModal,       setEditModal]       = useState<Order | null>(null);
   const [editForm,        setEditForm]        = useState<Partial<Order>>({});
   const [deleteConfirm,   setDeleteConfirm]   = useState<number | null>(null);
-  const [pendingRejection, setPendingRejection] = useState<{ id: number; reason: string } | null>(null);
+  const [pendingRejection, setPendingRejection] = useState<{ id: number; reason: string; otherText: string } | null>(null);
+  const [editOtherText,    setEditOtherText]    = useState('');   // «سبب آخر» typed in the edit modal
   const [pendingPostpone,  setPendingPostpone]  = useState<{ id: number; date: string } | null>(null);
 
   /* ─── Quick-edit (customer/shipping details) modal ─────────── */
@@ -419,7 +433,7 @@ function OrdersTable({
   const handleStatusChange = (order: Order, Status: string) => {
     // Intercept "تم الرفض" to collect a rejection reason before saving
     if (Status === 'تم الرفض') {
-      setPendingRejection({ id: order.id, reason: '' });
+      setPendingRejection({ id: order.id, reason: '', otherText: '' });
       return;
     }
     // Intercept "مؤجل" to collect the follow-up date before saving
@@ -477,6 +491,7 @@ function OrdersTable({
   /* ─── Admin full-edit modal ────────────────────────────────── */
   const openEditModal = (order: Order) => {
     setEditForm({ ...order });
+    setEditOtherText('');
     setNoAnswerLogs(Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
     setAttemptsSince(order.assigned_at ?? null);
     setAttemptMsg('');
@@ -498,6 +513,14 @@ function OrdersTable({
     for (const k of EDITABLE_KEYS) {
       if (editForm[k] !== undefined) (fields as Record<string, unknown>)[k] = editForm[k];
     }
+    /* «الملاحظة» — sent only when it changed, so a stale copy never overwrites
+       an agent's inline note (it was missing from EDITABLE_KEYS, so edits here
+       silently didn't save). «سبب آخر» appends the typed reason to it. */
+    let note = editForm.Note ?? '';
+    if (editForm.Status === 'تم الرفض' && editForm.rejectionReason === OTHER_REASON && editOtherText.trim()) {
+      note = appendRejectionNote(note, editOtherText);
+    }
+    if (note !== (editModal.Note ?? '')) fields.Note = note;
     setSavingId(editModal.id);
     await onUpdate(editModal.id, fields);
     setEditModal(null);
@@ -1172,7 +1195,27 @@ function OrdersTable({
                 >
                   <option value="">— اختر سبب الرفض (اختياري) —</option>
                   {REJECTION_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                  <option value={OTHER_REASON}>سبب آخر (اكتب السبب بنفسك)</option>
                 </select>
+                {editForm.rejectionReason === OTHER_REASON && (
+                  <div className="mt-2">
+                    <input
+                      type="text"
+                      maxLength={300}
+                      value={editOtherText}
+                      onChange={(e) => setEditOtherText(e.target.value)}
+                      placeholder="اكتب سبب الرفض بنفسك…"
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                        border border-gray-300 dark:border-slate-700
+                        bg-white dark:bg-slate-800
+                        text-gray-900 dark:text-slate-200
+                        focus:ring-2 focus:ring-red-400"
+                    />
+                    <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
+                      هيتضاف لخانة «الملاحظة» — مش لـ«ملاحظات شركة الشحن».
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1311,7 +1354,10 @@ function OrdersTable({
           <div className="flex gap-3 mt-6">
             <button
               onClick={saveEditModal}
-              disabled={savingId !== null}
+              disabled={savingId !== null
+                /* switching to «سبب آخر» needs the reason typed */
+                || (editForm.Status === 'تم الرفض' && editForm.rejectionReason === OTHER_REASON
+                    && editModal.rejectionReason !== OTHER_REASON && !editOtherText.trim())}
               className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl
                 text-sm font-semibold transition disabled:opacity-50"
             >
@@ -1364,25 +1410,60 @@ function OrdersTable({
             {REJECTION_REASONS.map((r) => (
               <option key={r} value={r}>{r}</option>
             ))}
+            <option value={OTHER_REASON}>سبب آخر (اكتب السبب بنفسك)</option>
           </select>
+
+          {/* «سبب آخر» — the agent writes the reason; it is saved to «الملاحظة» */}
+          {pendingRejection.reason === OTHER_REASON && (
+            <div className="-mt-2 mb-5">
+              <label className="block text-sm font-semibold text-gray-700 dark:text-slate-200 mb-1">
+                اكتب سبب الرفض بنفسك
+              </label>
+              <textarea
+                autoFocus
+                rows={2}
+                maxLength={300}
+                value={pendingRejection.otherText}
+                onChange={(e) => setPendingRejection((p) => p ? { ...p, otherText: e.target.value } : null)}
+                placeholder="مثال: العميل مسافر ومش هيقدر يستلم الشهر ده"
+                className="w-full px-3 py-2.5 rounded-xl text-sm outline-none resize-none
+                  border border-gray-300 dark:border-slate-600
+                  bg-white dark:bg-slate-800
+                  text-gray-900 dark:text-slate-100
+                  focus:ring-2 focus:ring-red-400"
+              />
+              <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
+                هيتسجّل في خانة «الملاحظة» — مش في «ملاحظات شركة الشحن».
+              </p>
+            </div>
+          )}
 
           <div className="flex gap-3">
             <button
               onClick={async () => {
                 if (!pendingRejection) return;
+                const isOther = pendingRejection.reason === OTHER_REASON;
+                if (isOther && !pendingRejection.otherText.trim()) return;
+                const current = orders.find((o) => o.id === pendingRejection.id);
                 setSavingId(pendingRejection.id);
                 await onUpdate(pendingRejection.id, {
                   Status: 'تم الرفض',
                   ...(pendingRejection.reason ? { rejectionReason: pendingRejection.reason } : {}),
+                  ...(isOther ? { Note: appendRejectionNote(current?.Note, pendingRejection.otherText) } : {}),
                 });
                 setSavingId(null);
                 setPendingRejection(null);
               }}
-              disabled={savingId !== null}
+              disabled={savingId !== null
+                || (pendingRejection.reason === OTHER_REASON && !pendingRejection.otherText.trim())}
               className="flex-1 bg-red-600 hover:bg-red-700 text-white py-2.5 rounded-xl
                 text-sm font-semibold transition disabled:opacity-50"
             >
-              {pendingRejection.reason ? 'تأكيد الرفض' : 'رفض بدون سبب'}
+              {!pendingRejection.reason
+                ? 'رفض بدون سبب'
+                : pendingRejection.reason === OTHER_REASON && !pendingRejection.otherText.trim()
+                  ? 'اكتب السبب الأول'
+                  : 'تأكيد الرفض'}
             </button>
             <button
               onClick={() => setPendingRejection(null)}
