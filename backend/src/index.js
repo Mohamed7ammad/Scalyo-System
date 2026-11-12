@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express                 = require('express');
 const cors                    = require('cors');
+const compression             = require('compression');
 const startOrderSyncCron      = require('./services/googleSheetSync');
 const { startMetaSyncCron }   = require('./cron/metaSync');
 const { startBostaReconcileCron } = require('./cron/bostaReconcile');
@@ -83,6 +84,9 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true,
 }));
+/* gzip every JSON response over 1 KB — a page of 100 orders goes from ~91 KB
+   to a fraction on the agents' phones (no streaming endpoints to protect). */
+app.use(compression({ threshold: 1024 }));
 app.use(express.json());
 
 app.use('/api/auth',             authRoutes);

@@ -155,6 +155,10 @@ export interface PaginatedOrders {
      callback she holds in this queue + the queue-lock state. */
   pinned?:       Order[];
   callbackGate?: CallbackGate;
+  /* Page 1 only: order count per full ProductName in the SAME scope as the
+     list (tab / agent / dates / search) but every product — feeds the
+     product-filter pills so each shows its true count, not just loaded rows. */
+  productCounts?: { name: string; n: number }[];
 }
 
 /** Server-side filters shared by getOrders and getOrderStats. Every field is

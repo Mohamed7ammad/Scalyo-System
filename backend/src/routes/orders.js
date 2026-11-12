@@ -462,6 +462,27 @@ router.get('/', authenticate, async (req, res) => {
          ) h ON h.phone_key <> ''
             AND h.phone_key = regexp_replace(COALESCE(o."Phone", ''), '\\D', '', 'g')`;
 
+    /* PAGE-FIRST variant (paginated + pinned paths): pick the page's rows first
+       (CTE `page`, carrying _phone_key), then count history ONLY for those
+       phones. Identical numbers to FREQ_JOIN — it is the same per-phone count
+       over every order of the tenant — but it no longer aggregates the whole
+       table on every request (measured live: 465 ms → 15 ms for 100 rows).
+       _phone_key is stripped from the rows before they are sent. */
+    const PHONE_KEY = (a) => `regexp_replace(COALESCE(${a}."Phone", ''), '\\D', '', 'g')`;
+    const FREQ_FOR_PAGE = `h AS (
+           SELECT ${PHONE_KEY('x')} AS phone_key,
+                  COUNT(*)::int                                                          AS total_orders_count,
+                  COUNT(*) FILTER (WHERE TRIM(x."Status") = 'تم التوصيل')::int            AS delivered_orders_count,
+                  COUNT(*) FILTER (WHERE TRIM(x."Status") = 'تم الرفض')::int              AS canceled_orders_count,
+                  COUNT(*) FILTER (WHERE TRIM(x."Status") IN ('تم الإرجاع', 'جاري الإعادة'))::int AS returned_orders_count
+             FROM orders x
+            WHERE x.business_id = $1
+              AND ${PHONE_KEY('x')} IN (SELECT _phone_key FROM page WHERE _phone_key <> '')
+            GROUP BY 1
+         )`;
+    const FREQ_PAGE_JOIN = `LEFT JOIN h ON page._phone_key <> '' AND h.phone_key = page._phone_key`;
+    const stripPhoneKey = (r) => { delete r._phone_key; return r; };
+
     const rawLimit = parseInt(req.query.limit, 10);
     if (!rawLimit) {
       // Legacy path — full history, frequency-joined (pre-pagination contract).
@@ -508,18 +529,39 @@ router.get('/', authenticate, async (req, res) => {
     }
     params.push(limit);
 
+    /* Page 1 also carries the per-product counts for the filter pills — the
+       SAME scope as the list (tab / agent / dates / search) but every product,
+       so each pill shows its true count, not just the rows loaded so far.
+       Runs in parallel with the page query (one request, no extra round trip). */
+    let productCountsP = null;
+    /* …except while searching: the few results are all on screen (the pills
+       count them client-side), and a second search scan would only add DB work. */
+    const searching = typeof req.query.search === 'string' && req.query.search.trim() !== '';
+    if (!cursorClause && !searching) {
+      const ps = buildOrderScope(req, { product: false });
+      productCountsP = pool.query(
+        `SELECT "ProductName" AS name, COUNT(*)::int AS n FROM orders WHERE ${ps.where} GROUP BY 1`,
+        ps.params
+      ).then((r) => r.rows).catch((e) => { console.warn('[orders] product counts skipped:', e.message); return undefined; });
+    }
+
     const result = await pool.query(
-      `SELECT ${LIST_COLUMNS}, ${FREQ_COLS}
-         FROM orders o
-         ${FREQ_JOIN}
-        WHERE ${where}
-        ${cursorClause}
-        ORDER BY o."createdAt" DESC, o.id DESC
-        LIMIT $${params.length}`,
+      `WITH page AS (
+         SELECT ${LIST_COLUMNS}, ${PHONE_KEY('o')} AS _phone_key
+           FROM orders o
+          WHERE ${where}
+          ${cursorClause}
+          ORDER BY o."createdAt" DESC, o.id DESC
+          LIMIT $${params.length}
+       ), ${FREQ_FOR_PAGE}
+       SELECT page.*, ${FREQ_COLS}
+         FROM page ${FREQ_PAGE_JOIN}
+        ORDER BY page."createdAt" DESC, page.id DESC`,
       params
     );
 
-    const rows = result.rows;
+    const rows = result.rows.map(stripPhoneKey);
+    const productCounts = productCountsP ? await productCountsP : undefined;
     const last = rows[rows.length - 1];
     const nextCursor = rows.length === limit && last
       ? `${last.createdAt instanceof Date ? last.createdAt.toISOString() : last.createdAt}|${last.id}`
@@ -535,16 +577,20 @@ router.get('/', authenticate, async (req, res) => {
     if (!cursorClause && String(req.query.pin_due).toLowerCase() === 'true'
         && !canSeeAllOrders(req.user) && !hasRole(req.user, 'moderator')) {
       const pin = await pool.query(
-        `SELECT ${LIST_COLUMNS}, ${FREQ_COLS}
-           FROM orders o
-           ${FREQ_JOIN}
-          WHERE o.business_id = $1 AND o.is_lost_order = $2 AND o."AssignedTo" = $3
-            AND (${RECONFIRM_PREDICATE})
-          ORDER BY left(o."PostponedDate"::text, 10), o.id
-          LIMIT 500`,
+        `WITH page AS (
+           SELECT ${LIST_COLUMNS}, ${PHONE_KEY('o')} AS _phone_key
+             FROM orders o
+            WHERE o.business_id = $1 AND o.is_lost_order = $2 AND o."AssignedTo" = $3
+              AND (${RECONFIRM_PREDICATE})
+            ORDER BY left(o."PostponedDate"::text, 10), o.id
+            LIMIT 500
+         ), ${FREQ_FOR_PAGE}
+         SELECT page.*, ${FREQ_COLS}
+           FROM page ${FREQ_PAGE_JOIN}
+          ORDER BY left(page."PostponedDate"::text, 10), page.id`,
         [req.user.business_id, String(req.query.lost).toLowerCase() === 'true', req.user.email]
       );
-      pinned = pin.rows;
+      pinned = pin.rows.map(stripPhoneKey);
       const exempt = postponed.gateExempt(req.user);
       callbackGate = {
         exempt,
@@ -556,6 +602,7 @@ router.get('/', authenticate, async (req, res) => {
     res.json({
       orders: rows, nextCursor, hasMore: nextCursor !== null,
       ...(pinned ? { pinned, callbackGate } : {}),
+      ...(productCounts ? { productCounts } : {}),
     });
   } catch (err) {
     console.error(err);

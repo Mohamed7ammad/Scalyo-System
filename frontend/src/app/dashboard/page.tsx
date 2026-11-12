@@ -18,6 +18,7 @@ import {
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
 import ProductStopDialog from '@/components/ProductStopDialog';
+import { getShortName, countsByShortName, withPinned, mergeFirstPage } from '@/lib/orderListMerge';
 /* NOTE: `xlsx` (SheetJS) is intentionally NOT imported at module level — it is
    a ~446 KB chunk that was shipping with the page's first load and stalling
    low-end mobile devices on parse/compile. It is dynamically imported inside
@@ -90,19 +91,15 @@ const EGYPT_GOVERNORATES = [
   'البحر الأحمر', 'الوادي الجديد', 'مطروح', 'شمال سيناء', 'جنوب سيناء',
 ];
 
-const getShortName = (name?: string) => {
-  if (!name) return '';
-  // Drop brackets/punctuation (→ space) BEFORE taking the first 3 words, so a raw
-  // unlinked name like "[جهاز ليزر IPL]" collapses to the SAME short name as the
-  // clean inventory-linked "جهاز ليزر IPL". This keeps the product pill list
-  // deduped strictly by short name (price-agnostic) while staying short & clean,
-  // and keeps the filter, count, stock badge and inventory modal all in sync.
-  return name
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .trim()
-    .split(/\s+/)
-    .slice(0, 3)
-    .join(' ');
+/* getShortName / countsByShortName / withPinned / mergeFirstPage — pure list
+   helpers, unit-tested in lib/orderListMerge.ts. */
+
+/* Background polls skip while the page is hidden (phone locked, app in the
+   background, another tab) — the visibility listener in the page refreshes
+   everything the moment it is shown again, so nothing is ever staler. */
+const whenVisible = (fn: () => unknown) => () => {
+  if (typeof document !== 'undefined' && document.hidden) return;
+  fn();
 };
 
 /* Normalise an order status for comparison — guards against hidden whitespace
@@ -125,12 +122,6 @@ const isOverdueCallback = (o: Order) => {
 };
 /* The agent's working-queue tabs — they open with her due callbacks pinned on top. */
 const PIN_DUE_TABS = new Set(['الكل', 'جديد', 'مراجعة جديدة', 'لا يرد']);
-/* Page rows + the agent's pinned due callbacks (GET /orders ?pin_due), deduped. */
-const withPinned = (page: Order[], pinned?: Order[]) => {
-  if (!pinned?.length) return page;
-  const ids = new Set(page.map((o) => o.id));
-  return [...page, ...pinned.filter((o) => !ids.has(o.id))];
-};
 const callbacksAr = (n: number) => (n === 1 ? 'مكالمة مؤجلة' : n === 2 ? 'مكالمتين مؤجلتين'
   : n <= 10 ? `${n} مكالمات مؤجلة` : `${n} مكالمة مؤجلة`);
 
@@ -189,6 +180,10 @@ export default function DashboardPage() {
   const [hasMore,     setHasMore]     = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const lastRequestedCursorRef = useRef<string | null>(null);
+  /* Product-pill counts by SHORT name, from page 1's productCounts (server, the
+     list's scope, every product). null until the first page arrives → the
+     pills fall back to counting the loaded rows. */
+  const [productCounts, setProductCounts] = useState<Record<string, number> | null>(null);
   /* Fast stat-card numbers from GET /api/orders/stats — computed server-side
      over the WHOLE tenant scope so the cards are correct and paint immediately,
      without waiting for any order rows to arrive. */
@@ -341,6 +336,7 @@ export default function DashboardPage() {
       const res = await getOrders({ ...serverFilters, limit: PAGE_SIZE, pinDue: true });
       if (seq !== fetchSeq.current) return;   // superseded by a newer fetch
       setOrders(withPinned(res.data.orders, res.data.pinned));   // REPLACE — restart the scroll chain
+      setProductCounts(res.data.productCounts ? countsByShortName(res.data.productCounts) : null);
       setCallbackGate(res.data.callbackGate ?? null);
       setNextCursor(res.data.nextCursor);
       setHasMore(res.data.hasMore);
@@ -359,13 +355,7 @@ export default function DashboardPage() {
     }
   }, [router, serverFilters]);
 
-  /* Merge a freshly-fetched FIRST page into existing state without discarding
-     rows appended by loadMoreOrders(): rows the server just returned replace
-     their loaded counterparts (new + edited orders), everything older stays. */
-  const mergeFirstPage = (prev: Order[], fresh: Order[]): Order[] => {
-    const freshIds = new Set(fresh.map((o) => o.id));
-    return [...fresh, ...prev.filter((o) => !freshIds.has(o.id))];
-  };
+  /* mergeFirstPage (lib/orderListMerge) — the 30 s refresh drops rows that left this tab. */
 
   /* ── Silent background refresh (no skeleton, no scroll reset) ── */
   // Re-fetches page 1 of the current filter set every 30 s and merges it in
@@ -382,8 +372,9 @@ export default function DashboardPage() {
            longer carries (handled elsewhere, moved by the 11:30 rebalance …). */
         const keep = pinned ? new Set(pinned.map((o) => o.id)) : null;
         const base = keep ? prev.filter((o) => !isDueCallback(o) || keep.has(o.id)) : prev;
-        return mergeFirstPage(base, withPinned(res.data.orders, pinned));
+        return mergeFirstPage(base, res.data.orders, pinned, res.data.orders.length >= PAGE_SIZE);
       });
+      setProductCounts(res.data.productCounts ? countsByShortName(res.data.productCounts) : null);
       setCallbackGate(res.data.callbackGate ?? null);
       // Only adopt the fresh cursor when nothing beyond page 1 is loaded —
       // otherwise this would rewind the append chain's progress.
@@ -443,7 +434,7 @@ export default function DashboardPage() {
 
   useEffect(() => { fetchStats(); }, [fetchStats]);
   useEffect(() => {
-    const id = setInterval(fetchStats, 30_000);
+    const id = setInterval(whenVisible(fetchStats), 30_000);
     return () => clearInterval(id);
   }, [fetchStats]);
 
@@ -455,7 +446,7 @@ export default function DashboardPage() {
   useEffect(() => {
     if (user?.role !== 'admin' || lostMode) return;   // banner is admin-only + live queue
     fetchInTransit();
-    const id = setInterval(fetchInTransit, 30_000);
+    const id = setInterval(whenVisible(fetchInTransit), 30_000);
     return () => clearInterval(id);
   }, [user, lostMode, fetchInTransit]);
 
@@ -482,9 +473,9 @@ export default function DashboardPage() {
 
   // Background polling every 30 s — silent, no spinner, no scroll disruption
   useEffect(() => {
-    const id = setInterval(() => {
+    const id = setInterval(whenVisible(() => {
       silentRefresh();
-    }, 30_000);
+    }), 30_000);
     return () => clearInterval(id);
   }, [silentRefresh]);
 
@@ -512,9 +503,43 @@ export default function DashboardPage() {
 
   // Background products poll — keeps stock badges in filter pills fresh.
   useEffect(() => {
-    const id = setInterval(fetchProducts, 30_000);
+    const id = setInterval(whenVisible(fetchProducts), 30_000);
     return () => clearInterval(id);
   }, [fetchProducts]);
+
+  /* After a save the stock badges refresh once — a burst of status changes
+     (an agent working fast) coalesces into ONE products request. */
+  const productsRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleProductsRefresh = () => {
+    if (productsRefreshTimer.current) clearTimeout(productsRefreshTimer.current);
+    productsRefreshTimer.current = setTimeout(() => {
+      productsRefreshTimer.current = null;
+      fetchProducts();
+    }, 1500);
+  };
+
+  /* Phones keep this page open in the background for hours: the 30 s polls
+     skip while it is hidden (whenVisible), and the moment it is shown again
+     (after more than 15 s away) the list, cards and stock refresh at once —
+     fresher than waiting for the next tick. */
+  const hiddenSinceRef = useRef<number | null>(null);
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenSinceRef.current = Date.now();
+        return;
+      }
+      const since = hiddenSinceRef.current;
+      hiddenSinceRef.current = null;
+      if (since !== null && Date.now() - since > 15_000) {
+        silentRefresh();
+        fetchStats();
+        fetchProducts();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [silentRefresh, fetchStats, fetchProducts]);
 
   /* ── Inventory (legacy simple table — powers the Inventory modal) */
   const fetchInventory = useCallback(async () => {
@@ -538,7 +563,7 @@ export default function DashboardPage() {
   // Background inventory poll — runs every 30 s alongside the orders poll.
   // fetchInventory already silently swallows 403 for non-admins, so no gate needed.
   useEffect(() => {
-    const id = setInterval(fetchInventory, 30_000);
+    const id = setInterval(whenVisible(fetchInventory), 30_000);
     return () => clearInterval(id);
   }, [fetchInventory]);
 
@@ -619,7 +644,7 @@ export default function DashboardPage() {
       // never awaited; OrdersTable is memoised against products so it won't
       // re-render the table).
       setTimeout(() => showToast('تم الحفظ بنجاح', 'success'), 0);
-      setTimeout(() => fetchProducts(), 0);
+      scheduleProductsRefresh();
     } catch (err: unknown) {
       const body = (err as { response?: { data?: { error?: string; code?: string; current?: Partial<Order> } } })
         ?.response?.data;
@@ -1197,6 +1222,9 @@ export default function DashboardPage() {
     const short = getShortName(o.ProductName);
     if (short) productsSeenRef.current.add(short);
   });
+  /* …plus every product the server counted in this scope — so a product whose
+     orders aren't among the rows loaded so far still gets its pill. */
+  if (productCounts) Object.keys(productCounts).forEach((k) => productsSeenRef.current.add(k));
   const uniqueProducts = Array.from(productsSeenRef.current);
 
   // First known price per short product name — used in product filter tab badges
@@ -3039,7 +3067,11 @@ export default function DashboardPage() {
 
               {/* Individual product cards — two-line layout with price */}
               {uniqueProducts.map((p) => {
-                const count = agentFiltered.filter((o) => getShortName(o.ProductName) === p).length;
+                /* True count from the server (this tab / agent / dates / search);
+                   counting loaded rows is only the fallback before page 1 lands. */
+                const count = productCounts
+                  ? (productCounts[p] ?? 0)
+                  : agentFiltered.filter((o) => getShortName(o.ProductName) === p).length;
                 // Prefer the official master catalog price (stable); fall back to the
                 // order-derived price only when the product isn't linked to inventory.
                 const price = getCatalogPrice(p) ?? productPriceMap[p];
