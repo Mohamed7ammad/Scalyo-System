@@ -18,7 +18,7 @@ import {
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
 import ProductStopDialog from '@/components/ProductStopDialog';
-import { getShortName, countsByShortName, withPinned, mergeFirstPage } from '@/lib/orderListMerge';
+import { getShortName, countsByShortName, activeByShortName, visibleProductPills, withPinned, mergeFirstPage } from '@/lib/orderListMerge';
 /* NOTE: `xlsx` (SheetJS) is intentionally NOT imported at module level — it is
    a ~446 KB chunk that was shipping with the page's first load and stalling
    low-end mobile devices on parse/compile. It is dynamically imported inside
@@ -184,6 +184,9 @@ export default function DashboardPage() {
      list's scope, every product). null until the first page arrives → the
      pills fall back to counting the loaded rows. */
   const [productCounts, setProductCounts] = useState<Record<string, number> | null>(null);
+  /* Products with an order in the last 7 days (short name → latest order ms) —
+     the only ones the pills show. Kept while searching (search skips it). */
+  const [activeProducts, setActiveProducts] = useState<Record<string, number> | null>(null);
   /* Fast stat-card numbers from GET /api/orders/stats — computed server-side
      over the WHOLE tenant scope so the cards are correct and paint immediately,
      without waiting for any order rows to arrive. */
@@ -337,6 +340,7 @@ export default function DashboardPage() {
       if (seq !== fetchSeq.current) return;   // superseded by a newer fetch
       setOrders(withPinned(res.data.orders, res.data.pinned));   // REPLACE — restart the scroll chain
       setProductCounts(res.data.productCounts ? countsByShortName(res.data.productCounts) : null);
+      if (res.data.activeProducts) setActiveProducts(activeByShortName(res.data.activeProducts));
       setCallbackGate(res.data.callbackGate ?? null);
       setNextCursor(res.data.nextCursor);
       setHasMore(res.data.hasMore);
@@ -375,6 +379,7 @@ export default function DashboardPage() {
         return mergeFirstPage(base, res.data.orders, pinned, res.data.orders.length >= PAGE_SIZE);
       });
       setProductCounts(res.data.productCounts ? countsByShortName(res.data.productCounts) : null);
+      if (res.data.activeProducts) setActiveProducts(activeByShortName(res.data.activeProducts));
       setCallbackGate(res.data.callbackGate ?? null);
       // Only adopt the fresh cursor when nothing beyond page 1 is loaded —
       // otherwise this would rewind the append chain's progress.
@@ -1222,10 +1227,15 @@ export default function DashboardPage() {
     const short = getShortName(o.ProductName);
     if (short) productsSeenRef.current.add(short);
   });
-  /* …plus every product the server counted in this scope — so a product whose
-     orders aren't among the rows loaded so far still gets its pill. */
-  if (productCounts) Object.keys(productCounts).forEach((k) => productsSeenRef.current.add(k));
-  const uniqueProducts = Array.from(productsSeenRef.current);
+  /* Only products being worked on: an order in the last 7 days (or, with a date
+     range, any product ordered in it) — see visibleProductPills. */
+  const uniqueProducts = visibleProductPills({
+    active:   activeProducts,
+    counts:   productCounts,
+    dateMode: !!(startDate || endDate),
+    seen:     Array.from(productsSeenRef.current),
+    selected: activeProduct !== 'كل المنتجات' ? activeProduct : null,
+  });
 
   // First known price per short product name — used in product filter tab badges
   const productPriceMap: Record<string, string> = {};

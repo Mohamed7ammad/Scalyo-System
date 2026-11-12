@@ -159,6 +159,9 @@ export interface PaginatedOrders {
      list (tab / agent / dates / search) but every product — feeds the
      product-filter pills so each shows its true count, not just loaded rows. */
   productCounts?: { name: string; n: number }[];
+  /* Page 1 only: products with an order in the last 7 days in the caller's
+     scope (+ their latest order time) — the only ones the filter pills show. */
+  activeProducts?: { name: string; last_at: string }[];
 }
 
 /** Server-side filters shared by getOrders and getOrderStats. Every field is

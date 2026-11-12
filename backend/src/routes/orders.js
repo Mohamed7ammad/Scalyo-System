@@ -16,6 +16,9 @@ const { syncEarnedCommission, recordAssignmentLog } = orderStatus;
 const closed = require('../services/closedStatuses');
 const CLOSED_SQL = closed.sqlList(closed.CLOSED_STATUSES);
 
+/* Product-filter pills list only products with an order in the last N days. */
+const ACTIVE_PRODUCT_DAYS = 7;
+
 /* Look up ONE agent's product-routing restriction (allowed_products) by email,
    tenant-scoped. Returns [] when unrestricted / unknown → handles all products. */
 async function agentAllowedProducts(email, businessId) {
@@ -534,6 +537,7 @@ router.get('/', authenticate, async (req, res) => {
        so each pill shows its true count, not just the rows loaded so far.
        Runs in parallel with the page query (one request, no extra round trip). */
     let productCountsP = null;
+    let activeProductsP = null;
     /* …except while searching: the few results are all on screen (the pills
        count them client-side), and a second search scan would only add DB work. */
     const searching = typeof req.query.search === 'string' && req.query.search.trim() !== '';
@@ -543,6 +547,19 @@ router.get('/', authenticate, async (req, res) => {
         `SELECT "ProductName" AS name, COUNT(*)::int AS n FROM orders WHERE ${ps.where} GROUP BY 1`,
         ps.params
       ).then((r) => r.rows).catch((e) => { console.warn('[orders] product counts skipped:', e.message); return undefined; });
+      /* Which products are LIVE: an order in the last ACTIVE_PRODUCT_DAYS days in
+         the caller's scope (agent / lost, any status but «مغلق»). The pills show
+         only these — products the team stopped working on drop out by themselves
+         and come back with their next order (owner's rule, 2026-11-13). */
+      const as = buildOrderScope(req, {
+        status: false, search: false, product: false, dates: false, reconfirm: false, resend: false,
+      });
+      activeProductsP = pool.query(
+        `SELECT "ProductName" AS name, MAX("createdAt") AS last_at FROM orders
+          WHERE ${as.where} AND "createdAt" >= NOW() - INTERVAL '${ACTIVE_PRODUCT_DAYS} days'
+          GROUP BY 1`,
+        as.params
+      ).then((r) => r.rows).catch((e) => { console.warn('[orders] active products skipped:', e.message); return undefined; });
     }
 
     const result = await pool.query(
@@ -561,7 +578,8 @@ router.get('/', authenticate, async (req, res) => {
     );
 
     const rows = result.rows.map(stripPhoneKey);
-    const productCounts = productCountsP ? await productCountsP : undefined;
+    const productCounts  = productCountsP  ? await productCountsP  : undefined;
+    const activeProducts = activeProductsP ? await activeProductsP : undefined;
     const last = rows[rows.length - 1];
     const nextCursor = rows.length === limit && last
       ? `${last.createdAt instanceof Date ? last.createdAt.toISOString() : last.createdAt}|${last.id}`
@@ -603,6 +621,7 @@ router.get('/', authenticate, async (req, res) => {
       orders: rows, nextCursor, hasMore: nextCursor !== null,
       ...(pinned ? { pinned, callbackGate } : {}),
       ...(productCounts ? { productCounts } : {}),
+      ...(activeProducts ? { activeProducts } : {}),
     });
   } catch (err) {
     console.error(err);

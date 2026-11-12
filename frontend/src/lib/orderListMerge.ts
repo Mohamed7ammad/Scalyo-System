@@ -29,6 +29,46 @@ export const countsByShortName = (rows: { name: string; n: number }[]) => {
   return out;
 };
 
+/* Page 1's activeProducts (an order in the last 7 days) → short name → the most
+   recent order time (ms), for "most recently active first" ordering. */
+export const activeByShortName = (rows: { name: string; last_at: string }[]) => {
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    const k = getShortName(r.name);
+    const t = new Date(r.last_at).getTime();
+    if (k && !Number.isNaN(t)) out[k] = Math.max(out[k] ?? 0, t);
+  }
+  return out;
+};
+
+/* Which product pills to show (owner's rule: only products being worked on):
+     • a date range is set → every product with orders in it, most orders first;
+     • otherwise          → products with an order in the last 7 days, most
+                            recently active first (old ones drop out by
+                            themselves and return with their next order);
+     • no server answer yet / older backend → the session's seen list;
+   the selected product always stays so it can be cleared. */
+export const visibleProductPills = (o: {
+  active:   Record<string, number> | null;   // activeByShortName
+  counts:   Record<string, number> | null;   // countsByShortName (this tab's scope)
+  dateMode: boolean;
+  seen:     string[];
+  selected: string | null;
+}): string[] => {
+  let list: string[];
+  if (o.dateMode && o.counts) {
+    const c = o.counts;
+    list = Object.keys(c).filter((k) => c[k] > 0).sort((a, b) => c[b] - c[a]);
+  } else if (o.active) {
+    const a = o.active;
+    list = Object.keys(a).sort((x, y) => a[y] - a[x]);
+  } else {
+    list = o.seen;
+  }
+  if (o.selected && !list.includes(o.selected)) list = [o.selected, ...list];
+  return list;
+};
+
 /* Page rows + the agent's pinned due callbacks (GET /orders ?pin_due), deduped. */
 export const withPinned = (page: Order[], pinned?: Order[]) => {
   if (!pinned?.length) return page;
