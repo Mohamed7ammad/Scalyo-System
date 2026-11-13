@@ -542,22 +542,47 @@ router.get('/', authenticate, async (req, res) => {
        count them client-side), and a second search scan would only add DB work. */
     const searching = typeof req.query.search === 'string' && req.query.search.trim() !== '';
     if (!cursorClause && !searching) {
+      /* A STOPPED product («إيقاف المنتج» — inventory products.stopped_at, or a
+         stopped_products row by name / sku) never gets a pill, even if it still
+         has recent orders in a non-closed status (e.g. «تم الرفض», which a stop
+         leaves as history). Applied to the grouped (name, sku) rows — a few
+         dozen — so it costs nothing. $1 = business_id (buildOrderScope). */
+      const NOT_STOPPED = `NOT EXISTS (
+             SELECT 1 FROM stopped_products s
+              WHERE s.business_id = $1
+                AND (LOWER(TRIM(g.name)) = ANY(s.keys) OR LOWER(TRIM(g.sku)) = ANY(s.keys)))
+         AND NOT EXISTS (
+             SELECT 1 FROM products p
+              WHERE p.business_id = $1 AND p.stopped_at IS NOT NULL
+                AND ( LOWER(TRIM(p.sku)) = LOWER(TRIM(g.sku))
+                   OR LOWER(TRIM(p.name)) = LOWER(TRIM(g.name))
+                   OR EXISTS (SELECT 1 FROM unnest(COALESCE(p.aliases, '{}'::text[])) al
+                               WHERE LOWER(TRIM(al)) = LOWER(TRIM(g.sku))
+                                  OR LOWER(TRIM(al)) = LOWER(TRIM(g.name)))))`;
       const ps = buildOrderScope(req, { product: false });
       productCountsP = pool.query(
-        `SELECT "ProductName" AS name, COUNT(*)::int AS n FROM orders WHERE ${ps.where} GROUP BY 1`,
+        `WITH g AS (
+           SELECT "ProductName" AS name, sku, COUNT(*)::int AS n FROM orders
+            WHERE ${ps.where} GROUP BY 1, 2
+         )
+         SELECT name, SUM(n)::int AS n FROM g WHERE ${NOT_STOPPED} GROUP BY 1`,
         ps.params
       ).then((r) => r.rows).catch((e) => { console.warn('[orders] product counts skipped:', e.message); return undefined; });
       /* Which products are LIVE: an order in the last ACTIVE_PRODUCT_DAYS days in
-         the caller's scope (agent / lost, any status but «مغلق»). The pills show
-         only these — products the team stopped working on drop out by themselves
-         and come back with their next order (owner's rule, 2026-11-13). */
+         the caller's scope (agent / lost, any status but «مغلق»), not stopped.
+         The pills show only these — products the team stopped working on drop
+         out by themselves and come back with their next order (owner's rule,
+         2026-11-13). */
       const as = buildOrderScope(req, {
         status: false, search: false, product: false, dates: false, reconfirm: false, resend: false,
       });
       activeProductsP = pool.query(
-        `SELECT "ProductName" AS name, MAX("createdAt") AS last_at FROM orders
-          WHERE ${as.where} AND "createdAt" >= NOW() - INTERVAL '${ACTIVE_PRODUCT_DAYS} days'
-          GROUP BY 1`,
+        `WITH g AS (
+           SELECT "ProductName" AS name, sku, MAX("createdAt") AS last_at FROM orders
+            WHERE ${as.where} AND "createdAt" >= NOW() - INTERVAL '${ACTIVE_PRODUCT_DAYS} days'
+            GROUP BY 1, 2
+         )
+         SELECT name, MAX(last_at) AS last_at FROM g WHERE ${NOT_STOPPED} GROUP BY 1`,
         as.params
       ).then((r) => r.rows).catch((e) => { console.warn('[orders] active products skipped:', e.message); return undefined; });
     }
