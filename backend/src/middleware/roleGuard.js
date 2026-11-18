@@ -5,7 +5,9 @@ const AGENT_ALLOWED_FIELDS = new Set([
   'Status',
   'Note',
   'ShippingNotes',    // inline shipping-notes column (printed on the Bosta AWB)
-  'DeliveryRate',
+  /* NOT 'DeliveryRate' (حالة الاستلام: ضعيف / جديد / ممتاز …) — it comes from
+     Bosta's record of the customer; the team only reads it, the owner (admin)
+     alone may override it (owner, 2026-11-19). See filterAgentFields. */
   'ProductName',
   'quantity',         // agents can correct the order quantity from the edit modal
   'PostponedDate',
@@ -70,6 +72,12 @@ function requireAdminOrAnyPermission(...permissions) {
    them. Plain agents never get it. */
 function filterAgentFields(req, res, next) {
   if (!hasRole(req.user, 'admin')) {
+    /* The customer's delivery rating is read-only for everyone but the owner.
+       Dropped rather than refused: screens opened before this change still send
+       it (unchanged) with every edit, and that edit must keep working. */
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'DeliveryRate')) {
+      delete req.body.DeliveryRate;
+    }
     const allowed = new Set(AGENT_ALLOWED_FIELDS);
     if (Array.isArray(req.user.permissions) && req.user.permissions.includes('reassign_orders')) {
       allowed.add('AssignedTo');

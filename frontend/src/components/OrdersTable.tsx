@@ -532,8 +532,10 @@ function OrdersTable({
        request if a non-admin (team-leader) includes any non-editable field. */
     const EDITABLE_KEYS: (keyof Order)[] = [
       'FullName', 'Phone', 'City', 'Address', 'ProductName', 'ProductPrice',
-      'quantity', 'DeliveryRate', 'Status', 'PostponedDate', 'rejectionReason',
+      'quantity', 'Status', 'PostponedDate', 'rejectionReason',
       'hasDeposit', 'depositAmount',
+      /* حالة الاستلام comes from Bosta — only the owner may override it. */
+      ...(role === 'admin' ? (['DeliveryRate'] as (keyof Order)[]) : []),
     ];
     const fields: Partial<Order> = {};
     for (const k of EDITABLE_KEYS) {
@@ -1175,17 +1177,26 @@ function OrdersTable({
 
             <div>
               <label className="text-sm font-medium text-gray-700 dark:text-slate-300 block mb-1">حالة الاستلام</label>
-              <select
-                value={editForm.DeliveryRate ?? 'بدون'}
-                onChange={(e) => setEditForm((p) => ({ ...p, DeliveryRate: e.target.value }))}
-                className="w-full px-3 py-2 rounded-xl text-sm outline-none
-                  border border-gray-300 dark:border-slate-700
-                  bg-white dark:bg-slate-800
-                  text-gray-900 dark:text-slate-200
-                  focus:ring-2 focus:ring-indigo-400"
-              >
-                {DELIVERY_RATE_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
-              </select>
+              {role === 'admin' ? (
+                <select
+                  value={editForm.DeliveryRate ?? 'بدون'}
+                  onChange={(e) => setEditForm((p) => ({ ...p, DeliveryRate: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none
+                    border border-gray-300 dark:border-slate-700
+                    bg-white dark:bg-slate-800
+                    text-gray-900 dark:text-slate-200
+                    focus:ring-2 focus:ring-indigo-400"
+                >
+                  {DELIVERY_RATE_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+              ) : (
+                <p className="px-3 py-2 rounded-xl text-sm border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 text-gray-700 dark:text-slate-300">
+                  <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold ${DELIVERY_RATE_STYLES[editForm.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400'}`}>
+                    {editForm.DeliveryRate ?? 'بدون'}
+                  </span>
+                  <span className="text-xs text-gray-400 dark:text-slate-500 mr-2">من بوسطة — للعرض بس</span>
+                </p>
+              )}
             </div>
 
             <div>
@@ -2078,22 +2089,30 @@ const OrderRow = memo(function OrderRow({
 
   const phoneEl = <PhoneCall phone={order.Phone} />;
 
-  /* Delivery Rate dropdown — all roles */
+  /* Delivery Rate (حالة الاستلام) — comes from Bosta's record of the customer:
+     a read-only badge for the team, a dropdown only for the owner (admin). */
+  const rateStyle = DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400';
   const rateEl = (
     <>
-      <select
-        value={order.DeliveryRate ?? 'بدون'}
-        onChange={(e) => onDeliveryRateChange(order.id, e.target.value)}
-        className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer
-          outline-none focus:ring-2 focus:ring-indigo-400 border-0
-          [&>option]:bg-white [&>option]:text-slate-900
-          dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
-          ${DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400'}`}
-      >
-        {DELIVERY_RATE_OPTIONS.map((r) => (
-          <option key={r} value={r}>{r}</option>
-        ))}
-      </select>
+      {role === 'admin' ? (
+        <select
+          value={order.DeliveryRate ?? 'بدون'}
+          onChange={(e) => onDeliveryRateChange(order.id, e.target.value)}
+          className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer
+            outline-none focus:ring-2 focus:ring-indigo-400 border-0
+            [&>option]:bg-white [&>option]:text-slate-900
+            dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
+            ${rateStyle}`}
+        >
+          {DELIVERY_RATE_OPTIONS.map((r) => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+      ) : (
+        <span title="حالة الاستلام من بوسطة" className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${rateStyle}`}>
+          {order.DeliveryRate ?? 'بدون'}
+        </span>
+      )}
 
       {order.DeliveryRate === 'ضعيف' && (
         <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5
