@@ -176,6 +176,10 @@ pool.query(`
     ON treasury_transactions (business_id, created_at DESC)
 `))
 .then(() => console.log('✅  Treasury: table + all partial indexes ready'))
+/* Delivery-bonus plan columns + trigger — after the indexes it relies on; a
+   failure here is logged and never stops the backfill. */
+.then(() => require('../services/deliveryBonus').ensureSchema()
+  .catch((e) => console.warn('⚠️   Delivery bonus schema:', e.message)))
 .then(() => backfillTreasury())
 .catch((err) => console.warn('⚠️   Treasury schema migration:', err.message));
 
@@ -198,7 +202,6 @@ pool.query(`
                      (revenue, source='deposit', dated by createdAt)
      2. Commissions — one row per order, keyed by current Status:
                      'تم التأكيد' | 'تم الشحن'      → comm_confirmed
-                     'تم التوصيل' | 'تم الإرجاع'  → comm_delivered
                      'تم الرفض'                     → comm_rejected
                      'لا يرد'     | 'مؤجل'         → comm_no_answer
 
@@ -266,12 +269,10 @@ async function backfillTreasury() {
       predicate: `o."Status" IN ('تم التأكيد', 'تم الشحن', 'مغلق - لن يشحن')`,
       label:     'تأكيد',
     },
-    {
-      source:    'comm_delivered',
-      rateCol:   'comm_delivered',
-      predicate: `o."Status" IN ('تم التوصيل', 'تم الإرجاع')`,
-      label:     'توصيل',
-    },
+    /* comm_delivered is deliberately NOT backfilled: the delivery bonus is a
+       per-agent plan that pays only orders confirmed after the owner switched
+       it on, booked live by the delivery trigger (services/deliveryBonus.js).
+       Backfilling it would pay every old delivered AND returned order. */
     {
       source:    'comm_rejected',
       rateCol:   'comm_rejected',

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { getMyPerformance, AgentAnalytics } from '@/lib/api';
+import DeliveryBonusPanel from '@/components/DeliveryBonusPanel';
 
 /* ── Numeric coercion (pg returns NUMERIC as string) ───────────── */
 const toN = (v: string | number | null | undefined): number =>
@@ -110,10 +111,13 @@ export default function MyPerformancePage() {
   const [data,    setData]    = useState<AgentAnalytics | null>(null);
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState('');
+  /* The range last loaded — the delivery-bonus list follows the same filter. */
+  const [range,   setRange]   = useState<{ start?: string; end?: string }>({});
 
   const load = useCallback(async (start?: string, end?: string) => {
     setLoading(true);
     setError('');
+    setRange({ start, end });
     try {
       const res = await getMyPerformance(start, end);
       setData(res.data);
@@ -284,6 +288,10 @@ export default function MyPerformancePage() {
               </div>
             </div>
 
+            {/* ── Delivery-bonus plan — only for agents the owner switched on
+                (or who still have orders confirmed under it). ── */}
+            <DeliveryBonusPanel startDate={range.start} endDate={range.end} hideWhenOff />
+
             {/* ── Stat cards (commission math integrated) ─────────── */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 
@@ -298,7 +306,9 @@ export default function MyPerformancePage() {
                   <span className="text-lg font-bold text-gray-400 dark:text-slate-500 mr-1.5">ج.م</span>
                 </p>
                 <p className="text-sm text-gray-500 dark:text-slate-400 mt-3 leading-relaxed">
-                  (تم التأكيد × {rateConfirmed} ج.م) + (لا يرد × {rateNoAnswer} ج.م)
+                  {data.delivery_bonus_since
+                    ? <>(تم التأكيد × {rateConfirmed} ج.م × القطع) + (اتسلم × {toN(data.comm_delivered)} ج.م × القطع) + (لا يرد × {rateNoAnswer} ج.م)</>
+                    : <>(تم التأكيد × {rateConfirmed} ج.م) + (لا يرد × {rateNoAnswer} ج.م)</>}
                 </p>
               </div>
 

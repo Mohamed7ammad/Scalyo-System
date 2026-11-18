@@ -690,6 +690,8 @@ export interface StaffMember {
   comm_delivered:  number;       // bonus per delivered order
   comm_rejected:   number;       // payout per rejected order
   comm_no_answer:  number;       // payout per no-answer / postponed order
+  /** Delivery-bonus plan start (ISO); null = the plan is off for this agent. */
+  delivery_bonus_since?: string | null;
   distribution_percentage?: number;  // saved auto-distribution weight (%)
   allowed_products?: string[];       // product-routing restriction ([] = all products)
   last_active_at?: string | null;    // presence heartbeat timestamp (ISO)
@@ -796,6 +798,9 @@ export interface AgentAnalytics {
   comm_delivered:   number | string;
   comm_rejected:    number | string;
   comm_no_answer:   number | string;
+
+  /** Delivery-bonus plan start (ISO); null = off. */
+  delivery_bonus_since?: string | null;
 
   total_assigned:   number;
 
@@ -1186,6 +1191,56 @@ export const getDeliveredOrders = (startDate?: string, endDate?: string, product
  */
 export const getMyPerformance = (startDate?: string, endDate?: string) =>
   api.get<AgentAnalytics>(`/api/analytics/my-performance${buildAnalyticsQS(startDate, endDate)}`);
+
+/* ── Delivery-bonus plan ───────────────────────────────────────────────────────
+   Agents the owner switches on earn confirmation × pieces, plus a bonus per
+   piece when the order is delivered — only on orders confirmed after the switch. */
+export type DeliveryBonusGroup = 'delivered' | 'returned' | 'pending' | 'cancelled';
+
+export interface DeliveryBonusRow {
+  id:            number;
+  customer:      string | null;
+  phone:         string | null;
+  product:       string | null;
+  status:        string;
+  group:         DeliveryBonusGroup;
+  tracking:      string | null;
+  pieces:        number;          // pieces the bonus counts (order quantity)
+  confirmPieces: number | null;   // pieces counted at confirmation
+  bonusPerPiece: number;
+  confirmAmount: number;          // what she got on confirmation
+  bonusAmount:   number | null;   // the delivery bonus (null until delivered)
+  confirmedAt:   string;
+  deliveredAt:   string | null;
+}
+
+export interface DeliveryBonusResponse {
+  agent:       { id: number; name: string; email: string };
+  enabled:     boolean;
+  since:       string | null;
+  confirmRate: number;
+  perPiece:    number;
+  summary: {
+    orders: number; delivered: number; returned: number; pending: number; cancelled: number;
+    confirmEarned: number; bonusEarned: number; bonusPossible: number;
+  };
+  rows: DeliveryBonusRow[];
+}
+
+/** An agent's own plan list; the owner (admin) may pass `agent` (email). */
+export const getDeliveryBonus = (opts: { startDate?: string; endDate?: string; agent?: string } = {}) => {
+  const qs = new URLSearchParams();
+  if (opts.startDate) qs.set('startDate', opts.startDate);
+  if (opts.endDate)   qs.set('endDate',   opts.endDate);
+  if (opts.agent)     qs.set('agent',     opts.agent);
+  const q = qs.toString();
+  return api.get<DeliveryBonusResponse>(`/api/analytics/delivery-bonus${q ? `?${q}` : ''}`);
+};
+
+/** Owner only: switch the plan on (starts now) or off for one agent. */
+export const setDeliveryBonusPlan = (userId: number, enabled: boolean) =>
+  api.post<{ id: number; email: string; delivery_bonus_since: string | null; comm_delivered: number | string }>(
+    `/api/staff/${userId}/delivery-bonus`, { enabled });
 
 /* ── In-transit drill-down (behind the 'طلبات في الطريق' card) ───────────────── */
 export interface InTransitOrderDetail {

@@ -5,9 +5,27 @@ import { useRouter } from 'next/navigation';
 import {
   getStaff, createStaff, updateStaff, toggleAttendance, deleteStaff,
   getAgentAnalytics, createEmployeePayout, getMetaAccounts, getProducts,
-  userRoles, userHasRole,
+  userRoles, userHasRole, setDeliveryBonusPlan,
   StaffMember, CreateStaffPayload, UpdateStaffPayload, AgentAnalytics, MetaAccount, Product, UserRole,
 } from '@/lib/api';
+import DeliveryBonusPanel from '@/components/DeliveryBonusPanel';
+
+/* «19 نوفمبر، 9:30 م» with Latin digits, Cairo time. */
+const planSinceLabel = (iso?: string | null) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : d.toLocaleString('ar-EG-u-nu-latn', {
+    day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit', timeZone: 'Africa/Cairo',
+  });
+};
+
+/* Month ranges for the owner's bonus-list viewer (local wall-clock dates). */
+const monthRange = (offset: number) => {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+  const last = offset === 0 ? now : new Date(now.getFullYear(), now.getMonth() + offset + 1, 0);
+  return { start: first.toLocaleDateString('en-CA'), end: last.toLocaleDateString('en-CA') };
+};
 
 /* ── Role helpers (multi-role) ──────────────────────────────────────────────
    A member may hold several roles; `roles` is the source of truth, `role` is
@@ -430,7 +448,11 @@ export default function StaffPage() {
   const [expandedAgentId, setExpandedAgentId] = useState<number|null>(null);
 
   /* commission-settings modal */
-  interface CommModal { agent: AgentAnalytics; confirmed: number; delivered: number; rejected: number; no_answer: number; saving: boolean; }
+  interface CommModal {
+    agent: AgentAnalytics; confirmed: number; delivered: number; rejected: number; no_answer: number; saving: boolean;
+    /* Delivery-bonus plan: start time (null = off), and the switch's confirm step. */
+    planSince: string | null; planAsk: 'on' | 'off' | null; planBusy: boolean;
+  }
   const [commModal, setCommModal] = useState<CommModal|null>(null);
   const openCommModal = (agent: AgentAnalytics) => setCommModal({
     agent,
@@ -439,7 +461,33 @@ export default function StaffPage() {
     rejected:  toN(agent.comm_rejected),
     no_answer: toN(agent.comm_no_answer),
     saving:    false,
+    planSince: agent.delivery_bonus_since ?? null,
+    planAsk:   null,
+    planBusy:  false,
   });
+
+  /* Owner switches the delivery-bonus plan for one agent — takes effect at once. */
+  const applyPlan = async (enabled: boolean) => {
+    if (!commModal) return;
+    setCommModal(m => m ? {...m, planBusy:true} : null);
+    try {
+      const { data } = await setDeliveryBonusPlan(commModal.agent.agent_id, enabled);
+      setCommModal(m => m ? {
+        ...m, planBusy:false, planAsk:null, planSince: data.delivery_bonus_since,
+        delivered: toN(data.comm_delivered),
+      } : null);
+      showToast(enabled ? 'اتفعّل نظام بونص التسليم من دلوقتي' : 'اتوقف نظام بونص التسليم');
+      const { start, end } = aPreset !== 'custom' ? presetDates(aPreset) : { start: aCustomStart, end: aCustomEnd };
+      loadAnalytics(start, end);
+    } catch {
+      showToast('تعذّر تحديث نظام بونص التسليم', 'error');
+      setCommModal(m => m ? {...m, planBusy:false} : null);
+    }
+  };
+
+  /* Owner's viewer for one agent's bonus list. */
+  const [bonusListFor, setBonusListFor] = useState<{ email: string; name: string } | null>(null);
+  const [bonusMonth, setBonusMonth] = useState<0 | -1 | 'all'>(0);
   const saveCommModal = async () => {
     if (!commModal) return;
     setCommModal(m => m ? {...m, saving:true} : null);
@@ -1117,6 +1165,12 @@ export default function StaffPage() {
                                 إعدادات
                               </button>
                             )}
+                            {!isUnassigned && agent.delivery_bonus_since && (
+                              <span title="نظام بونص التسليم مفعّل"
+                                className="mr-1.5 inline-block align-middle text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300">
+                                بونص
+                              </span>
+                            )}
                           </td>
 
                           {/* ── Commission earned (matrix math) ── */}
@@ -1479,11 +1533,58 @@ export default function StaffPage() {
               </button>
             </div>
 
+            {/* Delivery-bonus plan switch (owner) */}
+            <div className={`rounded-xl border p-3 space-y-2 ${commModal.planSince
+              ? 'border-teal-300 dark:border-teal-700/60 bg-teal-50/70 dark:bg-teal-900/15'
+              : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-slate-900 dark:text-white">نظام بونص التسليم</p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed mt-0.5">
+                    التأكيد × عدد القطع، ولما الأوردر يتسلم بونص × عدد القطع. على الأوردرات اللي تتأكد من وقت التفعيل بس.
+                  </p>
+                </div>
+                <button type="button" role="switch" aria-checked={!!commModal.planSince} aria-label="نظام بونص التسليم"
+                  disabled={commModal.planBusy || commModal.saving}
+                  onClick={() => setCommModal(m => m ? {...m, planAsk: m.planSince ? 'off' : 'on'} : null)}
+                  className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 ${commModal.planSince ? 'bg-teal-600' : 'bg-slate-300 dark:bg-slate-600'}`}>
+                  <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${commModal.planSince ? 'left-0.5' : 'left-[22px]'}`} />
+                </button>
+              </div>
+              {commModal.planSince && !commModal.planAsk && (
+                <p className="text-[11px] font-semibold text-teal-700 dark:text-teal-300">مفعّل من {planSinceLabel(commModal.planSince)}</p>
+              )}
+              {commModal.planAsk && (
+                <div className="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-2.5 space-y-2">
+                  <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed">
+                    {commModal.planAsk === 'on'
+                      ? 'النظام هيبدأ من دلوقتي على الأوردرات اللي هتتأكد بعد كده. الأوردرات القديمة هتفضل على الحسبة القديمة.'
+                      : 'الأوردرات الجديدة هترجع للحسبة القديمة. الأوردرات اللي اتأكدت بالنظام هتاخد بونصها لما تتسلم.'}
+                  </p>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => applyPlan(commModal.planAsk === 'on')} disabled={commModal.planBusy}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-semibold text-white disabled:opacity-60 ${commModal.planAsk === 'on' ? 'bg-teal-600 hover:bg-teal-700' : 'bg-rose-600 hover:bg-rose-700'}`}>
+                      {commModal.planBusy ? 'جارٍ الحفظ…' : commModal.planAsk === 'on' ? 'فعّل من دلوقتي' : 'وقّف النظام'}
+                    </button>
+                    <button type="button" onClick={() => setCommModal(m => m ? {...m, planAsk:null} : null)} disabled={commModal.planBusy}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300">
+                      إلغاء
+                    </button>
+                  </div>
+                </div>
+              )}
+              <button type="button"
+                onClick={() => { setBonusMonth(0); setBonusListFor({ email: commModal.agent.agent_email, name: commModal.agent.agent_name }); }}
+                className="text-xs font-semibold text-teal-700 dark:text-teal-300 hover:underline">
+                عرض أوردرات البونص
+              </button>
+            </div>
+
             {/* Inputs */}
             <div className="space-y-4">
               {([
                 { key:'confirmed' as const, label:'عمولة التأكيد',    desc:'تُدفع عند تأكيد الطلب',      color:'emerald', val:commModal.confirmed },
-                { key:'delivered' as const, label:'بونص التوصيل',     desc:'إضافي عند وصول الطلب',       color:'teal',    val:commModal.delivered },
+                { key:'delivered' as const, label:'بونص التسليم لكل قطعة', desc:'لما الأوردر يتسلم، للي النظام مفعّل لهم', color:'teal', val:commModal.delivered },
                 { key:'rejected'  as const, label:'عمولة الرفض',      desc:'تُدفع عند رفض العميل',        color:'red',     val:commModal.rejected },
                 { key:'no_answer' as const, label:'عمولة عدم الرد',   desc:'تُدفع عند لا يرد / مؤجل',    color:'amber',   val:commModal.no_answer },
               ] as const).map(f => (
@@ -1551,6 +1652,39 @@ export default function StaffPage() {
           </div>
         </div>
       )}
+
+      {/* ── Delivery-bonus list for one agent (owner's view) ── */}
+      {bonusListFor && (() => {
+        const r = bonusMonth === 'all' ? { start: undefined, end: undefined } : monthRange(bonusMonth);
+        return (
+          <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center sm:p-4"
+            onClick={e => { if (e.target === e.currentTarget) setBonusListFor(null); }}>
+            <div className="absolute inset-0 bg-black/50 backdrop-blur-sm"/>
+            <div className="relative w-full sm:max-w-2xl max-h-[92vh] overflow-y-auto bg-slate-50 dark:bg-slate-900 rounded-t-2xl sm:rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700/60 p-4 sm:p-5 space-y-3" dir="rtl">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-base font-bold text-slate-900 dark:text-white truncate">أوردرات البونص — {bonusListFor.name}</h3>
+                <button onClick={() => setBonusListFor(null)} aria-label="إغلاق"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+                  </svg>
+                </button>
+              </div>
+              <div className="flex gap-1.5">
+                {([[0, 'الشهر ده'], [-1, 'الشهر اللي فات'], ['all', 'الكل']] as const).map(([k, label]) => (
+                  <button key={String(k)} onClick={() => setBonusMonth(k)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${bonusMonth === k
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <DeliveryBonusPanel agent={bonusListFor.email} startDate={r.start} endDate={r.end} />
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Payout (تسديد) modal — Employee Ledger settlement ── */}
       {payoutModal && (() => {

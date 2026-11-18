@@ -7,6 +7,7 @@ const { earnedCommissionSql } = require('../utils/commission');
 const { hasRole, hasAnyRole } = require('../utils/roles');
 const pnl = require('../services/pnl');
 const { CLOSED_PRODUCT } = require('../services/closedStatuses');
+const deliveryBonus = require('../services/deliveryBonus');
 
 const router = express.Router();
 
@@ -315,6 +316,8 @@ function buildAgentSql(joinOnClause, whereClause, earnedSql) {
       COALESCE(u.comm_delivered,  0)                                    AS comm_delivered,
       COALESCE(u.comm_rejected,   0)                                    AS comm_rejected,
       COALESCE(u.comm_no_answer,  0)                                    AS comm_no_answer,
+      /* Delivery-bonus plan start (NULL = off) — services/deliveryBonus.js */
+      u.delivery_bonus_since                                            AS delivery_bonus_since,
 
       COUNT(o.id)                                                       AS total_assigned,
 
@@ -359,7 +362,8 @@ function buildAgentSql(joinOnClause, whereClause, earnedSql) {
     )
     ${whereClause}
     GROUP BY u.id, u.name, u.email, u.is_active,
-             u.comm_confirmed, u.comm_delivered, u.comm_rejected, u.comm_no_answer
+             u.comm_confirmed, u.comm_delivered, u.comm_rejected, u.comm_no_answer,
+             u.delivery_bonus_since
   `;
 }
 
@@ -1041,6 +1045,35 @@ router.get('/my-performance', authenticate, async (req, res) => {
     });
   } catch (err) {
     console.error('[analytics/my-performance] SQL error:', err.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GET /api/analytics/delivery-bonus?startDate&endDate[&agent=email]
+   ─────────────────────────────────────────────────────────────────────────
+   The delivery-bonus plan list (services/deliveryBonus.js): every order the
+   agent confirmed under the plan in the range (by confirmation date), with the
+   customer's name, phone and Bosta tracking so she can check it herself, what
+   she got on confirmation, and the bonus once delivered. An agent always gets
+   her own list; only the owner (admin) may ask for someone else's.
+   ══════════════════════════════════════════════════════════════════════════ */
+router.get('/delivery-bonus', authenticate, async (req, res) => {
+  const isAdmin = hasRole(req.user, 'admin');
+  const wanted = String(req.query.agent ?? '').trim();
+  if (wanted && !isAdmin) return res.status(403).json({ error: 'غير مصرح' });
+  const day = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? '')) ? String(v) : null);
+  try {
+    const out = await deliveryBonus.listFor({
+      email: wanted || req.user.email,
+      businessId: req.user.business_id,
+      start: day(req.query.startDate),
+      end: day(req.query.endDate),
+    });
+    if (!out) return res.status(404).json({ error: 'الموظف غير موجود' });
+    res.json(out);
+  } catch (err) {
+    console.error('[analytics/delivery-bonus]', err.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });

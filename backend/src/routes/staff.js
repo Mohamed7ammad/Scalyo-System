@@ -5,6 +5,7 @@ const authenticate = require('../middleware/auth');
 const { requireAdmin, requireAdminOrPermission, requireAdminOrAnyPermission } = require('../middleware/roleGuard');
 const { checkAndSendStaffAlerts } = require('../services/alerts');
 const postponedCallbacks = require('../services/postponedCallbacks');
+const deliveryBonus = require('../services/deliveryBonus');
 const { earnedCommissionSql } = require('../utils/commission');
 const { hasRole, primaryRole, normalizeRoles } = require('../utils/roles');
 const { normalizeEmail } = require('../utils/email');
@@ -78,6 +79,9 @@ const migrations = [
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS comm_delivered  NUMERIC(10,2) DEFAULT 0`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS comm_rejected   NUMERIC(10,2) DEFAULT 0`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS comm_no_answer  NUMERIC(10,2) DEFAULT 0`,
+  /* ── Delivery-bonus plan: when the owner switched it on (NULL = off).
+        See services/deliveryBonus.js. ── */
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS delivery_bonus_since TIMESTAMPTZ`,
   /* ── Email verification (OTP) ── */
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified  BOOLEAN       DEFAULT false`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_code        VARCHAR(6)`,
@@ -143,6 +147,7 @@ const RETURNING = `
     COALESCE(comm_delivered, 0)                 AS comm_delivered,
     COALESCE(comm_rejected,  0)                 AS comm_rejected,
     COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
+    delivery_bonus_since,
     COALESCE(allowed_products, '{}'::TEXT[])     AS allowed_products,
     referral_code,
     created_at
@@ -198,6 +203,7 @@ router.get('/', authenticate, requireAdminOrAnyPermission('manage_staff', 'reass
         COALESCE(comm_delivered, 0)                 AS comm_delivered,
         COALESCE(comm_rejected,  0)                 AS comm_rejected,
         COALESCE(comm_no_answer, 0)                 AS comm_no_answer,
+        delivery_bonus_since,
         COALESCE(distribution_percentage, 0)        AS distribution_percentage,
         COALESCE(allowed_products, '{}'::TEXT[])     AS allowed_products,
         referral_code,
@@ -543,6 +549,28 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
 });
 
 /* ── POST /api/staff/:id/toggle-attendance ──────────────────────────────── */
+/* ── POST /api/staff/:id/delivery-bonus — owner only ─────────────────────────
+   { enabled: true }  → the plan starts NOW for orders this agent confirms from
+                        now on (confirmation × pieces + bonus × pieces on delivery).
+   { enabled: false } → new confirmations go back to the old pay; orders already
+                        confirmed under the plan still get their bonus when delivered. */
+router.post('/:id/delivery-bonus', authenticate, requireAdmin, async (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled لازم تكون true أو false' });
+  }
+  try {
+    const user = await deliveryBonus.setPlan({
+      userId: req.params.id, businessId: req.user.business_id, enabled: req.body.enabled,
+    });
+    if (!user) return res.status(404).json({ error: 'الموظف غير موجود' });
+    console.log(`[delivery-bonus] ${req.body.enabled ? 'ON' : 'OFF'} for ${user.email} by ${req.user.email}`);
+    res.json(user);
+  } catch (err) {
+    console.error('[POST /staff/:id/delivery-bonus]', err.message);
+    res.status(500).json({ error: 'تعذّر تحديث نظام بونص التسليم' });
+  }
+});
+
 router.post('/:id/toggle-attendance', authenticate, requireAdminOrPermission('manage_staff'), async (req, res) => {
   const agentId  = Number(req.params.id);
   const isAbsent = Boolean(req.body.isAbsent);

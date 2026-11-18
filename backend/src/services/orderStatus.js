@@ -22,6 +22,7 @@ const pool = require('../config/db');
 const { resolveGovernorate, shippingRateFor } = require('../config/shippingRates');
 const noAnswer = require('./noAnswerCycles');
 const { CLOSED_CONFIRMED, CLOSED_PRODUCT } = require('./closedStatuses');
+const deliveryBonus = require('./deliveryBonus');
 
 /* ── Schema ─────────────────────────────────────────────────────────────────
    Stamping is skipped (never fails an update) if the columns couldn't be added. */
@@ -471,12 +472,17 @@ async function applyUpdate({ businessId, orderId, current, updates, expectedStat
 
      Mapping:
        'تم التأكيد'  → source 'comm_confirmed'  (comm_confirmed column)
-       'تم التوصيل' → source 'comm_delivered'   (comm_delivered column)
-       'تم الرفض'   → source 'comm_rejected'    (comm_rejected column)       */
+       'تم الرفض'   → source 'comm_rejected'    (comm_rejected column)
+
+     Delivery-bonus plan (services/deliveryBonus.js): an agent the owner
+     switched ON earns her confirmation rate × pieces, and the row carries the
+     deal (pieces + bonus_per_piece) so the delivery trigger pays the bonus.
+     'تم التوصيل' is deliberately NOT here: the delivery bonus is plan-only and
+     booked by that trigger on every delivered path, never to the current
+     holder at a flat rate.                                                   */
   if (statusChanging && effects.commission !== false) {
     const COMM_MAP = {
       'تم التأكيد':  { field: 'comm_confirmed', source: 'comm_confirmed', label: 'تأكيد'   },
-      'تم التوصيل': { field: 'comm_delivered',  source: 'comm_delivered',  label: 'توصيل'   },
       'تم الرفض':   { field: 'comm_rejected',   source: 'comm_rejected',   label: 'رفض'     },
       /* NOTE: neither 'لا يرد' nor 'مؤجل' is here.
          • 'لا يرد' earns comm_no_answer ONLY after 5 logged call attempts —
@@ -489,19 +495,39 @@ async function applyUpdate({ businessId, orderId, current, updates, expectedStat
 
     if (commInfo && assignedTo) {
       pending.push(pool.query(
-        `SELECT "${commInfo.field}" AS rate FROM users WHERE email = $1 AND business_id = $2`,
+        /* to_jsonb: reads the plan columns without failing if a restart has not
+           added them yet (then nobody is on the plan). */
+        `SELECT "${commInfo.field}" AS rate,
+                to_jsonb(u) ->> 'comm_delivered'       AS bonus,
+                to_jsonb(u) ->> 'delivery_bonus_since' AS plan_since
+           FROM users u WHERE email = $1 AND business_id = $2`,
         [assignedTo, businessId]
       ).then(({ rows: uRows }) => {
         if (!uRows.length) return null;
         const rate = parseFloat(uRows[0].rate) || 0;
         if (rate <= 0) return null;   // agent has no commission for this status
 
+        const onPlan = commInfo.source === 'comm_confirmed' && uRows[0].plan_since != null;
+        const pcs = onPlan ? deliveryBonus.pieces(updatedOrder.quantity) : 1;
         const commDesc =
           `عمولة ${commInfo.label} — ${assignedTo.split('@')[0]} — طلب #${id}` +
+          (onPlan ? ` (${pcs} قطعة × ${deliveryBonus.fmt(rate)})` : '') +
           (updatedOrder.ProductName ? ` | ${updatedOrder.ProductName}` : '');
 
         /* source literal is hardcoded (not user input) — safe to interpolate
            into the ON CONFLICT WHERE clause (cannot use a bind parameter there) */
+        if (onPlan) {
+          return pool.query(
+            `INSERT INTO treasury_transactions
+               (order_id, amount, type, source, description, transaction_date, business_id, agent_email,
+                pieces, bonus_per_piece)
+             VALUES ($1, $2, 'expense', $3, $4, CURRENT_DATE, $5, $6, $7, $8)
+             ON CONFLICT (order_id) WHERE source = '${commInfo.source}'
+             DO NOTHING`,
+            [id, (rate * pcs).toFixed(2), commInfo.source, commDesc, businessId, assignedTo,
+             pcs, (parseFloat(uRows[0].bonus) || 0).toFixed(2)]
+          );
+        }
         return pool.query(
           `INSERT INTO treasury_transactions
              (order_id, amount, type, source, description, transaction_date, business_id, agent_email)
