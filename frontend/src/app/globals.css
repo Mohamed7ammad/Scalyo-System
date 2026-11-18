@@ -46,14 +46,35 @@ html {
    page when a focused input's font-size is under 16px. Keep form controls at
    16px on coarse-pointer devices to kill the zoom-jump. */
 @media (pointer: coarse) {
+  /* !important: a Tailwind text-xs / text-sm class on the control otherwise
+     wins over these element selectors and the zoom-jump comes back (it did on
+     every status / delivery-rate <select> and every <textarea>). */
   input[type='date'],
   input[type='text'],
   input[type='number'],
+  input[type='search'],
+  input[type='tel'],
   select,
   textarea {
-    font-size: 16px;
+    font-size: 16px !important;
   }
   input[type='date'] {
     min-height: 44px;
   }
+}
+
+/* Phones: a row of chips / tabs / buttons stays ONE swipeable line instead of
+   wrapping into a tall block (team pills, product filter, status tabs, the
+   orders toolbar). Desktop keeps its wrapping layout. */
+@media (max-width: 767px) {
+  .m-scroll-row {
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .m-scroll-row::-webkit-scrollbar { display: none; }
+  .m-scroll-row > * { flex-shrink: 0; }
 }

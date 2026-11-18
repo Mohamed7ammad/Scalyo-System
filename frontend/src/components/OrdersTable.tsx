@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef, memo } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } from 'react';
 import PhoneCall from '@/components/PhoneCall';
 import ProductStopDialog from '@/components/ProductStopDialog';
+import AutoGrowTextarea from '@/components/AutoGrowTextarea';
+import { useIsMobile } from '@/lib/useIsMobile';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
 import { GOVERNORATES, resolveGovernorate, computeLostOrderTotal } from '@/lib/shipping';
@@ -563,17 +565,47 @@ function OrdersTable({
      container is the div wrapping the table; row heights are measured live
      (measureElement) so long addresses / wrapped cells stay accurate.      */
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /* Phones get one card per order, scrolled by the PAGE itself (the dashboard
+     <main>) — no box-inside-a-page double scroll. scrollMargin = where the list
+     starts inside <main>, re-measured whenever the content above it changes. */
+  const isMobile = useIsMobile();
+  const [pageScrollEl, setPageScrollEl] = useState<HTMLElement | null>(null);
+  const [listMargin, setListMargin] = useState(0);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const setListNode = useCallback((node: HTMLDivElement | null) => {
+    listRef.current = node;
+    setPageScrollEl(node ? (node.closest('main') as HTMLElement | null) : null);
+  }, []);
+  useLayoutEffect(() => {
+    if (!isMobile || !pageScrollEl) return;
+    const measure = () => {
+      const list = listRef.current;
+      if (!list) return;
+      const top = list.getBoundingClientRect().top - pageScrollEl.getBoundingClientRect().top + pageScrollEl.scrollTop;
+      setListMargin((m) => (Math.abs(m - top) > 1 ? top : m));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(pageScrollEl.firstElementChild ?? pageScrollEl);
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, [isMobile, pageScrollEl]);
+
   const virtualizer = useVirtualizer({
     count: orders.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 68,
-    overscan: 10,
+    getScrollElement: () => (isMobile ? pageScrollEl : scrollRef.current),
+    estimateSize: () => (isMobile ? 260 : 68),
+    overscan: isMobile ? 4 : 10,
     getItemKey: (i) => orders[i].id,
+    scrollMargin: isMobile ? listMargin : 0,
   });
+  /* Switching layout (rotation / resize) → drop the cached row heights. */
+  useEffect(() => { virtualizer.measure(); }, [isMobile, virtualizer]);
   const vItems = virtualizer.getVirtualItems();
-  const padTop = vItems.length ? vItems[0].start : 0;
+  const margin = isMobile ? listMargin : 0;
+  const padTop = vItems.length ? vItems[0].start - margin : 0;
   const padBottom = vItems.length
-    ? virtualizer.getTotalSize() - vItems[vItems.length - 1].end
+    ? virtualizer.getTotalSize() - (vItems[vItems.length - 1].end - margin)
     : 0;
 
   /* Infinite scroll: when the render window nears the end of the LOADED rows,
@@ -626,24 +658,92 @@ function OrdersTable({
     );
   }
 
+  /* Same props for the desktop row and the phone card. */
+  const rowProps = (order: Order, index: number) => ({
+    order, index,
+    rowRef: virtualizer.measureElement,
+    role, canReassign, queueLocked, canDelete, canEditPrice, canEditFullOrder,
+    exactTime: exactOrderTime, lostMode, now,
+    selected: selectedIds.includes(order.id),
+    saving: savingId === order.id,
+    agents,
+    attemptLogs: attemptOverrides[order.id],
+    inlineLogging: inlineLoggingId === order.id,
+    onToggleSelect,
+    onStatusChange: handleStatusChange,
+    onDeliveryRateChange: handleDeliveryRateChange,
+    onAssignedToChange: handleAssignedToChange,
+    onNoteBlur: handleNoteBlur,
+    onAddressBlur: handleAddressBlur,
+    onCityChange: handleCityChange,
+    onShippingNotesBlur: handleShippingNotesBlur,
+    onInlineAttempt: handleInlineAttempt,
+    onQuickEdit: openQuickEdit,
+    onEditModal: openEditModal,
+    onDelete: setDeleteConfirm,
+    onPriceChange,
+    onCloseOrder: setPendingClose,
+    onReopenOrder: setPendingReopen,
+  });
+
   return (
     <>
-      {/* ── Main Table (virtualized) ───────────────────────────── */}
+      {isMobile ? (
+        /* ── Phone: order cards, scrolled by the page (virtualized) ──────── */
+        <div>
+          {canReassign && onToggleSelect && (
+            <label className="flex items-center gap-2 mb-2 px-1 text-sm font-medium text-slate-600 dark:text-slate-300">
+              <input
+                type="checkbox"
+                ref={(el) => {
+                  if (!el) return;
+                  const all  = orders.every((o) => selectedIds.includes(o.id));
+                  const some = orders.some((o)  => selectedIds.includes(o.id));
+                  el.checked       = orders.length > 0 && all;
+                  el.indeterminate = some && !all;
+                }}
+                onChange={() => onSelectAll?.(orders.map((o) => o.id))}
+                className="w-4 h-4 rounded accent-indigo-600"
+              />
+              تحديد الكل ({orders.length})
+            </label>
+          )}
+          <div ref={setListNode}>
+            {padTop > 0 && <div aria-hidden style={{ height: padTop }} />}
+            {vItems.map((vi) => {
+              const order = orders[vi.index];
+              return <OrderRow key={order.id} {...rowProps(order, vi.index)} layout="card" />;
+            })}
+            {padBottom > 0 && <div aria-hidden style={{ height: padBottom }} />}
+          </div>
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 overflow-hidden">
+        {/* Row count footer */}
+        <div className="px-4 py-3 bg-gray-50 dark:bg-slate-800/50 border-t border-gray-100 dark:border-slate-800 text-xs text-gray-400 dark:text-slate-500">
+          الطلبات المحمَّلة: <span className="font-semibold text-gray-600 dark:text-slate-300">{orders.length}</span>
+          {loadingMore && (
+            <span className="mr-2 inline-flex items-center gap-1.5">
+              <span className="inline-block w-3 h-3 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+              جارٍ تحميل المزيد...
+            </span>
+          )}
+          {!hasMore && orders.length > 0 && (
+            <span className="mr-2 text-gray-300 dark:text-slate-600">· نهاية القائمة</span>
+          )}
+        </div>
+          </div>
+        </div>
+      ) : (
+      /* ── Desktop: Main Table (virtualized) ──────────────────────────────── */
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 overflow-hidden shadow-sm">
         {/* Scroll container — the virtualizer's viewport (vertical) AND the
-           horizontal scroller for narrow screens (overflow-auto covers both
-           axes). Fixed height on purpose: the row window is computed against
-           this scrollport. Horizontal scrolling is orthogonal to the
-           virtualizer — measureElement reads offsetHeight, which nowrap keeps
-           stable no matter how far the table is panned sideways. */}
+           horizontal scroller (overflow-auto covers both axes). Fixed height on
+           purpose: the row window is computed against this scrollport. */}
         <div
           ref={scrollRef}
           className="overflow-auto overscroll-x-contain"
           style={{ height: 'calc(100dvh - 270px)', minHeight: '420px' }}
         >
-          {/* [&_th]/[&_td] nowrap: cells keep one line each — on mobile the
-             table extends sideways (pan to see more) instead of wrapping text
-             into towering unreadable rows. */}
+          {/* [&_th]/[&_td] nowrap: cells keep one line each. */}
           <table className="w-full text-sm [&_th]:whitespace-nowrap [&_td]:whitespace-nowrap">
             <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400">
               <tr>
@@ -686,43 +786,7 @@ function OrdersTable({
               {padTop > 0 && <tr aria-hidden style={{ height: padTop }} />}
               {vItems.map((vi) => {
                 const order = orders[vi.index];
-                return (
-                  <OrderRow
-                    key={order.id}
-                    order={order}
-                    index={vi.index}
-                    rowRef={virtualizer.measureElement}
-                    role={role}
-                    canReassign={canReassign}
-                    queueLocked={queueLocked}
-                    canDelete={canDelete}
-                    canEditPrice={canEditPrice}
-                    canEditFullOrder={canEditFullOrder}
-                    exactTime={exactOrderTime}
-                    lostMode={lostMode}
-                    now={now}
-                    selected={selectedIds.includes(order.id)}
-                    saving={savingId === order.id}
-                    agents={agents}
-                    attemptLogs={attemptOverrides[order.id]}
-                    inlineLogging={inlineLoggingId === order.id}
-                    onToggleSelect={onToggleSelect}
-                    onStatusChange={handleStatusChange}
-                    onDeliveryRateChange={handleDeliveryRateChange}
-                    onAssignedToChange={handleAssignedToChange}
-                    onNoteBlur={handleNoteBlur}
-                    onAddressBlur={handleAddressBlur}
-                    onCityChange={handleCityChange}
-                    onShippingNotesBlur={handleShippingNotesBlur}
-                    onInlineAttempt={handleInlineAttempt}
-                    onQuickEdit={openQuickEdit}
-                    onEditModal={openEditModal}
-                    onDelete={setDeleteConfirm}
-                    onPriceChange={onPriceChange}
-                    onCloseOrder={setPendingClose}
-                    onReopenOrder={setPendingReopen}
-                  />
-                );
+                return <OrderRow key={order.id} {...rowProps(order, vi.index)} />;
               })}
               {padBottom > 0 && <tr aria-hidden style={{ height: padBottom }} />}
             </tbody>
@@ -743,6 +807,7 @@ function OrdersTable({
           )}
         </div>
       </div>
+      )}
 
       {/* ── Quick-edit customer details modal (all roles) ────────── */}
       {quickEdit && (
@@ -1844,6 +1909,8 @@ interface OrderRowProps {
   onPriceChange?:       (id: number, price: number) => Promise<void>;
   onCloseOrder:         (order: Order) => void;   // admin «قفل» (confirmed → «مغلق - لن يشحن»)
   onReopenOrder:        (order: Order) => void;   // admin «فتح» (back to the status it had)
+  /* table = desktop <tr>; card = the phone layout (same cells, stacked) */
+  layout?:              'table' | 'card';
 }
 
 function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
@@ -1854,6 +1921,7 @@ function areRowPropsEqual(prev: OrderRowProps, next: OrderRowProps) {
     normStatus(prev.order.Status) === 'جديد' || normStatus(next.order.Status) === 'جديد';
   return (
     prev.order === next.order &&          // immutable update → new ref only for the edited row
+    prev.layout === next.layout &&
     prev.index === next.index &&
     prev.role === next.role &&
     prev.canReassign === next.canReassign &&
@@ -1876,7 +1944,7 @@ const OrderRow = memo(function OrderRow({
   order, index, rowRef, role, canReassign, queueLocked, canDelete, canEditPrice, canEditFullOrder, exactTime, lostMode, now, selected, saving, agents, attemptLogs, inlineLogging,
   onToggleSelect, onStatusChange, onDeliveryRateChange, onAssignedToChange,
   onNoteBlur, onAddressBlur, onCityChange, onShippingNotesBlur, onInlineAttempt,
-  onQuickEdit, onEditModal, onDelete, onPriceChange, onCloseOrder, onReopenOrder,
+  onQuickEdit, onEditModal, onDelete, onPriceChange, onCloseOrder, onReopenOrder, layout = 'table',
 }: OrderRowProps) {
   /* ── Admin inline price edit (local row state) ────────────────────────────── */
   const [editingPrice, setEditingPrice] = useState(false);
@@ -1917,6 +1985,605 @@ const OrderRow = memo(function OrderRow({
     : callbackLate > 0 ? 'bg-red-50/60 dark:bg-red-950/20'
     : callbackLate === 0 ? 'bg-amber-50/50 dark:bg-amber-950/20' : '';
 
+  /* ── Cell contents — ONE definition, two layouts ────────────────────────────
+     The desktop <tr> and the phone card (layout="card") render the very same
+     pieces, so every rule (cooldown, queue lock, attempts, price editor, close
+     / reopen …) behaves identically on both. Only the arrangement differs. */
+  const isCard = layout === 'card';
+  /* Inline text fields: borderless in the table (they read as text until
+     hovered); framed in the card — a phone has no hover, so an editable field
+     must LOOK editable. */
+  const cardInputCls = `w-full px-3 py-2 text-sm rounded-xl outline-none transition
+    border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60
+    focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 focus:bg-white dark:focus:bg-slate-800
+    text-gray-700 dark:text-slate-200 placeholder-gray-400 dark:placeholder-slate-500`;
+
+  const checkboxEl = canReassign && onToggleSelect ? (
+    <input
+      type="checkbox"
+      aria-label={`تحديد طلب ${order.id}`}
+      checked={selected}
+      onChange={() => onToggleSelect(order.id)}
+      className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
+    />
+  ) : null;
+
+  const assigneeEl = !canReassign ? null : agents.length > 0 ? (
+    <select
+      value={order.AssignedTo ?? ''}
+      onChange={(e) => onAssignedToChange(order.id, e.target.value)}
+      className="px-2 py-1 rounded-lg text-xs font-medium
+        text-violet-700 bg-violet-50 border border-violet-200
+        dark:text-violet-300 dark:bg-violet-900/30 dark:border-violet-700/50
+        outline-none focus:ring-2 focus:ring-violet-400 cursor-pointer"
+    >
+      <option value="">— غير محدد —</option>
+      {agents.map((a) => (
+        <option key={a} value={a}>{a.split('@')[0]}</option>
+      ))}
+    </select>
+  ) : (
+    <span className="text-xs text-violet-600 dark:text-violet-400 whitespace-nowrap font-medium">
+      {order.AssignedTo
+        ? order.AssignedTo.split('@')[0]
+        : <span className="text-gray-300 dark:text-slate-700">—</span>}
+    </span>
+  );
+
+  const nameEl = (
+    <>
+      {/* Customer name — truncated so a long value can't stretch the column. */}
+      <p
+        title={order.FullName}
+        className={`font-semibold leading-snug truncate ${isCard
+          ? 'text-[15px] text-gray-900 dark:text-white'
+          : 'text-gray-800 dark:text-slate-200 max-w-[200px]'}`}
+      >
+        {order.FullName}
+      </p>
+
+      {/* Customer frequency — local delivery-history breakdown (see component) */}
+      <CustomerFrequencyBadge order={order} />
+
+      {/* Sent back by the returns team — badge + their note (see component) */}
+      <ResendBadge order={order} />
+
+      {/* Product badge */}
+      {order.ProductName && (
+        <span
+          title={order.ProductName}
+          className={`mt-1 inline-flex items-center gap-1 ${isCard ? 'max-w-full' : 'max-w-[200px]'}
+            px-2 py-0.5 rounded-md text-xs font-medium
+            bg-indigo-50 border border-indigo-100 text-indigo-700
+            dark:bg-indigo-900/30 dark:border-indigo-800/50 dark:text-indigo-300`}
+        >
+          <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+          </svg>
+          <span className="truncate">{order.ProductName}</span>
+        </span>
+      )}
+
+      {/* Quantity badge — shown whenever quantity > 1 */}
+      {order.quantity != null && order.quantity > 1 && (
+        <span className="mt-1 inline-flex items-center gap-1
+          px-2 py-0.5 rounded-md text-xs
+          bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400 mr-1">
+          الكمية:&nbsp;<strong className="text-gray-700 dark:text-slate-300">{order.quantity}</strong>&nbsp;قطعة
+        </span>
+      )}
+    </>
+  );
+
+  const phoneEl = <PhoneCall phone={order.Phone} />;
+
+  /* Delivery Rate dropdown — all roles */
+  const rateEl = (
+    <>
+      <select
+        value={order.DeliveryRate ?? 'بدون'}
+        onChange={(e) => onDeliveryRateChange(order.id, e.target.value)}
+        className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer
+          outline-none focus:ring-2 focus:ring-indigo-400 border-0
+          [&>option]:bg-white [&>option]:text-slate-900
+          dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
+          ${DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400'}`}
+      >
+        {DELIVERY_RATE_OPTIONS.map((r) => (
+          <option key={r} value={r}>{r}</option>
+        ))}
+      </select>
+
+      {order.DeliveryRate === 'ضعيف' && (
+        <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5
+          rounded bg-red-100 border border-red-300 text-red-700 text-xs font-bold
+          dark:bg-red-900/30 dark:border-red-700/50 dark:text-red-400 whitespace-nowrap">
+          <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd"
+              d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213
+                2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11
+                13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1
+                1 0 00-1-1z"
+              clipRule="evenodd"
+            />
+          </svg>
+          طلب عربون
+        </div>
+      )}
+    </>
+  );
+
+  const cityEl = lostMode ? (() => {
+    /* Strict governorate dropdown (all roles). The stored value is matched
+       to a canonical governorate so import spelling variants still select
+       correctly; an unrecognised non-empty value keeps a one-off option so
+       it isn't silently wiped. Changing it reprices server-side. */
+    const canonical = resolveGovernorate(order.City);
+    const selectVal = canonical ?? (order.City ? '__raw__' : '');
+    return (
+      <select
+        value={selectVal}
+        onChange={(e) => { if (e.target.value !== '__raw__') onCityChange(order, e.target.value); }}
+        className="min-w-[130px] px-2 py-1 text-sm rounded-lg cursor-pointer
+          border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800
+          text-gray-700 dark:text-slate-200 outline-none
+          focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition"
+      >
+        <option value="">— بدون محافظة —</option>
+        {order.City && !canonical && (
+          <option value="__raw__" disabled>{order.City} (غير معروفة)</option>
+        )}
+        {GOVERNORATES.map((g) => (
+          <option key={g} value={g}>{g}</option>
+        ))}
+      </select>
+    );
+  })() : (
+    order.City
+  );
+
+  /* Address — inline editable (all roles). On a phone card it shows the WHOLE
+     address (wraps and grows); the table keeps its one-line field + tooltip. */
+  const addressEl = isCard ? (
+    <AutoGrowTextarea
+      key={`${order.id}-addr-${order.Address}`}
+      defaultValue={order.Address ?? ''}
+      onBlur={(e) => onAddressBlur(order, e.target.value)}
+      placeholder="أضف العنوان..."
+      className={cardInputCls}
+    />
+  ) : (
+    <input
+      key={`${order.id}-addr-${order.Address}`}
+      type="text"
+      defaultValue={order.Address ?? ''}
+      onBlur={(e) => onAddressBlur(order, e.target.value)}
+      title={order.Address}
+      placeholder="أضف العنوان..."
+      className={`w-full min-w-[160px] max-w-[220px] px-2 py-1 text-sm rounded-lg
+        border border-transparent outline-none bg-transparent
+        hover:border-gray-300 dark:hover:border-slate-700
+        focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+        focus:bg-white dark:focus:bg-slate-800
+        text-gray-600 dark:text-slate-400
+        placeholder-gray-300 dark:placeholder-slate-600 transition`}
+    />
+  );
+
+  /* Status — courier-owned statuses ('تم الشحن' onward) are a locked badge for
+     EVERYONE, admins included. The inline dropdown previously rendered for
+     admins on ANY status, and since the return states were missing from its
+     options the <select> displayed 'جديد' — making returned orders look new and
+     letting one click overwrite the real status in the DB. Admin overrides now
+     live in the edit modal only. */
+  const statusEl = (
+    <>
+      {inCooldown ? (
+        /* ── 15-minute new-order cooldown — confirm control LOCKED ──────────
+           The <select> is intentionally not rendered so the team cannot call /
+           confirm yet. It reappears (enabled) the moment `elapsedMin` ≥ 15. */
+        <div className="flex flex-col items-start gap-1">
+          <span
+            title="لا يمكن التأكيد قبل مرور ربع ساعة على تسجيل الطلب"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+              bg-amber-100 text-amber-800 border border-amber-200
+              dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700/50 select-none cursor-not-allowed"
+          >
+            <span aria-hidden>⏳</span> انتظار ربع ساعة
+          </span>
+          <span className="text-[10px] text-amber-600 dark:text-amber-400/80 leading-tight">
+            {elapsedLabel} · متبقٍ {toArabicNum(remainingMin)} {remainingMin === 2 ? 'دقيقتان' : remainingMin >= 3 && remainingMin <= 10 ? 'دقائق' : 'دقيقة'}
+          </span>
+        </div>
+      ) : locked ? (
+        /* ── Queue lock — read-only until the overdue callback is handled ── */
+        <div className="flex flex-col items-start gap-1">
+          <span
+            title="عندك مكالمة مؤجلة فات ميعادها — لازم تتعمل الأول"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+              bg-red-50 text-red-700 border border-red-200
+              dark:bg-red-900/30 dark:text-red-300 dark:border-red-800/50 select-none cursor-not-allowed"
+          >
+            <span aria-hidden>🔒</span> {normStatus(order.Status)}
+          </span>
+          <span className="text-[10px] text-red-600 dark:text-red-400/80 leading-tight">المؤجلات المتأخرة الأول</span>
+        </div>
+      ) : inlineStatusOptions(order.Status).includes(normStatus(order.Status)) ? (
+        <>
+          <select
+            /* normalized so a stray space / RTL mark in the DB value can never
+               unmatch the options and fall back to displaying 'جديد' */
+            value={normStatus(order.Status)}
+            onChange={(e) => onStatusChange(order, e.target.value)}
+            className={`${isCard ? 'px-3.5 py-1.5 min-w-[150px]' : 'px-2.5 py-1'} rounded-full text-xs font-semibold cursor-pointer outline-none
+              focus:ring-2 focus:ring-indigo-400 border-0
+              [&>option]:bg-white [&>option]:text-slate-900
+              dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
+              ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
+          >
+            {inlineStatusOptions(order.Status).map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          {/* Elapsed-since-creation, shown for new orders that have cleared the
+              cooldown so the team still sees how long the order has waited. */}
+          {isNewOrder && elapsedLabel && (
+            <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-1 leading-tight">{elapsedLabel}</div>
+          )}
+        </>
+      ) : (
+        <span
+          title={isClosedStatus(order.Status)
+            ? 'اتقفل بقرار الإدارة — مش هيتشحن (عمولة الموظفة محفوظة)'
+            : 'هذه الحالة تُضبط تلقائياً عبر شركة الشحن'}
+          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold select-none
+            ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
+        >
+          <svg className="w-3 h-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+          {order.Status}
+        </span>
+      )}
+
+      {/* Exact shipping timestamp — shown directly below the 'تم الشحن' badge.
+          Independent of the 'جديد' cooldown branch above, so the two never
+          interact. Hidden gracefully when shipped_at is absent (historical rows). */}
+      {normStatus(order.Status) === 'تم الشحن' && order.shipped_at && (
+        <div
+          title="وقت شحن الطلب"
+          className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-medium
+            text-slate-500 dark:text-slate-400 tabular-nums leading-tight"
+          dir="ltr"
+        >
+          <svg className="w-3 h-3 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          {formatShippedAt(order.shipped_at)}
+        </div>
+      )}
+
+      {order.Status === 'تم الرفض' && order.rejectionReason && (
+        <div
+          title={order.rejectionReason}
+          className={`mt-1.5 px-2 py-1 text-xs text-red-600 dark:text-red-400
+            bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800/40
+            rounded leading-snug ${isCard ? 'text-right' : 'text-center max-w-[180px] mx-auto'}`}
+        >
+          {order.rejectionReason}
+        </div>
+      )}
+
+      {callbackLate !== null && (() => {
+        /* Overdue = red (it turns «لا يرد» the night after its date), today = amber, later = grey. */
+        const late = callbackLate;
+        const tone = late > 0
+          ? 'text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-800/50'
+          : late === 0
+            ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-800/40'
+            : 'text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700';
+        return (
+        <>
+        <div
+          title={late > 0 ? `مكالمة متأخرة ${late} يوم — تتحول «لا يرد» الليلة لو متعملتش` : late === 0 ? 'مكالمة مستحقة اليوم' : 'تاريخ المتابعة'}
+          className={`mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs border rounded-md ${isCard ? '' : 'mx-auto'} leading-snug ${tone}`}
+          dir="ltr"
+        >
+          <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+          {toDateInput(order.PostponedDate)}
+          {late > 0 && <span dir="rtl" className="font-bold">· متأخر {late} يوم</span>}
+          {late === 0 && <span dir="rtl" className="font-bold">· اليوم</span>}
+        </div>
+        {/* Brought back to its current date by the backlog cleanup — the date it had missed. */}
+        {order.postponed_overdue_since && (
+          <div
+            title="فات ميعادها الأصلي ورجعت لميعاد جديد — آخر فرصة قبل ما تتحول «لا يرد»"
+            className="mt-1 text-[10px] font-semibold text-red-600 dark:text-red-400 leading-tight"
+          >
+            كانت متأخرة منذ {CAIRO_DAY_MONTH.format(new Date(`${order.postponed_overdue_since}T12:00:00Z`))}
+          </div>
+        )}
+        </>
+        );
+      })()}
+
+      {normStatus(order.Status) === 'لا يرد' && (() => {
+        const logs  = attemptLogs ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
+        /* Only this holder's own attempts count (see splitAttempts). */
+        const { own: count, prior } = splitAttempts(logs, order.assigned_at);
+        const done  = count >= NO_ANSWER_REQUIRED;
+        return (
+          <button
+            type="button"
+            onClick={() => onInlineAttempt(order.id)}
+            disabled={inlineLogging || locked}
+            title={locked ? 'عندك مكالمة مؤجلة فات ميعادها — لازم تتعمل الأول'
+              : prior > 0 ? `تسجيل محاولة اتصال — و${prior} محاولات سابقة لموظف آخر لا تُحتسب لك` : 'تسجيل محاولة اتصال'}
+            className={`mt-1.5 inline-flex items-center gap-1 ${isCard ? 'px-3.5 py-2 text-sm' : 'px-2.5 py-1 text-xs'} rounded-full font-semibold
+              transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
+              ${done
+                ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300'
+                : 'bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300'}`}
+          >
+            <span>📞</span>
+            <span>
+              {inlineLogging ? 'جارٍ…' : 'تسجيل محاولة'}
+              {' '}({count}/{NO_ANSWER_REQUIRED})
+            </span>
+          </button>
+        );
+      })()}
+    </>
+  );
+
+  /* Financials / Payment */
+  const paymentEl = (
+    <div className={`flex flex-col ${isCard ? 'items-end' : 'items-center justify-center'} gap-1.5`}>
+      {editingPrice ? (
+        /* ── Admin inline price editor (total ProductPrice) ── */
+        <div className="flex items-center gap-1">
+          <input
+            type="number" min="0" step="1" autoFocus
+            value={priceInput}
+            onChange={(e) => setPriceInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitPrice(); if (e.key === 'Escape') cancelEditPrice(); }}
+            disabled={savingPrice}
+            dir="ltr"
+            className={`w-24 px-2 py-1 text-sm rounded-lg text-right tabular-nums outline-none
+              bg-white dark:bg-slate-800 text-gray-800 dark:text-slate-100
+              border ${priceValid ? 'border-indigo-400 focus:ring-2 focus:ring-indigo-400/50' : 'border-red-400 focus:ring-2 focus:ring-red-400/50'}
+              [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+          />
+          <button onClick={commitPrice} disabled={!priceValid || savingPrice} title="حفظ"
+            className="p-1 rounded-md text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 disabled:opacity-40 disabled:cursor-not-allowed">
+            {savingPrice
+              ? <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
+              : <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>}
+          </button>
+          <button onClick={cancelEditPrice} disabled={savingPrice} title="إلغاء"
+            className="p-1 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-40">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      ) : (
+        <>
+          {order.hasDeposit ? (
+            <>
+              <div className="inline-flex items-center justify-center
+                rounded-md px-2 py-1 border
+                border-rose-200 bg-rose-50
+                dark:bg-rose-900/30 dark:border-rose-800/50
+                text-rose-700 dark:text-rose-400
+                text-xs font-bold whitespace-nowrap">
+                COD: {fmtNum(Math.max(0, asNum(order.ProductPrice) - asNum(order.depositAmount)))} ج.م
+              </div>
+              <div className="flex items-center gap-1 text-[11px] font-medium
+                text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                <span>عربون:</span>
+                <span dir="ltr">{fmtNum(asNum(order.depositAmount))} ج.م</span>
+                <span>💰</span>
+              </div>
+            </>
+          ) : order.ProductPrice ? (
+            <span className={`whitespace-nowrap ${isCard ? 'text-gray-800 dark:text-slate-100 text-base font-bold' : 'text-gray-500 dark:text-gray-400 text-sm'}`}>
+              {fmtNum(asNum(order.ProductPrice))} ج.م
+            </span>
+          ) : (
+            <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
+          )}
+          {/* Edit affordance — edits the TOTAL price (ProductPrice). Admin +
+              team-leader (canEditPrice); agents never see it. */}
+          {canEditPrice && onPriceChange && (
+            <button onClick={startEditPrice} title="تعديل السعر"
+              className="inline-flex items-center gap-1 text-[10px] font-medium
+                text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              تعديل السعر
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  /* Shipping notes — inline editable; printed on the Bosta AWB */
+  const shipNotesEl = isCard ? (
+    <AutoGrowTextarea
+      key={`${order.id}-ship-${order.ShippingNotes}`}
+      defaultValue={order.ShippingNotes ?? ''}
+      onBlur={(e) => onShippingNotesBlur(order, e.target.value)}
+      placeholder="ملاحظة للشحن..."
+      className={cardInputCls}
+    />
+  ) : (
+    <input
+      key={`${order.id}-ship-${order.ShippingNotes}`}
+      type="text"
+      defaultValue={order.ShippingNotes ?? ''}
+      onBlur={(e) => onShippingNotesBlur(order, e.target.value)}
+      placeholder="ملاحظة للشحن..."
+      title="تُطبع على بوليصة الشحن"
+      className={`w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
+        border border-transparent outline-none bg-transparent
+        hover:border-gray-300 dark:hover:border-slate-700
+        focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+        focus:bg-white dark:focus:bg-slate-800
+        text-gray-700 dark:text-slate-300
+        placeholder-gray-300 dark:placeholder-slate-600 transition`}
+    />
+  );
+
+  /* Note inline edit — all roles */
+  const noteEl = isCard ? (
+    <AutoGrowTextarea
+      key={`${order.id}-${order.Note}`}
+      defaultValue={order.Note ?? ''}
+      onBlur={(e) => onNoteBlur(order, e.target.value)}
+      placeholder="أضف ملاحظة..."
+      className={cardInputCls}
+    />
+  ) : (
+    <input
+      key={`${order.id}-${order.Note}`}
+      type="text"
+      defaultValue={order.Note ?? ''}
+      title={order.Note ?? ''}
+      onBlur={(e) => onNoteBlur(order, e.target.value)}
+      placeholder="أضف ملاحظة..."
+      className={`w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
+        border border-transparent outline-none bg-transparent
+        hover:border-gray-300 dark:hover:border-slate-700
+        focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
+        focus:bg-white dark:focus:bg-slate-800
+        text-gray-700 dark:text-slate-300
+        placeholder-gray-300 dark:placeholder-slate-600 transition`}
+    />
+  );
+
+  /* Actions — the full "تعديل الطلب" modal is admin + team-leader
+     (canEditFullOrder); hard-delete stays admin-only (canDelete). Plain
+     agents get the safe quick-edit (customer details, address, governorate). */
+  const actBtn = isCard ? 'px-3.5 py-2 text-sm' : 'px-2.5 py-1 text-xs';
+  const actionsEl = (
+    <div className="flex flex-wrap gap-1.5">
+      {canEditFullOrder ? (
+        <>
+          <button
+            onClick={() => onEditModal(order)}
+            className={`${actBtn} rounded-lg font-medium transition
+              bg-indigo-50 text-indigo-700 hover:bg-indigo-100
+              dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60`}
+          >
+            تعديل
+          </button>
+          {canDelete && (
+            <button
+              onClick={() => onDelete(order.id)}
+              className={`${actBtn} rounded-lg font-medium transition
+                bg-red-50 text-red-700 hover:bg-red-100
+                dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60`}
+            >
+              حذف
+            </button>
+          )}
+          {/* «قفل» / «فتح» — admin only (canDelete is the admin-only flag) */}
+          {canDelete && normStatus(order.Status) === 'تم التأكيد' && (
+            <button
+              onClick={() => onCloseOrder(order)}
+              title="مش هيتشحن — العمولة ونسبة التأكيد محفوظين"
+              className={`${actBtn} rounded-lg font-medium transition
+                bg-stone-100 text-stone-700 hover:bg-stone-200
+                dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700`}
+            >
+              قفل
+            </button>
+          )}
+          {canDelete && isClosedStatus(order.Status) && (
+            <button
+              onClick={() => onReopenOrder(order)}
+              title="رجّعه للحالة اللي كان عليها"
+              className={`${actBtn} rounded-lg font-medium transition
+                bg-emerald-50 text-emerald-700 hover:bg-emerald-100
+                dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/60`}
+            >
+              فتح
+            </button>
+          )}
+        </>
+      ) : (
+        <button
+          onClick={() => onQuickEdit(order)}
+          title="تعديل بيانات العميل"
+          className={`inline-flex items-center gap-1 ${actBtn} rounded-lg font-medium transition
+            bg-indigo-50 text-indigo-700 hover:bg-indigo-100
+            dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60`}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+          </svg>
+          تعديل
+        </button>
+      )}
+    </div>
+  );
+
+  /* ── Phone: one card per order — everything visible, nothing sideways ────── */
+  if (isCard) {
+    return (
+      /* The measured element (data-index) carries the gap as PADDING — the
+         virtualizer measures height, and margins would be invisible to it. */
+      <div ref={rowRef} data-index={index} className="pb-2.5">
+        <div className={`rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900
+          shadow-sm p-3.5 space-y-3 ${callbackTint} ${saving ? 'opacity-60 pointer-events-none' : ''}`}>
+          {/* Who + what */}
+          <div className="flex items-start gap-2.5">
+            {checkboxEl && <div className="pt-1">{checkboxEl}</div>}
+            <div className="flex-1 min-w-0">{nameEl}</div>
+            <span className="shrink-0 pt-0.5 text-[11px] text-slate-400 dark:text-slate-500 tabular-nums">#{index + 1}</span>
+          </div>
+          {/* Call + delivery rating */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-gray-700 dark:text-slate-200">{phoneEl}</div>
+            <div className="flex flex-col items-end">{rateEl}</div>
+          </div>
+          {/* Status — on its own row so the control is easy to hit */}
+          <div className="flex flex-col items-start">{statusEl}</div>
+          {/* Where — the address wraps to its full length, so the city sits on
+              its first line */}
+          <div className="flex items-start gap-2">
+            {(lostMode || order.City) && (
+              <div className={`shrink-0 ${lostMode ? '' : 'pt-2'} text-sm font-medium text-slate-600 dark:text-slate-300`}>{cityEl}</div>
+            )}
+            <div className="flex-1 min-w-0">{addressEl}</div>
+          </div>
+          {/* Money */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-slate-400 dark:text-slate-500">الدفع</span>
+            {paymentEl}
+          </div>
+          {noteEl}
+          {shipNotesEl}
+          {/* Assignment + actions */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5 border-t border-slate-100 dark:border-slate-800">
+            {assigneeEl ?? <span />}
+            {actionsEl}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── Desktop: the table row — same cells, same classes as before ─────────── */
   return (
     <tr
       ref={rowRef}
@@ -1924,521 +2591,21 @@ const OrderRow = memo(function OrderRow({
       className={`hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors ${callbackTint} ${saving ? 'opacity-60 pointer-events-none' : ''}`}
     >
       {/* Row checkbox — reassign-capable users (admin + team-leaders) */}
-      {canReassign && onToggleSelect && (
-        <td className="px-4 py-3 w-10" onClick={(e) => e.stopPropagation()}>
-          <input
-            type="checkbox"
-            aria-label={`تحديد طلب ${order.id}`}
-            checked={selected}
-            onChange={() => onToggleSelect(order.id)}
-            className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
-          />
-        </td>
+      {checkboxEl && (
+        <td className="px-4 py-3 w-10" onClick={(e) => e.stopPropagation()}>{checkboxEl}</td>
       )}
       <td className="px-4 py-3 text-gray-400 dark:text-slate-600 text-xs">{index + 1}</td>
-
-      {canReassign && (
-        <td className="px-4 py-3">
-          {agents.length > 0 ? (
-            <select
-              value={order.AssignedTo ?? ''}
-              onChange={(e) => onAssignedToChange(order.id, e.target.value)}
-              className="px-2 py-1 rounded-lg text-xs font-medium
-                text-violet-700 bg-violet-50 border border-violet-200
-                dark:text-violet-300 dark:bg-violet-900/30 dark:border-violet-700/50
-                outline-none focus:ring-2 focus:ring-violet-400 cursor-pointer"
-            >
-              <option value="">— غير محدد —</option>
-              {agents.map((a) => (
-                <option key={a} value={a}>{a.split('@')[0]}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="text-xs text-violet-600 dark:text-violet-400 whitespace-nowrap font-medium">
-              {order.AssignedTo
-                ? order.AssignedTo.split('@')[0]
-                : <span className="text-gray-300 dark:text-slate-700">—</span>}
-            </span>
-          )}
-        </td>
-      )}
-
-      <td className="px-4 py-3">
-        {/* Customer name — truncated so a long value can't stretch the column. */}
-        <p
-          title={order.FullName}
-          className="font-semibold text-gray-800 dark:text-slate-200 max-w-[200px] truncate leading-snug"
-        >
-          {order.FullName}
-        </p>
-
-        {/* Customer frequency — local delivery-history breakdown (see component) */}
-        <CustomerFrequencyBadge order={order} />
-
-        {/* Sent back by the returns team — badge + their note (see component) */}
-        <ResendBadge order={order} />
-
-        {/* Product badge */}
-        {order.ProductName && (
-          <span
-            title={order.ProductName}
-            className="mt-1 inline-flex items-center gap-1 max-w-[200px]
-              px-2 py-0.5 rounded-md text-xs font-medium
-              bg-indigo-50 border border-indigo-100 text-indigo-700
-              dark:bg-indigo-900/30 dark:border-indigo-800/50 dark:text-indigo-300"
-          >
-            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-            </svg>
-            <span className="truncate">{order.ProductName}</span>
-          </span>
-        )}
-
-        {/* Quantity badge — shown whenever quantity > 1 */}
-        {order.quantity != null && order.quantity > 1 && (
-          <span className="mt-1 inline-flex items-center gap-1
-            px-2 py-0.5 rounded-md text-xs
-            bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400 mr-1">
-            الكمية:&nbsp;<strong className="text-gray-700 dark:text-slate-300">{order.quantity}</strong>&nbsp;قطعة
-          </span>
-        )}
-      </td>
-
-      <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap" dir="ltr">
-        <PhoneCall phone={order.Phone} />
-      </td>
-
-      {/* Delivery Rate dropdown — all roles */}
-      <td className="px-4 py-3">
-        <select
-          value={order.DeliveryRate ?? 'بدون'}
-          onChange={(e) => onDeliveryRateChange(order.id, e.target.value)}
-          className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer
-            outline-none focus:ring-2 focus:ring-indigo-400 border-0
-            [&>option]:bg-white [&>option]:text-slate-900
-            dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
-            ${DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400'}`}
-        >
-          {DELIVERY_RATE_OPTIONS.map((r) => (
-            <option key={r} value={r}>{r}</option>
-          ))}
-        </select>
-
-        {order.DeliveryRate === 'ضعيف' && (
-          <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5
-            rounded bg-red-100 border border-red-300 text-red-700 text-xs font-bold
-            dark:bg-red-900/30 dark:border-red-700/50 dark:text-red-400 whitespace-nowrap">
-            <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd"
-                d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213
-                  2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11
-                  13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1
-                  1 0 00-1-1z"
-                clipRule="evenodd"
-              />
-            </svg>
-            طلب عربون
-          </div>
-        )}
-      </td>
-
-      <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap">
-        {lostMode ? (() => {
-          /* Strict governorate dropdown (all roles). The stored value is matched
-             to a canonical governorate so import spelling variants still select
-             correctly; an unrecognised non-empty value keeps a one-off option so
-             it isn't silently wiped. Changing it reprices server-side. */
-          const canonical = resolveGovernorate(order.City);
-          const selectVal = canonical ?? (order.City ? '__raw__' : '');
-          return (
-            <select
-              value={selectVal}
-              onChange={(e) => { if (e.target.value !== '__raw__') onCityChange(order, e.target.value); }}
-              className="min-w-[130px] px-2 py-1 text-sm rounded-lg cursor-pointer
-                border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800
-                text-gray-700 dark:text-slate-200 outline-none
-                focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition"
-            >
-              <option value="">— بدون محافظة —</option>
-              {order.City && !canonical && (
-                <option value="__raw__" disabled>{order.City} (غير معروفة)</option>
-              )}
-              {GOVERNORATES.map((g) => (
-                <option key={g} value={g}>{g}</option>
-              ))}
-            </select>
-          );
-        })() : (
-          order.City
-        )}
-      </td>
-
-      {/* Address — inline editable (all roles) */}
-      <td className="px-4 py-3">
-        <input
-          key={`${order.id}-addr-${order.Address}`}
-          type="text"
-          defaultValue={order.Address ?? ''}
-          onBlur={(e) => onAddressBlur(order, e.target.value)}
-          title={order.Address}
-          placeholder="أضف العنوان..."
-          className="w-full min-w-[160px] max-w-[220px] px-2 py-1 text-sm rounded-lg
-            border border-transparent outline-none bg-transparent
-            hover:border-gray-300 dark:hover:border-slate-700
-            focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
-            focus:bg-white dark:focus:bg-slate-800
-            text-gray-600 dark:text-slate-400
-            placeholder-gray-300 dark:placeholder-slate-600 transition"
-        />
-      </td>
-
-      {/* Status cell — courier-owned statuses ('تم الشحن' onward) are a locked
-          badge for EVERYONE, admins included. The inline dropdown previously
-          rendered for admins on ANY status, and since the return states were
-          missing from its options the <select> displayed 'جديد' — making
-          returned orders look new and letting one click overwrite the real
-          status in the DB. Admin overrides now live in the edit modal only. */}
-      <td className="px-4 py-3">
-        {inCooldown ? (
-          /* ── 15-minute new-order cooldown — confirm control LOCKED ──────────
-             The <select> is intentionally not rendered so the team cannot call /
-             confirm yet. It reappears (enabled) the moment `elapsedMin` ≥ 15. */
-          <div className="flex flex-col items-start gap-1">
-            <span
-              title="لا يمكن التأكيد قبل مرور ربع ساعة على تسجيل الطلب"
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
-                bg-amber-100 text-amber-800 border border-amber-200
-                dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700/50 select-none cursor-not-allowed"
-            >
-              <span aria-hidden>⏳</span> انتظار ربع ساعة
-            </span>
-            <span className="text-[10px] text-amber-600 dark:text-amber-400/80 leading-tight">
-              {elapsedLabel} · متبقٍ {toArabicNum(remainingMin)} {remainingMin === 2 ? 'دقيقتان' : remainingMin >= 3 && remainingMin <= 10 ? 'دقائق' : 'دقيقة'}
-            </span>
-          </div>
-        ) : locked ? (
-          /* ── Queue lock — read-only until the overdue callback is handled ── */
-          <div className="flex flex-col items-start gap-1">
-            <span
-              title="عندك مكالمة مؤجلة فات ميعادها — لازم تتعمل الأول"
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
-                bg-red-50 text-red-700 border border-red-200
-                dark:bg-red-900/30 dark:text-red-300 dark:border-red-800/50 select-none cursor-not-allowed"
-            >
-              <span aria-hidden>🔒</span> {normStatus(order.Status)}
-            </span>
-            <span className="text-[10px] text-red-600 dark:text-red-400/80 leading-tight">المؤجلات المتأخرة الأول</span>
-          </div>
-        ) : inlineStatusOptions(order.Status).includes(normStatus(order.Status)) ? (
-          <>
-            <select
-              /* normalized so a stray space / RTL mark in the DB value can never
-                 unmatch the options and fall back to displaying 'جديد' */
-              value={normStatus(order.Status)}
-              onChange={(e) => onStatusChange(order, e.target.value)}
-              className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer outline-none
-                focus:ring-2 focus:ring-indigo-400 border-0
-                [&>option]:bg-white [&>option]:text-slate-900
-                dark:[&>option]:bg-slate-800 dark:[&>option]:text-slate-100
-                ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
-            >
-              {inlineStatusOptions(order.Status).map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-            {/* Elapsed-since-creation, shown for new orders that have cleared the
-                cooldown so the team still sees how long the order has waited. */}
-            {isNewOrder && elapsedLabel && (
-              <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-1 leading-tight">{elapsedLabel}</div>
-            )}
-          </>
-        ) : (
-          <span
-            title={isClosedStatus(order.Status)
-              ? 'اتقفل بقرار الإدارة — مش هيتشحن (عمولة الموظفة محفوظة)'
-              : 'هذه الحالة تُضبط تلقائياً عبر شركة الشحن'}
-            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold select-none
-              ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
-          >
-            <svg className="w-3 h-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-            </svg>
-            {order.Status}
-          </span>
-        )}
-
-        {/* Exact shipping timestamp — shown directly below the 'تم الشحن' badge.
-            Independent of the 'جديد' cooldown branch above, so the two never
-            interact. Hidden gracefully when shipped_at is absent (historical rows). */}
-        {normStatus(order.Status) === 'تم الشحن' && order.shipped_at && (
-          <div
-            title="وقت شحن الطلب"
-            className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-medium
-              text-slate-500 dark:text-slate-400 tabular-nums leading-tight"
-            dir="ltr"
-          >
-            <svg className="w-3 h-3 shrink-0 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            {formatShippedAt(order.shipped_at)}
-          </div>
-        )}
-
-        {order.Status === 'تم الرفض' && order.rejectionReason && (
-          <div
-            title={order.rejectionReason}
-            className="mt-1.5 px-2 py-1 text-xs text-center text-red-600 dark:text-red-400
-              bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800/40
-              rounded max-w-[180px] mx-auto leading-snug"
-          >
-            {order.rejectionReason}
-          </div>
-        )}
-
-        {callbackLate !== null && (() => {
-          /* Overdue = red (it turns «لا يرد» the night after its date), today = amber, later = grey. */
-          const late = callbackLate;
-          const tone = late > 0
-            ? 'text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-800/50'
-            : late === 0
-              ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-800/40'
-              : 'text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700';
-          return (
-          <>
-          <div
-            title={late > 0 ? `مكالمة متأخرة ${late} يوم — تتحول «لا يرد» الليلة لو متعملتش` : late === 0 ? 'مكالمة مستحقة اليوم' : 'تاريخ المتابعة'}
-            className={`mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-xs border rounded-md mx-auto leading-snug ${tone}`}
-            dir="ltr"
-          >
-            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            {toDateInput(order.PostponedDate)}
-            {late > 0 && <span dir="rtl" className="font-bold">· متأخر {late} يوم</span>}
-            {late === 0 && <span dir="rtl" className="font-bold">· اليوم</span>}
-          </div>
-          {/* Brought back to its current date by the backlog cleanup — the date it had missed. */}
-          {order.postponed_overdue_since && (
-            <div
-              title="فات ميعادها الأصلي ورجعت لميعاد جديد — آخر فرصة قبل ما تتحول «لا يرد»"
-              className="mt-1 text-[10px] font-semibold text-red-600 dark:text-red-400 leading-tight"
-            >
-              كانت متأخرة منذ {CAIRO_DAY_MONTH.format(new Date(`${order.postponed_overdue_since}T12:00:00Z`))}
-            </div>
-          )}
-          </>
-          );
-        })()}
-
-        {normStatus(order.Status) === 'لا يرد' && (() => {
-          const logs  = attemptLogs ?? (Array.isArray(order.no_answer_logs) ? order.no_answer_logs : []);
-          /* Only this holder's own attempts count (see splitAttempts). */
-          const { own: count, prior } = splitAttempts(logs, order.assigned_at);
-          const done  = count >= NO_ANSWER_REQUIRED;
-          return (
-            <button
-              type="button"
-              onClick={() => onInlineAttempt(order.id)}
-              disabled={inlineLogging || locked}
-              title={locked ? 'عندك مكالمة مؤجلة فات ميعادها — لازم تتعمل الأول'
-                : prior > 0 ? `تسجيل محاولة اتصال — و${prior} محاولات سابقة لموظف آخر لا تُحتسب لك` : 'تسجيل محاولة اتصال'}
-              className={`mt-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
-                transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
-                ${done
-                  ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300'
-                  : 'bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300'}`}
-            >
-              <span>📞</span>
-              <span>
-                {inlineLogging ? 'جارٍ…' : 'تسجيل محاولة'}
-                {' '}({count}/{NO_ANSWER_REQUIRED})
-              </span>
-            </button>
-          );
-        })()}
-      </td>
-
-      {/* Financials / Payment column */}
-      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-        <div className="flex flex-col items-center justify-center gap-1.5">
-          {editingPrice ? (
-            /* ── Admin inline price editor (total ProductPrice) ── */
-            <div className="flex items-center gap-1">
-              <input
-                type="number" min="0" step="1" autoFocus
-                value={priceInput}
-                onChange={(e) => setPriceInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') commitPrice(); if (e.key === 'Escape') cancelEditPrice(); }}
-                disabled={savingPrice}
-                dir="ltr"
-                className={`w-24 px-2 py-1 text-sm rounded-lg text-right tabular-nums outline-none
-                  bg-white dark:bg-slate-800 text-gray-800 dark:text-slate-100
-                  border ${priceValid ? 'border-indigo-400 focus:ring-2 focus:ring-indigo-400/50' : 'border-red-400 focus:ring-2 focus:ring-red-400/50'}
-                  [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
-              />
-              <button onClick={commitPrice} disabled={!priceValid || savingPrice} title="حفظ"
-                className="p-1 rounded-md text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 disabled:opacity-40 disabled:cursor-not-allowed">
-                {savingPrice
-                  ? <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
-                  : <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>}
-              </button>
-              <button onClick={cancelEditPrice} disabled={savingPrice} title="إلغاء"
-                className="p-1 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-40">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12"/></svg>
-              </button>
-            </div>
-          ) : (
-            <>
-              {order.hasDeposit ? (
-                <>
-                  <div className="inline-flex items-center justify-center
-                    rounded-md px-2 py-1 border
-                    border-rose-200 bg-rose-50
-                    dark:bg-rose-900/30 dark:border-rose-800/50
-                    text-rose-700 dark:text-rose-400
-                    text-xs font-bold whitespace-nowrap">
-                    COD: {fmtNum(Math.max(0, asNum(order.ProductPrice) - asNum(order.depositAmount)))} ج.م
-                  </div>
-                  <div className="flex items-center gap-1 text-[11px] font-medium
-                    text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
-                    <span>عربون:</span>
-                    <span dir="ltr">{fmtNum(asNum(order.depositAmount))} ج.م</span>
-                    <span>💰</span>
-                  </div>
-                </>
-              ) : order.ProductPrice ? (
-                <span className="text-gray-500 dark:text-gray-400 text-sm whitespace-nowrap">
-                  {fmtNum(asNum(order.ProductPrice))} ج.م
-                </span>
-              ) : (
-                <span className="text-gray-300 dark:text-slate-700 text-xs">—</span>
-              )}
-              {/* Edit affordance — edits the TOTAL price (ProductPrice). Admin +
-                  team-leader (canEditPrice); agents never see it. */}
-              {canEditPrice && onPriceChange && (
-                <button onClick={startEditPrice} title="تعديل السعر"
-                  className="inline-flex items-center gap-1 text-[10px] font-medium
-                    text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                  </svg>
-                  تعديل السعر
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </td>
-
-      {/* Shipping notes — inline editable; printed on the Bosta AWB */}
-      <td className="px-4 py-3">
-        <input
-          key={`${order.id}-ship-${order.ShippingNotes}`}
-          type="text"
-          defaultValue={order.ShippingNotes ?? ''}
-          onBlur={(e) => onShippingNotesBlur(order, e.target.value)}
-          placeholder="ملاحظة للشحن..."
-          title="تُطبع على بوليصة الشحن"
-          className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
-            border border-transparent outline-none bg-transparent
-            hover:border-gray-300 dark:hover:border-slate-700
-            focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
-            focus:bg-white dark:focus:bg-slate-800
-            text-gray-700 dark:text-slate-300
-            placeholder-gray-300 dark:placeholder-slate-600 transition"
-        />
-      </td>
-
-      {/* Note inline edit — all roles */}
-      <td className="px-4 py-3">
-        <input
-          key={`${order.id}-${order.Note}`}
-          type="text"
-          defaultValue={order.Note ?? ''}
-          title={order.Note ?? ''}
-          onBlur={(e) => onNoteBlur(order, e.target.value)}
-          placeholder="أضف ملاحظة..."
-          className="w-full min-w-[150px] px-2 py-1 text-sm rounded-lg
-            border border-transparent outline-none bg-transparent
-            hover:border-gray-300 dark:hover:border-slate-700
-            focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400
-            focus:bg-white dark:focus:bg-slate-800
-            text-gray-700 dark:text-slate-300
-            placeholder-gray-300 dark:placeholder-slate-600 transition"
-        />
-      </td>
-
-      {/* Actions — the full "تعديل الطلب" modal is admin + team-leader
-          (canEditFullOrder); hard-delete stays admin-only (canDelete). Plain
-          agents get the safe quick-edit (customer details, address, governorate). */}
-      <td className="px-4 py-3">
-        <div className="flex flex-wrap gap-1.5">
-          {canEditFullOrder ? (
-            <>
-              <button
-                onClick={() => onEditModal(order)}
-                className="px-2.5 py-1 text-xs rounded-lg font-medium transition
-                  bg-indigo-50 text-indigo-700 hover:bg-indigo-100
-                  dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
-              >
-                تعديل
-              </button>
-              {canDelete && (
-                <button
-                  onClick={() => onDelete(order.id)}
-                  className="px-2.5 py-1 text-xs rounded-lg font-medium transition
-                    bg-red-50 text-red-700 hover:bg-red-100
-                    dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/60"
-                >
-                  حذف
-                </button>
-              )}
-              {/* «قفل» / «فتح» — admin only (canDelete is the admin-only flag) */}
-              {canDelete && normStatus(order.Status) === 'تم التأكيد' && (
-                <button
-                  onClick={() => onCloseOrder(order)}
-                  title="مش هيتشحن — العمولة ونسبة التأكيد محفوظين"
-                  className="px-2.5 py-1 text-xs rounded-lg font-medium transition
-                    bg-stone-100 text-stone-700 hover:bg-stone-200
-                    dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700"
-                >
-                  قفل
-                </button>
-              )}
-              {canDelete && isClosedStatus(order.Status) && (
-                <button
-                  onClick={() => onReopenOrder(order)}
-                  title="رجّعه للحالة اللي كان عليها"
-                  className="px-2.5 py-1 text-xs rounded-lg font-medium transition
-                    bg-emerald-50 text-emerald-700 hover:bg-emerald-100
-                    dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
-                >
-                  فتح
-                </button>
-              )}
-            </>
-          ) : (
-            <button
-              onClick={() => onQuickEdit(order)}
-              title="تعديل بيانات العميل"
-              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg font-medium transition
-                bg-indigo-50 text-indigo-700 hover:bg-indigo-100
-                dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-              </svg>
-              تعديل
-            </button>
-          )}
-        </div>
-      </td>
+      {canReassign && <td className="px-4 py-3">{assigneeEl}</td>}
+      <td className="px-4 py-3">{nameEl}</td>
+      <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap" dir="ltr">{phoneEl}</td>
+      <td className="px-4 py-3">{rateEl}</td>
+      <td className="px-4 py-3 text-gray-600 dark:text-slate-400 whitespace-nowrap">{cityEl}</td>
+      <td className="px-4 py-3">{addressEl}</td>
+      <td className="px-4 py-3">{statusEl}</td>
+      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>{paymentEl}</td>
+      <td className="px-4 py-3">{shipNotesEl}</td>
+      <td className="px-4 py-3">{noteEl}</td>
+      <td className="px-4 py-3">{actionsEl}</td>
     </tr>
   );
 }, areRowPropsEqual);
