@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { noteServerTime } from './serverClock';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -756,8 +757,14 @@ export const toggleAttendance = (id: number, isAbsent: boolean) =>
 
 /** Presence heartbeat — stamps the current user's last_active_at = NOW().
     Pinged on an interval while logged in. Any role. */
-export const sendHeartbeat = () =>
-  api.post<{ ok: boolean; at: string }>('/api/staff/heartbeat');
+export const sendHeartbeat = async () => {
+  const sentAt = Date.now();
+  const res = await api.post<{ ok: boolean; at: string }>('/api/staff/heartbeat');
+  /* The reply carries the server's time — it corrects a wrong phone clock
+     for every on-screen timer (lib/serverClock.ts). */
+  noteServerTime(res.data?.at, sentAt, Date.now());
+  return res;
+};
 
 /** Persist per-agent auto-distribution weights (%). Drives weighted round-robin
     assignment of incoming EasyOrder webhook orders. Admin only. */

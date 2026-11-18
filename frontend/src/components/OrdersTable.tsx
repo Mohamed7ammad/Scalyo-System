@@ -4,6 +4,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } from 
 import PhoneCall from '@/components/PhoneCall';
 import ProductStopDialog from '@/components/ProductStopDialog';
 import AutoGrowTextarea from '@/components/AutoGrowTextarea';
+import { serverNow, onServerClockChange } from '@/lib/serverClock';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Order, logNoAnswerAttempt } from '@/lib/api';
@@ -328,10 +329,14 @@ function OrdersTable({
      15-minute cooldown flips to actionable automatically — no refetch needed, so
      pagination/scroll are never disturbed. Only visible (virtualised) rows read
      it, so the re-render cost is a handful of rows. */
-  const [now, setNow] = useState<number>(() => Date.now());
+  /* By the SERVER's clock (lib/serverClock): a phone set to the wrong time
+     must never lock orders in the 15-minute wait or mislabel how old they are.
+     Re-reads at once when the first heartbeat measures the device's offset. */
+  const [now, setNow] = useState<number>(() => serverNow());
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => setNow(serverNow()), 30_000);
+    const off = onServerClockChange(() => setNow(serverNow()));
+    return () => { clearInterval(id); off(); };
   }, []);
 
   const [savingId,        setSavingId]        = useState<number | null>(null);
