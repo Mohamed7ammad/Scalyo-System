@@ -520,7 +520,8 @@ router.get('/', authenticate, async (req, res) => {
       o.is_resend, o.resend_note, o.resend_at, o.assigned_at,
       /* «مغلق»: the status to restore on reopen (jsonb — safe before the startup migration) */
       (to_jsonb(o) ->> 'closed_from_status') AS closed_from_status,
-      (to_jsonb(o) ->> 'closed_at')          AS closed_at`;
+      (to_jsonb(o) ->> 'closed_at')          AS closed_at,
+      (to_jsonb(o) ->> 'easyorder_rate')     AS easyorder_rate`;
 
     let cursorClause = '';
     if (typeof req.query.cursor === 'string' && req.query.cursor.includes('|')) {

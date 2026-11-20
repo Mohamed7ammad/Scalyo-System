@@ -18,6 +18,8 @@ export interface Order {
   FullName: string;
   Phone: string;
   DeliveryRate: string;
+  /** EasyOrder's customer rating (high / moderate / low / unknown), null until it arrives. */
+  easyorder_rate?: string | null;
   City: string;
   Address: string;
   Status: string;

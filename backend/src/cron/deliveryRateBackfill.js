@@ -1,65 +1,61 @@
 'use strict';
 
 /**
- * DeliveryRate enrichment cron — polite, cached, rate-limit-safe.
+ * DeliveryRate enrichment cron — polite, cached, BUDGETED.
  * (Bosta consignee reputation → حالة الاستلام: ممتاز / متوسط / ضعيف / جديد)
  *
  * WHY THIS EXISTS
- *   Bosta hard rate-limits the consignee-ranking endpoint (HTTP 429). The old
- *   design fired an enrichment PER ORDER at creation time with no phone-level
- *   dedupe, bursting past the limit and getting the whole account blocked — so
- *   every row fell back to 'بدون'. This replaces that with a single polite queue.
+ *   Bosta hard rate-limits the consignee-ranking endpoint. Measured (2026-10-31,
+ *   again 2026-11-20): ~100 lookups, then HTTP 429 (errorCode 4029 "You requested
+ *   to get consignee ranking too many times") for ~24 h. The old sweep (5 phones
+ *   every 15 min) burnt the 100 in ~5 h and then sat blocked for the rest of the
+ *   day, and it picked phones in sorted order — so 010/011 numbers were looked up
+ *   first and 012/015 almost never: on 2026-11-20 only 13 of 113 orders had a
+ *   Bosta rating.
  *
  * ARCHITECTURE
  *   1. Phone-level cache (bosta_consignee_cache, tenant-scoped): once a phone is
- *      resolved it is 'done' and NEVER fetched again. Repeated attempts that keep
- *      failing flip to 'failed' after MAX_ATTEMPTS so we stop retrying forever.
+ *      resolved it is 'done' and NEVER fetched again. Repeated soft failures flip
+ *      to 'failed' after MAX_ATTEMPTS.
  *   2. Every run first APPLIES cached 'done' rates to any 'بدون' orders sharing
- *      that phone — a pure DB update, ZERO Bosta calls (labels new orders for
- *      already-known customers instantly).
- *   3. Then it picks a SMALL batch of distinct, not-yet-resolved phones and
- *      processes them SEQUENTIALLY with a deliberate sleep between each call.
- *   4. CIRCUIT BREAKER: the first 429/401/403 immediately halts the run — no more
- *      Bosta calls until the next scheduled sweep.
+ *      that phone — a pure DB update, ZERO Bosta calls.
+ *   3. BUDGET (services/customerRating.bostaBudget, every call logged in
+ *      bosta_rank_calls): ≤ BUDGET_24H lookups in any rolling 24 h and ≤ BUDGET_4H
+ *      per 4 h, ONE lookup per run (every 5 min) — the day's quota is spread over
+ *      the whole day and never reaches Bosta's block. After a 429, one probe per
+ *      hour until it lifts (probes during the block don't extend it).
+ *   4. PRIORITY: only orders still waiting for a decision (جديد / مراجعة جديدة /
+ *      لا يرد / مؤجل / معلق حتي الدفع), at least 5 min old (EasyOrder's own rating
+ *      has arrived by then), and those EasyOrder did NOT rate «high» first — then
+ *      newest first. Decided orders are never looked up.
+ *   5. CIRCUIT BREAKER: 429/401/403 stops the run.
  *
  *   The API calls only ever run when the cron fires, which index.js gates behind
  *   NODE_ENV=production. On-demand enrichment at order creation was removed.
  *
- * RE-ENABLE SAFETY RAILS (2026-07-05, after the second Bosta block)
- *   • BACKLOG CUTOFF: while the cron was paused a huge backlog of 'بدون' orders
- *     piled up. Enriching it would blast Bosta with thousands of calls and get
- *     the account blocked on the first sweep. pickBatch() therefore ONLY looks
- *     at orders created ON/AFTER BACKLOG_CUTOFF — the backlog is never queued.
- *     (applyCachedRates() intentionally ignores the cutoff: it is DB-only and
- *     still labels old orders for free from already-cached phones.)
- *   • HARD THROTTLE FLOOR: ≥4s between EVERY Bosta call (default 5s), tiny
- *     batch (5 phones/run), sweep every 15 min → ≤20 calls/hour worst case.
- *
  * Tunables (env-overridable):
- *   DELIVERY_RATE_CRON          schedule                       (default every 15 min)
- *   DELIVERY_RATE_BATCH         phones fetched per run          (default 5)
- *   DELIVERY_RATE_SLEEP_MS      gap between Bosta calls         (default 5000ms, hard floor 4000ms)
- *   DELIVERY_RATE_MAX_ATTEMPTS  soft-fails before 'failed'      (default 3)
- *   DELIVERY_RATE_MAX_AGE_DAYS  only enrich orders newer than   (default 14)
- *   DELIVERY_RATE_CUTOFF        skip orders created before this (default 2026-07-05)
+ *   DELIVERY_RATE_CRON          schedule                     (default every 5 min)
+ *   DELIVERY_RATE_BUDGET_24H    lookups per rolling 24 h      (default 90, hard cap 95)
+ *   DELIVERY_RATE_BUDGET_4H     lookups per rolling 4 h       (default 15)
+ *   DELIVERY_RATE_MAX_ATTEMPTS  soft-fails before 'failed'    (default 3)
+ *   DELIVERY_RATE_MAX_AGE_DAYS  only enrich orders newer than (default 14)
+ *   DELIVERY_RATE_CUTOFF        skip orders created before    (default 2026-07-05)
  */
 
 const cron = require('node-cron');
 const pool = require('../config/db');
 const { fetchDeliveryRate } = require('../services/bostaEnrich');
+const { bostaBudget } = require('../services/customerRating');
 
-const SCHEDULE     = process.env.DELIVERY_RATE_CRON              || '*/15 * * * *';
-const BATCH        = Number(process.env.DELIVERY_RATE_BATCH)        || 5;
-/* Hard floor: even an env override can never push calls closer than 4s apart. */
-const SLEEP_MS     = Math.max(4000, Number(process.env.DELIVERY_RATE_SLEEP_MS) || 5000);
+const SCHEDULE     = process.env.DELIVERY_RATE_CRON              || '*/5 * * * *';
+const BUDGET_24H   = Math.min(95, Number(process.env.DELIVERY_RATE_BUDGET_24H) || 90);
+const BUDGET_4H    = Math.min(BUDGET_24H, Number(process.env.DELIVERY_RATE_BUDGET_4H) || 15);
 const MAX_ATTEMPTS = Number(process.env.DELIVERY_RATE_MAX_ATTEMPTS) || 3;
 const MAX_AGE_DAYS = Number(process.env.DELIVERY_RATE_MAX_AGE_DAYS) || 14;
-/* "Forget the past": only orders created on/after this date ever reach Bosta.
-   NOT a rolling NOW() — a fixed re-enable date, so new orders are eligible the
-   moment they're created while the pre-pause backlog stays skipped forever.   */
+/* "Forget the past": only orders created on/after this date ever reach Bosta. */
 const BACKLOG_CUTOFF = process.env.DELIVERY_RATE_CUTOFF || '2026-07-05';
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* Orders still waiting for the team's decision — the only ones worth a lookup. */
+const OPEN_STATUSES = ['جديد', 'مراجعة جديدة', 'لا يرد', 'مؤجل', 'معلق حتي الدفع'];
 
 /* Normalize orders."Phone" to the SAME +2… canonical form as bostaEnrich.formatPhone()
    so the cache key matches regardless of how the order stored the number. */
@@ -68,7 +64,7 @@ const NORM_PHONE_SQL = `(CASE
   WHEN o."Phone" LIKE '01%' THEN '+2' || o."Phone"
   ELSE o."Phone" END)`;
 
-/* ── Idempotent cache table (runs at module load, every boot) ──────────────── */
+/* ── Idempotent tables (module load, every boot) ───────────────────────────── */
 pool.query(`
   CREATE TABLE IF NOT EXISTS bosta_consignee_cache (
     id            SERIAL       PRIMARY KEY,
@@ -83,25 +79,31 @@ pool.query(`
     UNIQUE (business_id, phone)
   )
 `)
-  .then(() => console.log('✅  bosta_consignee_cache table ready'))
-  .catch((e) => console.warn('⚠️   bosta_consignee_cache schema check:', e.message));
+  /* Every Bosta ranking call, for the rolling budget (429s are logged but don't count). */
+  .then(() => pool.query(`
+    CREATE TABLE IF NOT EXISTS bosta_rank_calls (
+      id          BIGSERIAL    PRIMARY KEY,
+      business_id INTEGER,
+      phone       VARCHAR(30),
+      http_status INTEGER,
+      at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    )`))
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS bosta_rank_calls_at_idx ON bosta_rank_calls (at DESC)`))
+  .then(() => console.log('✅  bosta_consignee_cache + bosta_rank_calls ready'))
+  .catch((e) => console.warn('⚠️   bosta enrichment schema check:', e.message));
 
-/* Per-tenant bearer token, cached for the duration of one sweep. */
-async function tokenFor(businessId, cacheMap) {
-  if (cacheMap.has(businessId)) return cacheMap.get(businessId);
-  let token = null;
+/* Per-tenant bearer token. */
+async function tokenFor(businessId) {
   try {
     const { rows } = await pool.query(
       `SELECT bearer_token FROM shipping_settings
        WHERE provider_name = 'bosta' AND is_active = true AND business_id = $1`,
       [businessId]
     );
-    token = rows[0]?.bearer_token || process.env.BOSTA_BEARER_TOKEN || null;
+    return rows[0]?.bearer_token || process.env.BOSTA_BEARER_TOKEN || null;
   } catch {
-    token = process.env.BOSTA_BEARER_TOKEN || null;
+    return process.env.BOSTA_BEARER_TOKEN || null;
   }
-  cacheMap.set(businessId, token);
-  return token;
 }
 
 /* STEP 1 — apply already-cached 'done' rates to matching 'بدون' orders. No API. */
@@ -119,10 +121,20 @@ async function applyCachedRates() {
   if (r.rowCount) console.log(`[deliveryRate] applied cached rate to ${r.rowCount} order(s) (no API call)`);
 }
 
-/* STEP 2 — pick a batch of DISTINCT phones that still need a live lookup. */
-async function pickBatch() {
+/* STEP 2 — the budget: calls in the last 24 h / 4 h and the last 429. */
+async function budgetNow() {
+  const { rows: [b] } = await pool.query(`
+    SELECT COUNT(*) FILTER (WHERE http_status IS DISTINCT FROM 429)::int                                     AS calls24h,
+           COUNT(*) FILTER (WHERE http_status IS DISTINCT FROM 429 AND at > NOW() - INTERVAL '4 hours')::int AS calls4h,
+           MAX(at) FILTER (WHERE http_status = 429)                                                          AS last429
+      FROM bosta_rank_calls WHERE at > NOW() - INTERVAL '24 hours'`);
+  return bostaBudget({ calls24h: b.calls24h, calls4h: b.calls4h, last429At: b.last429, per24h: BUDGET_24H, per4h: BUDGET_4H });
+}
+
+/* STEP 3 — the ONE phone that most needs a lookup now. */
+async function pickOne() {
   const { rows } = await pool.query(`
-    SELECT DISTINCT ${NORM_PHONE_SQL} AS phone, o.business_id
+    SELECT ${NORM_PHONE_SQL} AS phone, o.business_id
     FROM   orders o
     JOIN   shipping_settings s
            ON s.business_id = o.business_id AND s.provider_name = 'bosta' AND s.is_active = true
@@ -130,13 +142,22 @@ async function pickBatch() {
            ON c.business_id = o.business_id AND c.phone = ${NORM_PHONE_SQL}
     WHERE  o."DeliveryRate" = 'بدون'
       AND  o."Phone" IS NOT NULL AND o."Phone" <> ''
+      AND  btrim(o."Status") = ANY($4::text[])
       AND  o."createdAt" > NOW() - ($1 || ' days')::interval
-      AND  o."createdAt" >= $4::timestamptz          -- backlog cutoff: pre-pause orders never hit Bosta
+      AND  o."createdAt" < NOW() - INTERVAL '5 minutes'
+      AND  o."createdAt" >= $3::timestamptz          -- backlog cutoff: pre-pause orders never hit Bosta
       AND  (c.id IS NULL OR (c.status = 'pending' AND c.attempts < $2))
-    LIMIT  $3
-  `, [String(MAX_AGE_DAYS), MAX_ATTEMPTS, BATCH, BACKLOG_CUTOFF]);
-  return rows;
+    ORDER BY (COALESCE(to_jsonb(o) ->> 'easyorder_rate', '') = 'high') ASC,
+             o."createdAt" DESC
+    LIMIT  1
+  `, [String(MAX_AGE_DAYS), MAX_ATTEMPTS, BACKLOG_CUTOFF, OPEN_STATUSES]);
+  return rows[0] || null;
 }
+
+const logCall = (businessId, phone, status) => pool.query(
+  `INSERT INTO bosta_rank_calls (business_id, phone, http_status) VALUES ($1, $2, $3)`,
+  [businessId, phone, status]
+).catch((e) => console.warn('[deliveryRate] call log failed:', e.message));
 
 /* Resolved — cache 'done' + label every 'بدون' order sharing this phone. */
 async function markDone(businessId, phone, rate) {
@@ -155,8 +176,7 @@ async function markDone(businessId, phone, rate) {
   return upd.rowCount;
 }
 
-/* Soft failure — bump attempts; flip to 'failed' once MAX_ATTEMPTS reached so we
-   never retry this number again. */
+/* Soft failure — bump attempts; flip to 'failed' once MAX_ATTEMPTS reached. */
 async function bumpAttempt(businessId, phone, errMsg) {
   await pool.query(`
     INSERT INTO bosta_consignee_cache (business_id, phone, status, attempts, last_error, updated_at)
@@ -170,52 +190,50 @@ async function bumpAttempt(businessId, phone, errMsg) {
   `, [businessId, phone, String(errMsg).slice(0, 300), MAX_ATTEMPTS]);
 }
 
+let running = false;
 async function runSweep() {
-  /* Cheap DB-only pass first — labels new orders of already-known customers. */
-  await applyCachedRates();
+  if (running) return;
+  running = true;
+  try {
+    /* Cheap DB-only pass first — labels new orders of already-known customers. */
+    await applyCachedRates();
 
-  const batch = await pickBatch();
-  if (!batch.length) return;
-  console.log(`[deliveryRate] sweep: ${batch.length} phone(s) to enrich (batch ${BATCH}, sleep ${SLEEP_MS}ms)`);
+    const budget = await budgetNow();
+    if (!budget.allowed) return;            // blocked / budget spent — quietly wait
 
-  const tokenCache = new Map();
-  let ok = 0, softFailed = 0;
+    const next = await pickOne();
+    if (!next) return;
+    const { business_id, phone } = next;
 
-  for (const { business_id, phone } of batch) {
-    const token = await tokenFor(business_id, tokenCache);
-    if (!token) { await bumpAttempt(business_id, phone, 'no active Bosta token'); continue; }
+    const token = await tokenFor(business_id);
+    if (!token) { await bumpAttempt(business_id, phone, 'no active Bosta token'); return; }
 
     try {
       const rate = await fetchDeliveryRate(phone, token);
+      await logCall(business_id, phone, 200);
       const n = await markDone(business_id, phone, rate);
-      ok++;
       console.log(`✅  [deliveryRate] ${phone} → ${rate} (${n} order(s) labeled)`);
     } catch (err) {
-      const st = err.response?.status;
-      /* CIRCUIT BREAKER: rate-limited or auth-blocked → stop the ENTIRE run now.
-         No more Bosta calls until the next scheduled sweep. */
+      const st = err.response?.status ?? 0;
+      await logCall(business_id, phone, st);
       if (st === 429 || st === 401 || st === 403) {
-        console.warn(`🛑 [deliveryRate] circuit breaker: Bosta HTTP ${st} — halting run; resume next schedule (done ${ok}, soft-failed ${softFailed})`);
+        console.warn(`🛑 [deliveryRate] Bosta HTTP ${st} — next probe in an hour`);
         return;
       }
-      /* Any other error (400/network/unreadable) → soft-fail this one number. */
-      softFailed++;
       const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
       await bumpAttempt(business_id, phone, detail);
-      console.warn(`⚠️  [deliveryRate] ${phone} soft-failed (HTTP ${st ?? 'ERR'}) — attempt bumped`);
+      console.warn(`⚠️  [deliveryRate] ${phone} soft-failed (HTTP ${st || 'ERR'}) — attempt bumped`);
     }
-
-    await sleep(SLEEP_MS);   // deliberate polite gap between EVERY Bosta call
+  } finally {
+    running = false;
   }
-
-  console.log(`[deliveryRate] sweep done: ${ok} enriched, ${softFailed} soft-failed`);
 }
 
 function startDeliveryRateBackfillCron() {
   cron.schedule(SCHEDULE, () => {
     runSweep().catch((e) => console.error('[deliveryRate] sweep error:', e.message));
   });
-  console.log(`✅  DeliveryRate enrichment cron scheduled (${SCHEDULE}, batch ${BATCH}, sleep ${SLEEP_MS}ms, max ${MAX_ATTEMPTS} attempts, <${MAX_AGE_DAYS}d, orders ≥ ${BACKLOG_CUTOFF} only).`);
+  console.log(`✅  DeliveryRate enrichment cron scheduled (${SCHEDULE}, 1 lookup/run, ≤${BUDGET_24H}/24h, ≤${BUDGET_4H}/4h, open orders newest first, orders ≥ ${BACKLOG_CUTOFF} only).`);
 }
 
-module.exports = { startDeliveryRateBackfillCron };
+module.exports = { startDeliveryRateBackfillCron, runSweep, pickOne, budgetNow };

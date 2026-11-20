@@ -10,6 +10,7 @@ const { startStaffAlertsCron } = require('./cron/staffAlerts');
 const { startGhostPurgeCron } = require('./cron/ghostPurge');
 const { startSafqaReconcileCron } = require('./cron/safqaReconcile');
 const { startDeliveryRateBackfillCron } = require('./cron/deliveryRateBackfill');
+const { startEasyOrderRateCron } = require('./cron/easyOrderRate');
 const { startAgentDisciplineCron } = require('./cron/agentDiscipline');
 const { startPostponedCallbacksCron } = require('./cron/postponedCallbacks');
 const pool                    = require('./config/db');
@@ -138,11 +139,14 @@ app.listen(PORT, async () => {
     startStaffAlertsCron();
     startGhostPurgeCron();
     startSafqaReconcileCron();
-    /* RE-ENABLED (2026-07-05) with strict safety rails after the 2026-07-04
-       block: backlog cutoff (only orders created ≥ 2026-07-05 hit Bosta —
-       "forget the past"), ≥4s hard floor between calls (default 5s), batch 5,
-       sweep every 15 min → ≤20 calls/hour. See cron/deliveryRateBackfill.js. */
+    /* Bosta customer rating, BUDGETED (2026-11-20): one lookup per 5-min run,
+       ≤ 90 per rolling 24 h and ≤ 15 per 4 h (Bosta blocks for ~24 h after ~100),
+       open orders newest first, hourly probe after a 429, backlog cutoff kept.
+       See cron/deliveryRateBackfill.js. */
     startDeliveryRateBackfillCron();
+    /* EasyOrder's own customer rating (many couriers) for every EasyOrder order —
+       one GET per order, ≤ 7.5/min vs their 40/min. See cron/easyOrderRate.js. */
+    startEasyOrderRateCron();
     /* Confirmation-team discipline: seeding, breaks, 15-min auto-withdrawal.
        Inert until an agent is enrolled (users.agent_track). */
     startAgentDisciplineCron();

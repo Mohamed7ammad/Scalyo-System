@@ -232,6 +232,15 @@ const DELIVERY_RATE_STYLES: Record<string, string> = {
   'ممتاز': 'bg-green-200 text-green-900 dark:bg-green-900/40 dark:text-green-300',
 };
 
+/* EasyOrder's own customer rating (orders.easyorder_rate, many couriers) —
+   labelled like EasyOrder's dashboard, coloured like the Bosta scale. */
+const EASY_RATE: Record<string, { label: string; cls: string }> = {
+  high:     { label: 'مرتفعة', cls: DELIVERY_RATE_STYLES['ممتاز'] },
+  moderate: { label: 'متوسطة', cls: DELIVERY_RATE_STYLES['متوسط'] },
+  low:      { label: 'منخفضة', cls: DELIVERY_RATE_STYLES['ضعيف'] },
+  unknown:  { label: 'جديد',   cls: DELIVERY_RATE_STYLES['جديد'] },
+};
+
 /* ── Financial helpers ───────────────────────────────────────── */
 
 /**
@@ -2094,11 +2103,18 @@ const OrderRow = memo(function OrderRow({
 
   const phoneEl = <PhoneCall phone={order.Phone} />;
 
-  /* Delivery Rate (حالة الاستلام) — comes from Bosta's record of the customer:
-     a read-only badge for the team, a dropdown only for the owner (admin). */
+  /* Delivery Rate (حالة الاستلام) — two sources, one small block:
+       بوسطة  — Bosta's record of the customer (read-only badge for the team, a
+               dropdown only for the owner);
+       إيزي   — EasyOrder's rating across many couriers (read-only, shown once
+               it has arrived — a few minutes after the order). */
   const rateStyle = DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400';
+  const easyRate = order.easyorder_rate ? EASY_RATE[order.easyorder_rate] : undefined;
+  const rateLabelCls = 'w-9 shrink-0 text-[10px] font-semibold text-slate-400 dark:text-slate-500';
   const rateEl = (
     <>
+      <div className="flex items-center gap-1.5">
+        <span className={rateLabelCls}>بوسطة</span>
       {role === 'admin' ? (
         <select
           value={order.DeliveryRate ?? 'بدون'}
@@ -2117,6 +2133,15 @@ const OrderRow = memo(function OrderRow({
         <span title="حالة الاستلام من بوسطة" className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${rateStyle}`}>
           {order.DeliveryRate ?? 'بدون'}
         </span>
+      )}
+      </div>
+      {easyRate && (
+        <div className="mt-1 flex items-center gap-1.5">
+          <span className={rateLabelCls}>إيزي</span>
+          <span title="نسبة التسليم للعميل من إيزي أوردر" className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${easyRate.cls}`}>
+            {easyRate.label}
+          </span>
+        </div>
       )}
 
       {order.DeliveryRate === 'ضعيف' && (
