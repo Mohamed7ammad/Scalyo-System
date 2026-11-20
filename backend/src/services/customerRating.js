@@ -15,6 +15,11 @@
 
 const EASY_RESULTS = ['high', 'moderate', 'low', 'unknown'];
 
+/* The only orders whose customer is looked up — from EITHER source (owner,
+   2026-11-20): new orders and no-answer ones (مراجعة جديدة = a no-answer order
+   handed to a review account). A confirmed / closed order is never looked up. */
+const RATE_STATUSES = ['جديد', 'لا يرد', 'مراجعة جديدة'];
+
 /* EasyOrder rating object from an order (or null if it isn't there yet). */
 function easyOrderRateOf(order) {
   const meta = order && typeof order.metadata === 'object' && order.metadata ? order.metadata : {};
@@ -42,4 +47,4 @@ function bostaBudget({ calls24h, calls4h, last429At, now = Date.now(), per24h = 
   return { allowed: true, reason: 'ok' };
 }
 
-module.exports = { easyOrderRateOf, bostaBudget, EASY_RESULTS };
+module.exports = { easyOrderRateOf, bostaBudget, EASY_RESULTS, RATE_STATUSES };

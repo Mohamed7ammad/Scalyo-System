@@ -2110,6 +2110,10 @@ const OrderRow = memo(function OrderRow({
                it has arrived — a few minutes after the order). */
   const rateStyle = DELIVERY_RATE_STYLES[order.DeliveryRate ?? 'بدون'] ?? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400';
   const easyRate = order.easyorder_rate ? EASY_RATE[order.easyorder_rate] : undefined;
+  /* «طلب عربون»: Bosta says «ضعيف» — or Bosta has no rating and EasyOrder says
+     «منخفضة» (EasyOrder stands in whenever Bosta didn't answer). */
+  const bostaRate = String(order.DeliveryRate ?? 'بدون').trim();
+  const askDeposit = bostaRate === 'ضعيف' || (bostaRate === 'بدون' && order.easyorder_rate === 'low');
   const rateLabelCls = 'w-9 shrink-0 text-[10px] font-semibold text-slate-400 dark:text-slate-500';
   const rateEl = (
     <>
@@ -2144,7 +2148,7 @@ const OrderRow = memo(function OrderRow({
         </div>
       )}
 
-      {order.DeliveryRate === 'ضعيف' && (
+      {askDeposit && (
         <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5
           rounded bg-red-100 border border-red-300 text-red-700 text-xs font-bold
           dark:bg-red-900/30 dark:border-red-700/50 dark:text-red-400 whitespace-nowrap">

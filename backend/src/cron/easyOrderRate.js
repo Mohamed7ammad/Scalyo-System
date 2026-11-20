@@ -11,7 +11,8 @@
  * (services/customerRating.easyOrderRateOf).
  *
  * Every 2 minutes: up to 15 EasyOrder orders of the last 3 days with no rating
- * yet (at least 1 minute old), newest first, ONE call each, 2 s apart —
+ * yet, still «جديد» / «لا يرد» / «مراجعة جديدة» (a confirmed order is never looked
+ * up — owner, 2026-11-20), at least 1 minute old, newest first, ONE call each, 2 s apart —
  * ≤ 7.5 calls/min against EasyOrder's 40/min. Not ready → retried next run (max
  * 6 tries); unknown order (400/404) → given up; 429/401/403 → the run stops.
  * Runs only when index.js starts crons (NODE_ENV=production).
@@ -19,7 +20,7 @@
 
 const cron = require('node-cron');
 const pool = require('../config/db');
-const { easyOrderRateOf } = require('../services/customerRating');
+const { easyOrderRateOf, RATE_STATUSES } = require('../services/customerRating');
 
 const SCHEDULE     = process.env.EASYORDER_RATE_CRON || '*/2 * * * *';
 const BATCH        = Math.min(20, Number(process.env.EASYORDER_RATE_BATCH) || 15);
@@ -59,12 +60,13 @@ async function runSweep() {
        WHERE o.order_source = 'easyorder'
          AND o.easyorder_rate IS NULL
          AND o.easyorder_rate_attempts < $1
+         AND btrim(o."Status") = ANY($3::text[])          -- new / no-answer only, never a confirmed order
          AND o.external_order_id ~ '^[0-9a-f-]{36}$'
          AND COALESCE(bp.easyorder_api_token, '') <> ''
          AND o."createdAt" > NOW() - INTERVAL '3 days'
          AND o."createdAt" < NOW() - INTERVAL '1 minute'
        ORDER BY o."createdAt" DESC
-       LIMIT $2`, [MAX_ATTEMPTS, BATCH]);
+       LIMIT $2`, [MAX_ATTEMPTS, BATCH, RATE_STATUSES]);
     if (!rows.length) return;
 
     let rated = 0;

@@ -24,10 +24,11 @@
  *      per 4 h, ONE lookup per run (every 5 min) — the day's quota is spread over
  *      the whole day and never reaches Bosta's block. After a 429, one probe per
  *      hour until it lifts (probes during the block don't extend it).
- *   4. PRIORITY: only orders still waiting for a decision (جديد / مراجعة جديدة /
- *      لا يرد / مؤجل / معلق حتي الدفع), at least 5 min old (EasyOrder's own rating
- *      has arrived by then), and those EasyOrder did NOT rate «high» first — then
- *      newest first. Decided orders are never looked up.
+ *   4. PRIORITY: only new / no-answer orders (جديد / لا يرد / مراجعة جديدة — a
+ *      confirmed order is never looked up), at least 5 min old (EasyOrder's own
+ *      rating has arrived by then), those EasyOrder did NOT rate «high» first —
+ *      then newest first. If the day's budget runs out, EasyOrder's rating is
+ *      what the team relies on.
  *   5. CIRCUIT BREAKER: 429/401/403 stops the run.
  *
  *   The API calls only ever run when the cron fires, which index.js gates behind
@@ -45,7 +46,7 @@
 const cron = require('node-cron');
 const pool = require('../config/db');
 const { fetchDeliveryRate } = require('../services/bostaEnrich');
-const { bostaBudget } = require('../services/customerRating');
+const { bostaBudget, RATE_STATUSES } = require('../services/customerRating');
 
 const SCHEDULE     = process.env.DELIVERY_RATE_CRON              || '*/5 * * * *';
 const BUDGET_24H   = Math.min(95, Number(process.env.DELIVERY_RATE_BUDGET_24H) || 90);
@@ -54,8 +55,9 @@ const MAX_ATTEMPTS = Number(process.env.DELIVERY_RATE_MAX_ATTEMPTS) || 3;
 const MAX_AGE_DAYS = Number(process.env.DELIVERY_RATE_MAX_AGE_DAYS) || 14;
 /* "Forget the past": only orders created on/after this date ever reach Bosta. */
 const BACKLOG_CUTOFF = process.env.DELIVERY_RATE_CUTOFF || '2026-07-05';
-/* Orders still waiting for the team's decision — the only ones worth a lookup. */
-const OPEN_STATUSES = ['جديد', 'مراجعة جديدة', 'لا يرد', 'مؤجل', 'معلق حتي الدفع'];
+/* Only new / no-answer orders are looked up — a confirmed order never is
+   (owner, 2026-11-20). When Bosta has no rating, EasyOrder's stands in. */
+const OPEN_STATUSES = RATE_STATUSES;
 
 /* Normalize orders."Phone" to the SAME +2… canonical form as bostaEnrich.formatPhone()
    so the cache key matches regardless of how the order stored the number. */
