@@ -71,6 +71,8 @@ const disciplineRoutes        = require('./routes/discipline');
 const monthlyStatementRoutes  = require('./routes/monthlyStatement');
 const refundsRoutes           = require('./routes/refunds');
 const returnPickupsRoutes     = require('./routes/returnPickups');
+const apiKeysRoutes           = require('./routes/apiKeys');
+const externalApiRoutes       = require('./routes/externalApi');
 const trackAction             = require('./middleware/trackAction');
 
 const app = express();
@@ -115,6 +117,8 @@ app.use('/api/discipline',       disciplineRoutes); // confirmation-team checkpo
 app.use('/api/monthly-statement', monthlyStatementRoutes); // «التقرير الشهري» — fixed costs + distributions by month
 app.use('/api/refunds',          refundsRoutes);        // «رد فلوس مرتجع» — post-delivery refunds (finance only)
 app.use('/api/return-pickups',   returnPickupsRoutes);  // Bosta pickups/exchanges received back → restock review
+app.use('/api/api-keys',         apiKeysRoutes);        // «مفاتيح API» — the owner creates / stops read-only keys
+app.use('/api/v1',               externalApiRoutes);    // READ-ONLY API for other systems (key auth) — docs/external-api.md
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 

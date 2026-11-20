@@ -1616,6 +1616,41 @@ export const getEasyorderSettings = () =>
 export const saveEasyorderSettings = (data: EasyorderSettingsPayload) =>
   api.post<EasyorderSettings & { message: string }>('/api/integrations/easyorder', data);
 
+/* ── «مفاتيح API» — read-only keys for other systems (/api/v1) ─────── */
+export type ApiKeyScope = 'products' | 'summary' | 'orders';
+
+export interface ApiKeyRow {
+  id:            number;
+  name:          string;
+  key_hint:      string;          // e.g. scalyo_Ab12cd…wxyz — the full key is shown once only
+  scopes:        ApiKeyScope[];
+  created_by:    string | null;
+  created_at:    string;
+  last_used_at:  string | null;
+  request_count: number;
+  revoked_at:    string | null;
+  revoked_by:    string | null;
+  active:        boolean;
+}
+
+export interface ApiKeysResponse {
+  base_url:            string;    // https://…/api/v1
+  scopes:              ApiKeyScope[];
+  max_active:          number;
+  requests_per_minute: number;
+  keys:                ApiKeyRow[];
+}
+
+/** List this business's API keys. Admin only. */
+export const getApiKeys = () => api.get<ApiKeysResponse>('/api/api-keys');
+
+/** Create a read-only key — the response carries the full `key` ONCE. Admin only. */
+export const createApiKey = (data: { name: string; scopes: ApiKeyScope[] }) =>
+  api.post<ApiKeyRow & { key: string }>('/api/api-keys', data);
+
+/** Stop a key for good (it is kept in the list as «متوقف», never deleted). Admin only. */
+export const revokeApiKey = (id: number) => api.post<ApiKeyRow>(`/api/api-keys/${id}/revoke`);
+
 /* ── Treasury ────────────────────────────────────────────────────── */
 export interface TreasuryTransaction {
   id:               number;
