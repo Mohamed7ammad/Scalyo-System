@@ -228,8 +228,8 @@ const ORDER_COLS = `
   o.shipped_at, o.delivered_at, o.status_changed_at,
   o."rejectionReason" AS rejection_reason, o."DeliveryRate" AS bosta_rating,
   (to_jsonb(o) ->> 'easyorder_rate') AS easyorder_rating,
-  COALESCE(oa.channel, 'unknown') AS channel, oa.basis AS channel_basis,
-  oa.utm_source, oa.utm_campaign, oa.ad_ref, oa.referrer`;
+  COALESCE(oa.channel, 'unknown') AS channel, oa.channel_source,
+  oa.utm_source, oa.utm_campaign, oa.ad_ref, oa.referral_code, oa.referrer`;
 /* order_attribution has one row per order at most (PK) — the join never multiplies rows. */
 const ORDER_FROM = `orders o LEFT JOIN order_attribution oa ON oa.order_id = o.id`;
 

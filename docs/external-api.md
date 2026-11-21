@@ -65,28 +65,37 @@ Every EasyOrder order is tagged with the platform it came from (`channel`), its 
 | Put in the ad link | Arrives as | Use it for |
 |---|---|---|
 | `utm_source` | `utm_source` | the platform |
-| `utm_campaign` | `utm_campaign` | the campaign |
-| `ref` | `ad_ref` | **the ad.** EasyOrder does not forward `utm_content`, so put the ad id in `ref`. |
+| `utm_campaign=<campaign>~<ad>` | `utm_campaign` + `ad_ref` | the campaign, and **the ad** after `~` |
+| `ref` | `referral_code` | **not for ads.** This is EasyOrder's marketer code («كود الإحالة الخاص بالمسوق»). |
+
+**Why the ad goes in `utm_campaign` and not in `ref`:**
+- `ref` belongs to EasyOrder's «إنشاء روابط إحالة» feature, which builds `?ref=<marketer>` links "to track sales and commissions". EasyOrder shows it on the order page and the invoice as «كود الاحالة».
+- This store has used it for marketers (`new`, `pump`, `Smart`).
+- An ad id in `ref` would mix with marketer codes, and would replace a marketer's code for a returning customer.
+- So the ad id rides after a `~` in `utm_campaign`, and Scalyo splits it.
+- A `utm_campaign` without `~` (every live Meta campaign) is read exactly as before. Its `ad_ref` is `null`.
 
 These never reach Scalyo: `utm_medium`, `utm_content`, `utm_term`, `fbclid`, `ttclid` and the landing URL. EasyOrder uses them only for its own pixel tracking.
 
 EasyOrder also records the referring site of the customer's first visit: `referrer`, for example `m.facebook.com`, `instagram.com` or `direct`.
 
-**Tag your ads like this** (only the parameters, without the leading `?`):
+**Tag NEW campaigns like this** (only the parameters; TikTok's URL-parameters box adds the `?` itself). **Live campaigns stay exactly as they are.**
 
-- **Meta:** `utm_source={{site_source_name}}&utm_campaign={{campaign.id}}&ref={{ad.id}}`
-  - `{{site_source_name}}` becomes `fb`, `ig`, `th`, `msg` or `an`.
-  - The live ads already send `utm_source` and `utm_campaign`, so only `ref` is new.
-- **TikTok:** `utm_source=tiktok&utm_campaign=__CAMPAIGN_ID__&ref=__CID__`
-  - `__CID__` is the creative, which is the video.
-  - For an upgraded Smart+ campaign the ad id macro is `__ADID_V2__`.
+- **TikTok** (a regular Web Conversions campaign): `utm_source=tiktok&utm_campaign=__CAMPAIGN_ID__~__CID__`
+  - TikTok's own macro table defines:
+    - `__CAMPAIGN_ID__` = campaign ID
+    - `__AID__` = **ad group** ID
+    - `__CID__` = creative ID, the ad's video. It is the closest to ad level in a regular campaign.
+  - Put `__AID__` after the `~` if you want ad-group level.
+  - Upgraded Smart+ campaigns have a separate ad-ID macro: `__ADID_V2__`.
+  - Whatever ends up after the `~` arrives in `ad_ref` as is.
   - Macros must be UPPERCASE. Check them with Preview before publishing.
-
-EasyOrder keeps the last `ref` a visitor arrived with, so a customer who comes back later without a `ref` keeps the ad they first came from.
+- **Meta** (new campaigns only): `utm_source={{site_source_name}}&utm_campaign={{campaign.id}}~{{ad.id}}`
+  - `{{site_source_name}}` becomes `fb`, `ig`, `th`, `msg` or `an`.
 
 **`channel` rules.** The first rule that matches wins.
 
-| `channel` | When | `channel_basis` |
+| `channel` | When | `channel_source` |
 |---|---|---|
 | `tiktok` | `utm_source` contains "tiktok" | `utm` |
 | `meta` | `utm_source` is `fb`, `ig`, `th`, `msg`, `an`, or contains facebook / instagram / threads / messenger | `utm` |
@@ -277,10 +286,11 @@ Returns orders **without customer data**, newest first.
       "bosta_rating": "بدون",
       "easyorder_rating": "high",
       "channel": "meta",
-      "channel_basis": "utm",
+      "channel_source": "utm",
       "utm_source": "fb",
       "utm_campaign": "120254187807170202",
-      "ad_ref": "120254187807190202",
+      "ad_ref": null,
+      "referral_code": null,
       "referrer": "m.facebook.com"
     }
   ]
@@ -296,9 +306,10 @@ Returns orders **without customer data**, newest first.
 | `external_order_id` | The order's id in the source store. For EasyOrder this is the order UUID. |
 | `bosta_rating` | Bosta's customer rating: ممتاز / متوسط / ضعيف / جديد / بدون |
 | `easyorder_rating` | EasyOrder's customer rating: `high` / `moderate` / `low` / `unknown` |
-| `channel`, `channel_basis` | The platform, and what decided it. See [attribution](#which-platform-campaign-and-ad-attribution). |
-| `utm_source`, `utm_campaign` | As EasyOrder received them from the ad link |
-| `ad_ref` | The link's `ref=`, meaning the ad id once the ads carry it. `null` before that. |
+| `channel`, `channel_source` | The platform, and what decided it: `utm`, `referrer` or `none`. Use `channel_source = utm` when you want only the exact ones. See [attribution](#which-platform-campaign-and-ad-attribution). |
+| `utm_source`, `utm_campaign` | As EasyOrder received them from the ad link. `utm_campaign` is the part before any `~`. |
+| `ad_ref` | The ad id: the part of `utm_campaign` after `~`. `null` for campaigns tagged without it, which is every live campaign. |
+| `referral_code` | EasyOrder's `?ref=` marketer code, if any |
 | `referrer` | The referring site of the customer's first visit |
 
 | `status_group` | Statuses |

@@ -4,22 +4,29 @@
 
    What EasyOrder actually gives us (read from its storefront code + 15,789 logged
    webhooks): the store copies ONLY three URL parameters into the order —
-     utm_source   → body.utm_source        (Meta ads: fb / ig / th / msg / an)
-     utm_campaign → body.utm_campaign      (Meta ads: the campaign id)
-     ref          → body.metadata.referral_code   ← put the AD id here (ref={{ad.id}})
+     utm_source   → body.utm_source            (Meta ads: fb / ig / th / msg / an)
+     utm_campaign → body.utm_campaign          (Meta ads: the campaign id)
+     ref          → body.metadata.referral_code
    plus the referring site of the first visit: body.metadata.tracking.referrer
    ('m.facebook.com', 'instagram.com', 'direct', …). utm_medium / utm_content /
    utm_term / fbclid / ttclid / the landing URL stop at EasyOrder and never reach us.
 
-   Channel (one per order):
-     tiktok   utm_source mentions tiktok, else a tiktok referrer
-     meta     utm_source fb/ig/th/msg/an/facebook/instagram/threads/messenger,
-              else (no utm_source) a facebook/instagram/threads referrer — 92% of
-              the orders that arrive without UTM come from those, so they are Meta
-              traffic, not organic
-     other    a utm_source we don't recognise (chatgpt.com, …) or a campaign tag
-              without any source
-     organic  no UTM and no ad-platform referrer (direct, the store itself, google)
+   `ref` is NOT free: it is EasyOrder's «كود الإحالة الخاص بالمسوق» (its «إنشاء
+   روابط إحالة» page builds ?ref=<marketer> links "to track sales and commissions",
+   and the order page / invoice show it). This store used it for marketers (new /
+   pump / Smart, June–August). So the AD id rides inside utm_campaign instead:
+       utm_campaign=<campaign id>~<ad id>      e.g. 1790123~1790456
+   → utm_campaign = '1790123', ad_ref = '1790456'. `ref` stays the marketer code
+   (referral_code). Live campaigns without '~' are read exactly as before.
+
+   Channel (one per order) and channel_source (what decided it):
+     tiktok   utm_source mentions tiktok                              → utm
+     meta     utm_source fb/ig/th/msg/an/facebook/instagram/…         → utm
+     other    any other utm_source (chatgpt.com…), or a campaign but no source → utm
+     tiktok   no UTM, a tiktok referrer                               → referrer
+     meta     no UTM, a facebook/instagram/threads referrer — 92% of the
+              no-UTM orders come from those, so they are Meta traffic → referrer
+     organic  no UTM and no ad-platform referrer (direct, the store, google) → none
      unknown  no attribution row at all: orders typed in / imported, or older than
               the logs (it is the default — COALESCE(…, 'unknown'))
 
@@ -31,19 +38,21 @@
 const pool = require('../config/db');
 
 const CHANNELS = ['meta', 'tiktok', 'organic', 'other', 'unknown'];
+const AD_SEPARATOR = '~';
 
 const DDL = `
   CREATE TABLE IF NOT EXISTS order_attribution (
-    order_id     INTEGER     PRIMARY KEY,
-    business_id  INTEGER     NOT NULL,
-    channel      TEXT        NOT NULL,
-    basis        TEXT        NOT NULL,
-    utm_source   TEXT,
-    utm_campaign TEXT,
-    ad_ref       TEXT,
-    referrer     TEXT,
-    origin       TEXT        NOT NULL,
-    captured_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    order_id       INTEGER     PRIMARY KEY,
+    business_id    INTEGER     NOT NULL,
+    channel        TEXT        NOT NULL,
+    channel_source TEXT        NOT NULL,
+    utm_source     TEXT,
+    utm_campaign   TEXT,
+    ad_ref         TEXT,
+    referral_code  TEXT,
+    referrer       TEXT,
+    origin         TEXT        NOT NULL,
+    captured_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
   CREATE INDEX IF NOT EXISTS order_attribution_biz_channel_idx ON order_attribution (business_id, channel);
 `;
@@ -67,21 +76,30 @@ const clean = (v) => {
 const META_SOURCES = new Set(['fb', 'ig', 'th', 'msg', 'an', 'meta', 'facebook', 'instagram', 'threads', 'messenger']);
 const META_HOST    = /(^|\.)(facebook|instagram|threads|messenger)\.(com|net)$|(^|\.)fb\.(com|me)$/;
 
-/* → { channel, basis } where basis = utm | referrer | none */
+/* → { channel, channel_source } where channel_source = utm | referrer | none */
 function classify({ utm_source, utm_campaign, referrer } = {}) {
   const s = (clean(utm_source) || '').toLowerCase();
   const r = (clean(referrer) || '').toLowerCase();
   if (s) {
-    if (s.includes('tiktok')) return { channel: 'tiktok', basis: 'utm' };
-    if (META_SOURCES.has(s) || /facebook|instagram|threads|messenger/.test(s)) return { channel: 'meta', basis: 'utm' };
-    return { channel: 'other', basis: 'utm' };
+    if (s.includes('tiktok')) return { channel: 'tiktok', channel_source: 'utm' };
+    if (META_SOURCES.has(s) || /facebook|instagram|threads|messenger/.test(s)) return { channel: 'meta', channel_source: 'utm' };
+    return { channel: 'other', channel_source: 'utm' };
   }
   if (r && r !== 'direct') {
-    if (r.includes('tiktok')) return { channel: 'tiktok', basis: 'referrer' };
-    if (META_HOST.test(r)) return { channel: 'meta', basis: 'referrer' };
+    if (r.includes('tiktok')) return { channel: 'tiktok', channel_source: 'referrer' };
+    if (META_HOST.test(r)) return { channel: 'meta', channel_source: 'referrer' };
   }
-  if (clean(utm_campaign)) return { channel: 'other', basis: 'utm' };
-  return { channel: 'organic', basis: 'none' };
+  if (clean(utm_campaign)) return { channel: 'other', channel_source: 'utm' };
+  return { channel: 'organic', channel_source: 'none' };
+}
+
+/* 'campaign~ad' → { campaign, ad }; no '~' → the whole value is the campaign. */
+function splitCampaign(value) {
+  const v = clean(value);
+  if (!v) return { campaign: null, ad: null };
+  const i = v.indexOf(AD_SEPARATOR);
+  if (i < 0) return { campaign: v, ad: null };
+  return { campaign: clean(v.slice(0, i)), ad: clean(v.slice(i + 1)) };
 }
 
 /* An EasyOrder order (webhook body or API order) → the attribution row's fields. */
@@ -89,27 +107,31 @@ function fromEasyOrder(order) {
   const o  = order && typeof order === 'object' ? order : {};
   const md = o.metadata && typeof o.metadata === 'object' ? o.metadata : {};
   const tr = md.tracking && typeof md.tracking === 'object' ? md.tracking : {};
+  const { campaign, ad } = splitCampaign(o.utm_campaign);
   const a = {
-    utm_source:   clean(o.utm_source),
-    utm_campaign: clean(o.utm_campaign),
-    ad_ref:       clean(md.referral_code),
-    referrer:     clean(tr.referrer),
+    utm_source:    clean(o.utm_source),
+    utm_campaign:  campaign,
+    ad_ref:        ad,
+    referral_code: clean(md.referral_code),
+    referrer:      clean(tr.referrer),
   };
   return { ...a, ...classify(a) };
 }
 
+const COLUMNS = ['order_id', 'business_id', 'channel', 'channel_source', 'utm_source', 'utm_campaign', 'ad_ref', 'referral_code', 'referrer', 'origin'];
 const INSERT_SQL = `
-  INSERT INTO order_attribution
-    (order_id, business_id, channel, basis, utm_source, utm_campaign, ad_ref, referrer, origin)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+  INSERT INTO order_attribution (${COLUMNS.join(', ')})
+  VALUES (${COLUMNS.map((_, i) => `$${i + 1}`).join(', ')})
   ON CONFLICT (order_id) DO NOTHING`;
+const rowValues = (orderId, businessId, a, origin) =>
+  [orderId, businessId, a.channel, a.channel_source, a.utm_source, a.utm_campaign, a.ad_ref, a.referral_code, a.referrer, origin];
 
 /* Save a new EasyOrder order's attribution. The webhook calls it WITHOUT awaiting
    and with a .catch — it can never delay or break order creation. */
 async function recordEasyOrder(orderId, businessId, order, origin = 'webhook') {
   await ensureSchema();
   const a = fromEasyOrder(order);
-  await pool.query(INSERT_SQL, [orderId, businessId, a.channel, a.basis, a.utm_source, a.utm_campaign, a.ad_ref, a.referrer, origin]);
+  await pool.query(INSERT_SQL, rowValues(orderId, businessId, a, origin));
   return a;
 }
 
@@ -126,6 +148,6 @@ const channelPredicate = (orderIdExpr, paramRef) =>
   `COALESCE((SELECT oa.channel FROM order_attribution oa WHERE oa.order_id = ${orderIdExpr}), 'unknown') = ${paramRef}::text`;
 
 module.exports = {
-  CHANNELS, DDL, ensureSchema, _markSchemaReadyForTests,
-  classify, fromEasyOrder, recordEasyOrder, parseChannel, channelPredicate,
+  CHANNELS, AD_SEPARATOR, DDL, COLUMNS, ensureSchema, _markSchemaReadyForTests,
+  classify, splitCampaign, fromEasyOrder, rowValues, recordEasyOrder, parseChannel, channelPredicate,
 };

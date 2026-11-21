@@ -206,7 +206,7 @@ const ORDER_FIELDS = [
   'id', 'source', 'external_order_id', 'status', 'status_group', 'product_name', 'sku',
   'quantity', 'price', 'deposit', 'city', 'created_at', 'created_day', 'shipped_at',
   'delivered_at', 'status_changed_at', 'rejection_reason', 'bosta_rating', 'easyorder_rating',
-  'channel', 'channel_basis', 'utm_source', 'utm_campaign', 'ad_ref', 'referrer',
+  'channel', 'channel_source', 'utm_source', 'utm_campaign', 'ad_ref', 'referral_code', 'referrer',
 ];
 
 function mapOrder(r = {}) {
@@ -233,10 +233,11 @@ function mapOrder(r = {}) {
     easyorder_rating:  r.easyorder_rating || null,
     /* Which ad platform / campaign / ad (services/attribution.js) */
     channel:           r.channel || 'unknown',
-    channel_basis:     r.channel_basis || null,      // utm | referrer | none
+    channel_source:    r.channel_source || null,     // utm | referrer | none
     utm_source:        r.utm_source || null,
     utm_campaign:      r.utm_campaign || null,
-    ad_ref:            r.ad_ref || null,             // the store link's ?ref= — put the ad id there
+    ad_ref:            r.ad_ref || null,             // the ad id: utm_campaign=<campaign>~<ad>
+    referral_code:     r.referral_code || null,      // EasyOrder's ?ref= — the MARKETER code, not an ad
     referrer:          r.referrer || null,           // the site of the first visit (m.facebook.com, direct…)
   };
   return Object.fromEntries(ORDER_FIELDS.map((k) => [k, out[k]]));

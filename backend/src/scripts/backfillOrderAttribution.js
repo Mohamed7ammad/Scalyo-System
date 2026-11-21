@@ -71,19 +71,17 @@ async function insertRows(rows, origin) {
   for (let i = 0; i < rows.length; i += 500) {
     const part = rows.slice(i, i + 500);
     const r = await pool.query(
-      `INSERT INTO order_attribution (order_id, business_id, channel, basis, utm_source, utm_campaign, ad_ref, referrer, origin)
-       SELECT * FROM unnest($1::int[], $2::int[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
+      `INSERT INTO order_attribution (${attribution.COLUMNS.join(', ')})
+       SELECT * FROM unnest($1::int[], $2::int[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[])
        ON CONFLICT (order_id) DO NOTHING`,
-      [part.map((x) => x.order_id), part.map((x) => x.business_id), part.map((x) => x.channel), part.map((x) => x.basis),
-       part.map((x) => x.utm_source), part.map((x) => x.utm_campaign), part.map((x) => x.ad_ref), part.map((x) => x.referrer),
-       part.map(() => origin)]
+      attribution.COLUMNS.map((_, c) => part.map((x) => attribution.rowValues(x.order_id, x.business_id, x, origin)[c]))
     );
     inserted += r.rowCount;
   }
   return inserted;
 }
 
-const tally = (rows) => rows.reduce((t, r) => { const k = `${r.channel}/${r.basis}`; t[k] = (t[k] || 0) + 1; return t; }, {});
+const tally = (rows) => rows.reduce((t, r) => { const k = `${r.channel}/${r.channel_source}`; t[k] = (t[k] || 0) + 1; return t; }, {});
 
 async function main() {
   console.log(`📣 [backfillOrderAttribution] ${LIVE ? 'LIVE — will write' : 'DRY RUN — nothing is written'}${API ? ' · + EasyOrder API for the rest' : ''}`);
