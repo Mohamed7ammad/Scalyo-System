@@ -42,7 +42,9 @@ const externalIdOf = (b) => String(
   b.id ?? b.short_id ?? b.shortId ?? b.external_order_id ?? b.order_id ?? b.orderId ?? b.reference ?? b.ref ?? ''
 ).trim();
 
-const LINE_RE = /📦 EasyOrder webhook \(tenant (\d+), plan (\w+)\): (\{.*)$/;
+/* [\s\S] not '.': JSON.stringify leaves U+2028 / U+2029 raw (they turn up in
+   pasted addresses) and '.' stops at them. */
+const LINE_RE = /📦 EasyOrder webhook \(tenant (\d+), plan (\w+)\): (\{[\s\S]*)$/;
 
 async function readLogs() {
   const byKey = new Map();            // "tenant|externalId" → attribution fields
