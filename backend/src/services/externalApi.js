@@ -119,6 +119,7 @@ function mapProducts(rows = [], catalogue = []) {
       ad_spend:                 adSpend,
       operating_expenses:       num(r.opex_allocated),
       net_profit:               netProfit,
+      profit_before_ads:        r2(netProfit + adSpend),                   // e.g. to subtract TikTok spend yourself
       profit_per_delivered:     per(netProfit, delivered),
       ad_cost_per_order:        per(adSpend, orders),
       meta_purchases:           num(r.meta_orders),
@@ -167,6 +168,7 @@ function mapSummary(dash = {}, productRows = []) {
     operating_expenses:         opex,
     operating_expenses_breakdown: (ov.opex_breakdown || []).map((o) => ({ label: o.label, amount: num(o.amount) })),
     net_profit:                 r2(netProfit),
+    profit_before_ads:          r2(netProfit + expenses),
     profit_per_delivered:       per(netProfit, delivered),
     meta_purchases:             metaOrd,
     cost_per_meta_purchase:     per(metaSpend, metaOrd),
@@ -204,6 +206,7 @@ const ORDER_FIELDS = [
   'id', 'source', 'external_order_id', 'status', 'status_group', 'product_name', 'sku',
   'quantity', 'price', 'deposit', 'city', 'created_at', 'created_day', 'shipped_at',
   'delivered_at', 'status_changed_at', 'rejection_reason', 'bosta_rating', 'easyorder_rating',
+  'channel', 'channel_basis', 'utm_source', 'utm_campaign', 'ad_ref', 'referrer',
 ];
 
 function mapOrder(r = {}) {
@@ -228,6 +231,13 @@ function mapOrder(r = {}) {
     rejection_reason:  r.rejection_reason || null,
     bosta_rating:      r.bosta_rating ? String(r.bosta_rating).trim() : null,
     easyorder_rating:  r.easyorder_rating || null,
+    /* Which ad platform / campaign / ad (services/attribution.js) */
+    channel:           r.channel || 'unknown',
+    channel_basis:     r.channel_basis || null,      // utm | referrer | none
+    utm_source:        r.utm_source || null,
+    utm_campaign:      r.utm_campaign || null,
+    ad_ref:            r.ad_ref || null,             // the store link's ?ref= — put the ad id there
+    referrer:          r.referrer || null,           // the site of the first visit (m.facebook.com, direct…)
   };
   return Object.fromEntries(ORDER_FIELDS.map((k) => [k, out[k]]));
 }

@@ -66,6 +66,7 @@ test('/products: rates exactly like the dashboard table, stock from the catalogu
   assert.equal(p.selling_price, 899);
   assert.equal(p.stopped, false);
   assert.equal(p.cost_per_meta_purchase, 75.5);
+  assert.equal(p.profit_before_ads, 26299.5, "net profit + this product's ad spend");
 });
 
 test('/products: empty products give nulls, never NaN', () => {
@@ -100,6 +101,7 @@ test('/summary: net profit = the dashboard formula (all products)', () => {
   assert.equal(s.net_profit, parseFloat(expected.toFixed(2)));
   assert.equal(s.cogs, 36000.4);
   assert.equal(s.shipping_cost, 21000, 'a malformed product value counts as 0, like the dashboard');
+  assert.equal(s.profit_before_ads, parseFloat((expected + 64000).toFixed(2)), 'net profit + all expenses');
   assert.equal(s.confirmation_rate, 60);
   assert.equal(s.delivery_rate_of_confirmed, 50);
   assert.equal(s.delivered_of_orders_rate, 30);

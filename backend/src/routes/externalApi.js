@@ -19,6 +19,7 @@ const express = require('express');
 const pool    = require('../config/db');
 const apiKeys = require('../services/apiKeys');
 const ext     = require('../services/externalApi');
+const attribution = require('../services/attribution');
 
 const router = express.Router();
 
@@ -144,18 +145,29 @@ function cached(key, fn) {
   return p;
 }
 
-async function internal(name, key, range) {
-  const out = await callHandler(analyticsHandlers()[name], principalOf(key), { startDate: range.from, endDate: range.to });
+async function internal(name, key, range, channel) {
+  const query = { startDate: range.from, endDate: range.to };
+  if (channel) query.channel = channel;                 // no channel → the exact dashboard request
+  const out = await callHandler(analyticsHandlers()[name], principalOf(key), query);
   if (out.status !== 200) {
     throw new Error(`analytics ${name} answered ${out.status}: ${JSON.stringify(out.body).slice(0, 300)}`);
   }
   return out.body;
 }
 
-const profitability = (key, range) =>
-  cached(`${key.business_id}|products|${range.from}|${range.to}`, () => heavy(() => internal('profitability', key, range)));
-const dashboard = (key, range) =>
-  cached(`${key.business_id}|dashboard|${range.from}|${range.to}`, () => heavy(() => internal('dashboard', key, range)));
+const profitability = (key, range, channel = null) =>
+  cached(`${key.business_id}|products|${range.from}|${range.to}|${channel || 'all'}`,
+    () => heavy(() => internal('profitability', key, range, channel)));
+const dashboard = (key, range, channel = null) =>
+  cached(`${key.business_id}|dashboard|${range.from}|${range.to}|${channel || 'all'}`,
+    () => heavy(() => internal('dashboard', key, range, channel)));
+
+/* ?channel=meta|tiktok|organic|other|unknown (services/attribution.js) → null when absent. */
+function channelOf(req) {
+  const c = attribution.parseChannel(req.query.channel);
+  if (!c.ok) throw ext.badRequest(`Unknown channel. Use one of: ${attribution.CHANNELS.join(', ')}`);
+  return c.channel;
+}
 
 const clampInt = (v, dflt, min, max) => {
   const n = parseInt(v, 10);
@@ -177,8 +189,9 @@ router.get('/me', (req, res) => {
 /* ── GET /api/v1/products?from&to — every product's numbers + profit/loss ─── */
 router.get('/products', requireScope('products'), ecommerceOnly, wrap(async (req, res) => {
   const range = ext.parseRange(req.query);
+  const channel = channelOf(req);
   const [rows, cat] = await Promise.all([
-    profitability(req.apiKey, range),
+    profitability(req.apiKey, range, channel),
     pool.query(
       `SELECT id::text AS id, stock_quantity, selling_price, stopped_at
          FROM products WHERE business_id = $1`,
@@ -186,15 +199,17 @@ router.get('/products', requireScope('products'), ecommerceOnly, wrap(async (req
     ),
   ]);
   const products = ext.mapProducts(Array.isArray(rows) ? rows : [], cat.rows);
-  res.json({ range, currency: 'EGP', generated_at: new Date().toISOString(), count: products.length, products });
+  res.json({ range, channel, currency: 'EGP', generated_at: new Date().toISOString(), count: products.length, products });
 }));
 
 /* ── GET /api/v1/summary?from&to — the business numbers (top cards + charts) ─ */
 router.get('/summary', requireScope('summary'), ecommerceOnly, wrap(async (req, res) => {
   const range = ext.parseRange(req.query);
-  const [dash, rows] = await Promise.all([dashboard(req.apiKey, range), profitability(req.apiKey, range)]);
+  const channel = channelOf(req);
+  const [dash, rows] = await Promise.all([dashboard(req.apiKey, range, channel), profitability(req.apiKey, range, channel)]);
   res.json({
     range,
+    channel,
     currency:     'EGP',
     generated_at: new Date().toISOString(),
     ...ext.mapSummary(dash || {}, Array.isArray(rows) ? rows : []),
@@ -212,7 +227,11 @@ const ORDER_COLS = `
   to_char((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD') AS created_day,
   o.shipped_at, o.delivered_at, o.status_changed_at,
   o."rejectionReason" AS rejection_reason, o."DeliveryRate" AS bosta_rating,
-  (to_jsonb(o) ->> 'easyorder_rate') AS easyorder_rating`;
+  (to_jsonb(o) ->> 'easyorder_rate') AS easyorder_rating,
+  COALESCE(oa.channel, 'unknown') AS channel, oa.basis AS channel_basis,
+  oa.utm_source, oa.utm_campaign, oa.ad_ref, oa.referrer`;
+/* order_attribution has one row per order at most (PK) — the join never multiplies rows. */
+const ORDER_FROM = `orders o LEFT JOIN order_attribution oa ON oa.order_id = o.id`;
 
 router.get('/orders', requireScope('orders'), wrap(async (req, res) => {
   const range = ext.parseRange(req.query);
@@ -257,19 +276,26 @@ router.get('/orders', requireScope('orders'), wrap(async (req, res) => {
     params.push(String(req.query.sku).trim());
     where += ` AND UPPER(o.sku) = UPPER($${params.length})`;
   }
+  const channel = channelOf(req);
+  if (channel) {
+    params.push(channel);
+    where += ` AND COALESCE(oa.channel, 'unknown') = $${params.length}`;
+  }
 
+  await attribution.ensureSchema();
   const [list, count] = await Promise.all([
     pool.query(
-      `SELECT ${ORDER_COLS} FROM orders o WHERE ${where}
+      `SELECT ${ORDER_COLS} FROM ${ORDER_FROM} WHERE ${where}
         ORDER BY o."createdAt" DESC, o.id DESC
         LIMIT ${limit} OFFSET ${(page - 1) * limit}`,
       params
     ),
-    pool.query(`SELECT COUNT(*)::int AS n FROM orders o WHERE ${where}`, params),
+    pool.query(`SELECT COUNT(*)::int AS n FROM ${ORDER_FROM} WHERE ${where}`, params),
   ]);
   const total = count.rows[0]?.n || 0;
   res.json({
     range,
+    channel,
     currency: 'EGP',
     page,
     limit,

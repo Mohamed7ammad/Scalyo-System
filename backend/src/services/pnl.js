@@ -1,5 +1,7 @@
 'use strict';
 
+const { channelPredicate } = require('./attribution');
+
 /* ════════════════════════════════════════════════════════════════════════════
    Profit treatment of treasury categories — ONE definition (2026-11-04)
    ════════════════════════════════════════════════════════════════════════════
@@ -217,8 +219,36 @@ function dailyOpexBySource(db, { businessId, start = null, end = null }) {
 }
 
 /* Commissions attributed EXACTLY per product: the row's order → its product,
-   SKU first, ProductName fallback only when the order's SKU matches no product. */
-function commissionByProduct(db, { businessId, start = null, end = null }) {
+   SKU first, ProductName fallback only when the order's SKU matches no product.
+   channel (optional, the read-only API's ?channel=): only commissions of orders
+   from that ad platform (services/attribution.js). Absent → the query is unchanged. */
+function commissionByProduct(db, { businessId, start = null, end = null, channel = null }) {
+  if (channel) {
+    return db.query(`
+    SELECT p.name AS product_name, COALESCE(SUM(tt.amount), 0) AS commission
+      FROM treasury_transactions tt
+      JOIN orders   o ON o.id = tt.order_id AND o.business_id = $1::integer
+      JOIN products p ON p.business_id = $1::integer
+       AND (
+         ( COALESCE(o.sku, '') <> '' AND UPPER(o.sku) = UPPER(p.sku) )
+         OR
+         ( UPPER(TRIM(COALESCE(o."ProductName", ''))) = UPPER(TRIM(p.name))
+           AND NOT EXISTS (
+             SELECT 1 FROM products px
+              WHERE px.business_id = $1::integer
+                AND COALESCE(o.sku, '') <> ''
+                AND UPPER(px.sku) = UPPER(o.sku)
+           ) )
+       )
+     WHERE tt.business_id = $1::integer
+       AND tt.type = 'expense'
+       AND tt.source = ANY($4::text[])
+       AND ($2::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') >= $2)
+       AND ($3::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') <= $3)
+       AND ${channelPredicate('o.id', '$5')}
+     GROUP BY p.id, p.name
+  `, [businessId, start, end, COMMISSION_SOURCES, channel]);
+  }
   return db.query(`
     SELECT p.name AS product_name, COALESCE(SUM(tt.amount), 0) AS commission
       FROM treasury_transactions tt
@@ -242,6 +272,25 @@ function commissionByProduct(db, { businessId, start = null, end = null }) {
        AND ($3::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') <= $3)
      GROUP BY p.id, p.name
   `, [businessId, start, end, COMMISSION_SOURCES]);
+}
+
+/* Per commission source in the window: the amount tied to ANY order of this
+   business (linked_all) and to orders of one channel (linked_ch). The rest of a
+   source's total is tied to no order. Feeds the dashboard's channel view. */
+function commissionLinkedBySource(db, { businessId, start = null, end = null, channel }) {
+  return db.query(`
+    SELECT tt.source,
+           COALESCE(SUM(tt.amount), 0)                                         AS linked_all,
+           COALESCE(SUM(tt.amount) FILTER (WHERE ${channelPredicate('o.id', '$5')}), 0) AS linked_ch
+      FROM treasury_transactions tt
+      JOIN orders o ON o.id = tt.order_id AND o.business_id = $1::integer
+     WHERE tt.business_id = $1::integer
+       AND tt.type = 'expense'
+       AND tt.source = ANY($4::text[])
+       AND ($2::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') >= $2)
+       AND ($3::text IS NULL OR TO_CHAR(tt.transaction_date, 'YYYY-MM-DD') <= $3)
+     GROUP BY tt.source
+  `, [businessId, start, end, COMMISSION_SOURCES, channel]);
 }
 
 /* Fixed costs + distributions that BELONG to a month ('YYYY-MM'): period_month,
@@ -312,5 +361,6 @@ module.exports = {
   cairoToday,
   dailyOpexBySource,
   commissionByProduct,
+  commissionLinkedBySource,
   monthlyRows,
 };

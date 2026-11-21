@@ -8,6 +8,7 @@ const { hasRole, hasAnyRole } = require('../utils/roles');
 const pnl = require('../services/pnl');
 const { CLOSED_PRODUCT } = require('../services/closedStatuses');
 const deliveryBonus = require('../services/deliveryBonus');
+const attribution = require('../services/attribution');
 
 const router = express.Router();
 
@@ -180,6 +181,39 @@ async function resolveAnalyticsScope(req) {
 /* Convert a resolved scope into the per-filter param value (see CALLER CONTRACT). */
 const scopeOrders   = (s) => (s.all ? null : (s.referralCodes || []));
 const scopeAdAcc    = (s) => (s.all ? null : (s.adAccountIds  || []));
+
+/* /dashboard?channel= (the read-only API): the daily OPEX of ONE ad platform.
+   Commission sources → the commissions of that channel's orders, plus that
+   source's commissions tied to no order × share; every other source × share,
+   where share = the channel's delivered orders ÷ all delivered orders (same
+   cohort, same filters). Every channel together = the unfiltered card. */
+async function channelOpexView({ channel, opexWindow, base, deliveredSql, deliveredParams }) {
+  const [dRes, linkRes] = await Promise.all([
+    pool.query(deliveredSql, deliveredParams),
+    pnl.commissionLinkedBySource(pool, { ...opexWindow, channel }),
+  ]);
+  const dAll  = parseInt(dRes.rows[0]?.d_all, 10) || 0;
+  const dCh   = parseInt(dRes.rows[0]?.d_ch, 10) || 0;
+  const share = dAll > 0 ? dCh / dAll : 0;
+  const linked = new Map(linkRes.rows.map((r) => [r.source, { all: parseFloat(r.linked_all) || 0, ch: parseFloat(r.linked_ch) || 0 }]));
+  const isComm = (src) => pnl.COMMISSION_SOURCES.includes(src);
+  const opex_breakdown = base.opex_breakdown
+    .map((o) => {
+      const l = linked.get(o.source) || { all: 0, ch: 0 };
+      const amount = isComm(o.source) ? l.ch + (o.amount - l.all) * share : o.amount * share;
+      return { ...o, amount: parseFloat(amount.toFixed(2)) };
+    })
+    .sort((a, b) => b.amount - a.amount);
+  const operating_expenses = parseFloat(opex_breakdown.reduce((s, o) => s + o.amount, 0).toFixed(2));
+  const opex_commissions_total = parseFloat(opex_breakdown.filter((o) => isComm(o.source)).reduce((s, o) => s + o.amount, 0).toFixed(2));
+  return {
+    operating_expenses,
+    opex_breakdown,
+    opex_commissions_total,
+    opex_shared_total: parseFloat((operating_expenses - opex_commissions_total).toFixed(2)),
+    channel_delivered_share: parseFloat(share.toFixed(6)),
+  };
+}
 
 /* ════════════════════════════════════════════════════════════════════
    FORWARD PIPELINE — the SINGLE source of truth for "actively on the road"
@@ -1108,6 +1142,17 @@ router.get('/products-profitability', authenticate, async (req, res) => {
 
   const { startDate, endDate } = req.query;
 
+  /* Optional ad-platform view (?channel=meta|tiktok|organic|other|unknown — the
+     read-only API, services/attribution.js). Absent → every query below is the
+     same as before. With it: only that channel's orders, Meta spend only for
+     'meta', and OPEX shared by the channel's delivered units — so the channels
+     add up to the unfiltered table. */
+  const chan = attribution.parseChannel(req.query.channel);
+  if (!chan.ok) return res.status(400).json({ error: 'channel غير معروف', channels: attribution.CHANNELS });
+  const channel = chan.channel;
+  if (channel && req.user.plan_type === 'affiliate') return res.status(400).json({ error: 'channel غير متاح لحسابات الأفلييت' });
+  if (channel) await attribution.ensureSchema();
+
   /* AGENCY scope (admin-all / admin-impersonate / media_buyer-self). */
   const ppScope = await resolveAnalyticsScope(req);
 
@@ -1217,7 +1262,17 @@ router.get('/products-profitability', authenticate, async (req, res) => {
       0
     )`;
 
-  const sql = `
+  /* Channel param is pushed LAST, so the all-channel run (OPEX denominator below)
+     can reuse the same SQL with params.slice(0, -1). No channel → both fragments
+     are '' and the SQL text is exactly what it was. */
+  let chanSql = '';
+  if (channel) {
+    params.push(channel);
+    chanSql = `\n        AND  ${attribution.channelPredicate('o.id', `$${params.length}`)}`;
+  }
+  const noSpendSql = channel && channel !== 'meta' ? `\n        AND  FALSE   /* Meta spend belongs to the meta channel only */` : '';
+
+  const buildSql = (withChannel) => `
     WITH order_stats AS (
       /* ── Join products → orders to count confirmed/delivered per product ──────
          Two matching strategies handle the fact that "sku" on orders is a
@@ -1307,7 +1362,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         )
       )
       WHERE  p.business_id = ${bizIdx}::integer${ordFilter}
-        AND  (${refIdx}::text[] IS NULL OR o.referral_code = ANY(${refIdx}::text[]))
+        AND  (${refIdx}::text[] IS NULL OR o.referral_code = ANY(${refIdx}::text[]))${withChannel ? chanSql : ''}
       GROUP  BY p.id
     ),
     expense_stats AS (
@@ -1326,7 +1381,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
         AND  ($1::date IS NULL OR e.expense_date >= $1::date)
         AND  ($2::date IS NULL OR e.expense_date <= $2::date)
         AND  (${accIdx}::int[] IS NULL OR e.meta_account_id = ANY(${accIdx}))
-        AND  (${campNameIdx}::text IS NULL OR UPPER(e.campaign_name) = ${campNameIdx})
+        AND  (${campNameIdx}::text IS NULL OR UPPER(e.campaign_name) = ${campNameIdx})${withChannel ? noSpendSql : ''}
       GROUP  BY UPPER(e.sku)
     )
     SELECT
@@ -1357,6 +1412,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
               COALESCE(es.attributed_spend,  0) DESC,
               p.name ASC
   `;
+  const sql = buildSql(true);
 
   try {
     const { rows } = await pool.query(sql, params).catch((err) => {
@@ -1386,7 +1442,7 @@ router.get('/products-profitability', authenticate, async (req, res) => {
     const [opexRes, opexCommRes] = await Promise.all([
       pnl.dailyOpexBySource(pool, opexWindow)
         .catch((err) => { console.error('[products-profitability/opex] failed:', err.message); return { rows: [] }; }),
-      pnl.commissionByProduct(pool, opexWindow)
+      pnl.commissionByProduct(pool, channel ? { ...opexWindow, channel } : opexWindow)
         .catch((err) => { console.error('[products-profitability/opex-comm] failed:', err.message); return { rows: [] }; }),
     ]);
 
@@ -1403,7 +1459,14 @@ router.get('/products-profitability', authenticate, async (req, res) => {
     }
     /* Shared OPEX is split by delivered-order COUNT across ALL products (the same
        denominator the frontend uses: Σ units_delivered over the full catalogue). */
-    const totalDeliveredAll = rows.reduce((s, r) => s + (parseInt(r.units_delivered, 10) || 0), 0);
+    let totalDeliveredAll = rows.reduce((s, r) => s + (parseInt(r.units_delivered, 10) || 0), 0);
+    /* Channel view: a channel carries shared OPEX × (its delivered units ÷ the
+       units delivered in ALL channels) — the same table without the channel
+       filter gives that denominator, so the channels add up to the full table. */
+    if (channel) {
+      const all = await pool.query(buildSql(false), params.slice(0, -1));
+      totalDeliveredAll = all.rows.reduce((s, r) => s + (parseInt(r.units_delivered, 10) || 0), 0);
+    }
 
     /* Compute derived metrics in JS to keep the SQL readable */
     const result = rows.map((r) => {
@@ -1521,6 +1584,15 @@ router.get('/dashboard', authenticate, async (req, res) => {
   }
 
   const { startDate, endDate } = req.query;
+
+  /* Optional ad-platform view (?channel=, the read-only API) — see
+     /products-profitability. Absent → every query below is unchanged. */
+  const chan = attribution.parseChannel(req.query.channel);
+  if (!chan.ok) return res.status(400).json({ error: 'channel غير معروف', channels: attribution.CHANNELS });
+  const channel = chan.channel;
+  if (channel && req.user.plan_type === 'affiliate') return res.status(400).json({ error: 'channel غير متاح لحسابات الأفلييت' });
+  if (channel) await attribution.ensureSchema();
+  const noSpendChannel = Boolean(channel && channel !== 'meta');
 
   console.log(`[DASHBOARD DEBUG] role=${role} user=${req.user?.id} range:`, startDate, endDate);
 
@@ -1717,6 +1789,17 @@ router.get('/dashboard', authenticate, async (req, res) => {
      CURRENT status for that cohort (the schema keeps only the live status), i.e.
      "still floating NOW", not "was in transit at the close of that day". */
   const FORWARD_PIPELINE = `${FORWARD_STATIC} AND ${CR}`;
+
+  /* Channel view: every orders query below (cards, in-transit, daily, governorates,
+     rejection reasons) filters on the channel through ordFilter. The filter
+     without the channel is kept for the delivered-share denominator. */
+  const ordFilterAllChannels = ordFilter;
+  let chanPredOrders = null;
+  if (channel) {
+    ordParams.push(channel);
+    chanPredOrders = attribution.channelPredicate('orders.id', `$${ordParams.length}`);
+    ordFilter += ` AND ${chanPredOrders}`;
+  }
 
   /* After-delivery fragments (refunds) — 0 until the Phase-2 tables exist. */
   const ad = await pnl.afterDeliverySql(pool);
@@ -1935,7 +2018,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       console.error('[dashboard/opex]       QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [] };
     }),
-    pnl.commissionByProduct(pool, opexWindow).catch(err => {
+    pnl.commissionByProduct(pool, channel ? { ...opexWindow, channel } : opexWindow).catch(err => {
       console.error('[dashboard/opex-comm]  QUERY FAILED:', err.message, err.detail ?? '');
       return { rows: [] };
     }),
@@ -1950,7 +2033,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
       total_orders: 0, total_confirmed: 0, total_delivered: 0,
       total_rejected: 0, total_returned: 0, total_pending: 0, total_revenue: 0,
     };
-    const ex = exRes.rows[0] ?? { total_expenses: 0, meta_spend: 0, meta_total_orders: 0 };
+    let ex = exRes.rows[0] ?? { total_expenses: 0, meta_spend: 0, meta_total_orders: 0 };
+    /* Channel view: the spend in expenses is Meta's — it counts under 'meta' only. */
+    if (noSpendChannel) ex = { total_expenses: 0, meta_spend: 0, meta_total_orders: 0 };
 
     /* ── Daily operating expenses (OPEX) breakdown ──
        Label each treasury source (services/pnl.js — an unknown/custom source
@@ -1992,6 +2077,21 @@ router.get('/dashboard', authenticate, async (req, res) => {
         parseFloat((parseFloat(r.commission) || 0).toFixed(2));
     }
 
+    /* Channel view: this channel's own commissions + every other daily cost (and
+       commissions tied to no order) × the channel's share of delivered orders. */
+    let opexView = { operating_expenses, opex_breakdown, opex_commissions_total, opex_shared_total };
+    if (channel) {
+      opexView = await channelOpexView({
+        channel, opexWindow, base: opexView,
+        deliveredSql: `
+          SELECT COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل' AND ${CR})                       AS d_all,
+                 COUNT(id) FILTER (WHERE "Status" = 'تم التوصيل' AND ${CR} AND ${chanPredOrders}) AS d_ch
+            FROM orders
+           WHERE 1=1${ordFilterAllChannels}`,
+        deliveredParams: ordParams,
+      });
+    }
+
     const overview = {
       /* total_orders = AUTHORITATIVE direct COUNT of the internal `orders` table
          for the selected window (ov.total_orders = COUNT(id) FILTER (WHERE ${CR})).
@@ -2020,10 +2120,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
          Business-wide total + Path A+ split inputs: commissions are attributed
          EXACTLY per product (opex_commission_by_product); shared costs are split
          by delivered-order count on the frontend. */
-      operating_expenses,
-      opex_breakdown,
-      opex_commissions_total,
-      opex_shared_total,
+      ...opexView,
       opex_commission_by_product,
     };
 
@@ -2036,7 +2133,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
     /* TO_CHAR in the SQL guarantees stat_date is always a plain 'YYYY-MM-DD' string.
        We keep the instanceof guard as a belt-and-suspenders safety net only.       */
     const expByDate = new Map();
-    for (const row of dayExpRes.rows) {
+    for (const row of (noSpendChannel ? [] : dayExpRes.rows)) {   // channel view: Meta spend → 'meta' only
       const key = row.stat_date instanceof Date
         ? row.stat_date.toISOString().split('T')[0]   // safety fallback (should not fire)
         : String(row.stat_date);                       // always 'YYYY-MM-DD' via TO_CHAR

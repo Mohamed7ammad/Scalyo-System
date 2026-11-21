@@ -3,6 +3,7 @@ const crypto  = require('crypto');
 const pool    = require('../config/db');
 const { recordSafqaOrder, updateSafqaStatusByPhone, adoptOrphanByPhoneProduct } = require('../services/externalAffiliate');
 const { extractReferralCode, resolveMarketerCode } = require('../utils/referral');
+const attribution = require('../services/attribution');
 
 /* Tenant's known media-buyer referral codes (users.referral_code). Used to
    resolve an EasyOrder utm_campaign → a canonical marketer at ingest. Returns
@@ -446,6 +447,11 @@ async function ingestEasyOrder(body, businessId, planType = 'ecommerce') {
 
   let newOrder = result.rows[0];
   console.log(`✅  EasyOrder webhook: order #${newOrder.id} (tenant ${businessId}, qty ${newOrder.quantity}) created`);
+
+  /* Which ad platform / campaign / ad it came from (order_attribution, read by
+     /api/v1). Fire-and-forget with its own catch: never delays or breaks the order. */
+  attribution.recordEasyOrder(newOrder.id, businessId, body)
+    .catch((err) => console.warn(`[attribution] order #${newOrder.id}:`, err.message));
 
   /* Auto-assign: weighted round-robin by the admin's saved percentages, falling
      back to least-loaded. Done before responding so the returned order carries
