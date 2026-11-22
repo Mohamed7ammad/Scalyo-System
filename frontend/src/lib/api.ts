@@ -1651,6 +1651,46 @@ export const createApiKey = (data: { name: string; scopes: ApiKeyScope[] }) =>
 /** Stop a key for good (it is kept in the list as «متوقف», never deleted). Admin only. */
 export const revokeApiKey = (id: number) => api.post<ApiKeyRow>(`/api/api-keys/${id}/revoke`);
 
+/* ── «رأس المال» — money + goods at cost (owner only) ─────────────── */
+export interface CapitalItem {
+  product_id: string | null;
+  name:       string;
+  units:      number;
+  orders?:    number;
+  unit_cost:  number;
+  cost:       number;
+}
+
+export interface CapitalBucket {
+  orders: number;
+  units:  number;
+  cost:   number;
+  items:  CapitalItem[];
+  stale:  { orders: number; cost: number };
+  status?: string;
+}
+
+export interface CapitalResponse {
+  generated_at: string;
+  stale_days:   number;
+  total:        { money: number; goods: number; capital: number; complete: boolean };
+  wallet:       { ok: boolean; balance: number | null; error: string | null };
+  treasury:     { balance: number; last_entry_at: string | null; entries: number };
+  warehouse:    { products: number; units: number; cost: number; items: CapitalItem[];
+                  missing_cost: { product_id: string; name: string; units: number }[];
+                  negative: { product_id: string; name: string; units: number }[] };
+  confirmed:    CapitalBucket;
+  in_transit:   CapitalBucket;
+  returning:    CapitalBucket & { avg_return_fee: number | null; expected_return_fees: number | null };
+  other:        CapitalBucket[];
+  missing_cost: { orders: { order_id: number; product: string | null; status: string }[];
+                  products: { product_id: string; name: string; units: number }[] };
+  history:      { day: string; capital: number; money: number; goods: number }[];
+}
+
+/** The owner's capital right now: Bosta wallet + treasury + goods at cost. Admin only. */
+export const getCapital = () => api.get<CapitalResponse>('/api/capital');
+
 /* ── Treasury ────────────────────────────────────────────────────── */
 export interface TreasuryTransaction {
   id:               number;
