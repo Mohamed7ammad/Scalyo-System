@@ -196,15 +196,18 @@ export default function CapitalPage() {
           </Row>
           <Row
             sign="+" tone="goods" title="متأكدة لسه ما اتشحنتش" amount={data.confirmed.cost}
-            desc={`${bucketDesc(data.confirmed, 'اتخصمت من المخزن ولسه عندك')}`}
+            desc={`${data.confirmed.orders} أوردر · ${data.confirmed.units} قطعة موجودة فعلًا على الرف (اتخصمت من رصيد المخزن ولسه ما اتشحنتش) × سعر التكلفة`}
+            warn={data.confirmed_unbacked.orders > 0
+              ? `فيه ${data.confirmed_unbacked.orders} أوردر متأكد (${data.confirmed_unbacked.units} قطعة) منتجه خلصان من المخزن — دول مش محسوبين لأن البضاعة لسه مش موجودة. تفاصيلهم تحت في «مش محسوب».`
+              : undefined}
           >
             <ProductTable items={data.confirmed.items} showOrders />
           </Row>
           <Row
             sign="+" tone="goods" title="في الطريق مع بوسطة" amount={data.in_transit.cost}
-            desc={`${bucketDesc(data.in_transit, 'رايحة للعملاء')}`}
+            desc={`${bucketDesc(data.in_transit, 'رايحة للعملاء')} — شحنات اتحركت آخر ${data.old_days} يوم`}
             warn={data.in_transit.stale.orders > 0
-              ? `منهم ${data.in_transit.stale.orders} شحنة عدّى عليها أكتر من ${data.stale_days} أيام بتكلفة ${fmt(data.in_transit.stale.cost)} — راجعها مع بوسطة`
+              ? `منهم ${data.in_transit.stale.orders} شحنة متأخرة (أكتر من ${data.stale_days} أيام) بتكلفة ${fmt(data.in_transit.stale.cost)} — محسوبة، بس راجعها مع بوسطة`
               : undefined}
           >
             <ProductTable items={data.in_transit.items} showOrders />
@@ -235,8 +238,37 @@ export default function CapitalPage() {
             <div className="text-xl sm:text-2xl font-extrabold tabular-nums text-indigo-900 dark:text-white">{fmt(data.total.capital)}</div>
           </div>
 
+          {/* Not counted — on purpose */}
+          {(data.confirmed_unbacked.orders > 0 || data.old_shipments.in_transit.orders > 0 || data.old_shipments.returning.orders > 0) && (
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-4 space-y-3">
+              <div>
+                <div className="font-bold text-slate-800 dark:text-slate-100">مش محسوب في رأس المال (عن قصد)</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">حاجات مكتوبة في السيستم بس مش في إيدك فعلًا، أو حالتها مش معروفة.</div>
+              </div>
+              {data.confirmed_unbacked.orders > 0 && (
+                <Row sign="" tone="goods" title="أوردرات متأكدة منتجها خلصان" amount={data.confirmed_unbacked.cost}
+                  desc={`${data.confirmed_unbacked.orders} أوردر · ${data.confirmed_unbacked.units} قطعة اتأكدت والمخزن مكانش فيه بضاعة ليها (رصيده راح بالسالب). محتاج تشتريها الأول — الرقم ده تكلفتها التقريبية.`}>
+                  <ProductTable items={data.confirmed_unbacked.items} showOrders />
+                  {data.confirmed_unbacked.order_ids && data.confirmed_unbacked.order_ids.length > 0 && (
+                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400 break-words">أرقام الأوردرات: {data.confirmed_unbacked.order_ids.map((id) => `#${id}`).join('، ')}</div>
+                  )}
+                </Row>
+              )}
+              {(data.old_shipments.in_transit.orders > 0 || data.old_shipments.returning.orders > 0) && (
+                <Row sign="" tone="goods" title={`شحنات حالتها واقفة من أكتر من ${data.old_days} يوم`}
+                  amount={data.old_shipments.in_transit.cost + data.old_shipments.returning.cost}
+                  desc={`${data.old_shipments.in_transit.orders} «تم الشحن» + ${data.old_shipments.returning.orders} «جاري الإعادة»، أقدمها من ${data.old_shipments.in_transit.oldest || data.old_shipments.returning.oldest || '—'}. دي مش في الطريق فعلًا: غالبًا اتسلمت وفلوسها دخلت المحفظة أو الخزنة، أو رجعت ومتسجلتش. لو اتحسبت هنا هتبقى محسوبة مرتين.`}>
+                  <ProductTable items={[...data.old_shipments.in_transit.items, ...data.old_shipments.returning.items]} showOrders />
+                  <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400 break-words">
+                    أرقام الأوردرات: {[...(data.old_shipments.in_transit.order_ids || []), ...(data.old_shipments.returning.order_ids || [])].map((id) => `#${id}`).join('، ')}
+                  </div>
+                </Row>
+              )}
+            </div>
+          )}
+
           {/* Missing data */}
-          {(missingOrders.length > 0 || missingProducts.length > 0 || negative.length > 0) && (
+          {(missingOrders.length > 0 || missingProducts.length > 0 || negative.length > 0 || (data.stock_gaps ?? []).length > 0) && (
             <details className="bg-amber-50/70 dark:bg-amber-950/20 rounded-2xl border border-amber-200 dark:border-amber-900/50 p-4">
               <summary className="cursor-pointer text-sm font-bold text-amber-800 dark:text-amber-300 select-none">
                 عشان الرقم يبقى أدق: {missingOrders.length + missingProducts.length + negative.length} حاجة محتاجة تتصلح
@@ -259,8 +291,18 @@ export default function CapitalPage() {
                 )}
                 {negative.length > 0 && (
                   <div>
-                    <div className="font-semibold mb-1">منتجات رصيدها بالسالب في المخزون (مش محسوبة):</div>
+                    <div className="font-semibold mb-1">منتجات رصيدها بالسالب في المخزون:</div>
                     <ul className="list-disc pr-5">{negative.map((p) => <li key={p.product_id}>{p.name} — {p.units} قطعة</li>)}</ul>
+                    <div className="mt-1 opacity-80">
+                      يعني اتأكد عليها أكتر من اللي في المخزن. الأوردرات اللي ملهاش بضاعة ظاهرة فوق في «مش محسوب»، ولما البضاعة توصل سجّلها في المخزون.
+                    </div>
+                  </div>
+                )}
+                {(data?.stock_gaps ?? []).length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">رصيد لسه بالسالب حتى بعد حساب الأوردرات المتأكدة:</div>
+                    <ul className="list-disc pr-5">{(data?.stock_gaps ?? []).map((g) => <li key={g.product_id}>{g.name} — ناقص {g.units_below_zero} قطعة</li>)}</ul>
+                    <div className="mt-1 opacity-80">غالبًا بضاعة دخلت المخزن ومتسجلتش (أو اتشحن أكتر من المسجل).</div>
                   </div>
                 )}
               </div>

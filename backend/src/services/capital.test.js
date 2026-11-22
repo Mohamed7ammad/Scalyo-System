@@ -54,6 +54,58 @@ test('goods off the shelf: each status in its bucket, the order snapshot cost fi
   assert.deepEqual(g.missing_cost, [{ order_id: 5, product: 'منتج مش في المخزون', status: 'تم الشحن' }]);
 });
 
+test('confirmed orders beyond the shelf have no goods → not counted (oldest confirmations are the covered ones)', () => {
+  const now = new Date('2026-11-22T12:00:00Z');
+  /* the hair cap: recorded stock −7, 13 confirmed orders of 1 unit → 6 really on the shelf */
+  const cap13 = Array.from({ length: 13 }, (_, i) => ({
+    id: 100 + i, status: 'تم التأكيد', quantity: 1, unit_cost_price: 850, product_cost: 850,
+    product_id: 'cap', product_name: 'كاب', product_stock: -7, since: new Date(Date.UTC(2026, 10, 1 + i)).toISOString(),
+  }));
+  const g = cap.summarizeGoodsOut(cap13, now);
+  assert.equal(g.confirmed.units, 6);
+  assert.equal(g.confirmed.cost, 6 * 850);
+  assert.equal(g.confirmed_unbacked.units, 7);
+  assert.equal(g.confirmed_unbacked.cost, 7 * 850);
+  assert.deepEqual(g.confirmed_unbacked.order_ids, [106, 107, 108, 109, 110, 111, 112], 'the 7 newest have no goods');
+  assert.deepEqual(g.stock_gaps, []);
+
+  /* one order of 2 units with only 1 on the shelf → split */
+  const split = cap.summarizeGoodsOut([{ id: 1, status: 'تم التأكيد', quantity: 2, unit_cost_price: 100,
+    product_id: 'x', product_name: 'x', product_stock: -1, since: now.toISOString() }], now);
+  assert.deepEqual([split.confirmed.units, split.confirmed_unbacked.units], [1, 1]);
+
+  /* still below zero after the confirmed units → a recorded-stock gap */
+  const gap = cap.summarizeGoodsOut([{ id: 2, status: 'تم التأكيد', quantity: 3, unit_cost_price: 100,
+    product_id: 'y', product_name: 'y', product_stock: -10, since: now.toISOString() }], now);
+  assert.equal(gap.confirmed.units, 0);
+  assert.equal(gap.confirmed_unbacked.units, 3);
+  assert.deepEqual(gap.stock_gaps, [{ product_id: 'y', name: 'y', units_below_zero: 7 }]);
+
+  /* a non-negative shelf covers every confirmed unit */
+  const ok = cap.summarizeGoodsOut([{ id: 3, status: 'تم التأكيد', quantity: 5, unit_cost_price: 10,
+    product_id: 'z', product_name: 'z', product_stock: 0, since: now.toISOString() }], now);
+  assert.deepEqual([ok.confirmed.units, ok.confirmed_unbacked.units], [5, 0]);
+});
+
+test(`shipments untouched for more than ${cap.OLD_DAYS} days are not counted — shown apart`, () => {
+  const now = new Date('2026-11-22T12:00:00Z');
+  const g = cap.summarizeGoodsOut([
+    { id: 1, status: 'تم الشحن', quantity: 1, unit_cost_price: 900, since: '2026-11-20T00:00:00Z' },   // normal
+    { id: 2, status: 'تم الشحن', quantity: 1, unit_cost_price: 900, since: '2026-11-05T00:00:00Z' },   // 17 days: late, counted
+    { id: 3, status: 'تم الشحن', quantity: 2, unit_cost_price: 900, since: '2026-08-05T00:00:00Z' },   // ghost
+    { id: 4, status: 'جاري الإعادة', quantity: 1, unit_cost_price: 300, since: '2026-09-29T00:00:00Z' }, // old return
+  ], now);
+  assert.equal(g.in_transit.orders, 2);
+  assert.equal(g.in_transit.cost, 1800);
+  assert.deepEqual(g.in_transit.stale, { orders: 1, cost: 900 });
+  assert.deepEqual([g.old.in_transit.orders, g.old.in_transit.units, g.old.in_transit.cost, g.old.in_transit.oldest], [1, 2, 1800, '2026-08-05']);
+  assert.deepEqual(g.old.in_transit.order_ids, [3]);
+  assert.equal(g.returning.orders, 0);
+  assert.equal(g.old.returning.cost, 300);
+  const t = cap.total({ wallet: { ok: true, balance: 0 }, treasury: { balance: 0 }, warehouse: { cost: 0 }, out: g });
+  assert.equal(t.goods, 1800, 'old shipments are left out of the total');
+});
+
 test('the total = money + goods; a failed wallet read marks it incomplete', () => {
   const out = cap.summarizeGoodsOut([
     { id: 1, status: 'تم الشحن', quantity: 1, unit_cost_price: 900, since: new Date() },

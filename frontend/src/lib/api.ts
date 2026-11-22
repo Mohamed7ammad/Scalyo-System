@@ -1668,12 +1668,20 @@ export interface CapitalBucket {
   items:  CapitalItem[];
   stale:  { orders: number; cost: number };
   status?: string;
+  oldest?: string;
+  order_ids?: number[];
 }
 
 export interface CapitalResponse {
   generated_at: string;
   stale_days:   number;
+  old_days:     number;
   total:        { money: number; goods: number; capital: number; complete: boolean };
+  /** confirmed orders whose product is out of stock — the goods don't exist yet (NOT counted) */
+  confirmed_unbacked: CapitalBucket;
+  /** shipments / returns whose status hasn't moved for old_days (NOT counted) */
+  old_shipments: { in_transit: CapitalBucket; returning: CapitalBucket };
+  stock_gaps: { product_id: string; name: string; units_below_zero: number }[];
   wallet:       { ok: boolean; balance: number | null; error: string | null };
   treasury:     { balance: number; last_entry_at: string | null; entries: number };
   warehouse:    { products: number; units: number; cost: number; items: CapitalItem[];

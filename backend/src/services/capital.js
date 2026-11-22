@@ -6,23 +6,32 @@
                                              already net of Bosta's fees
    + الخزينة (فلوس البنك)                   — treasury: all money in − all money out
    + بضاعة في المخزن        × التكلفة       — products.stock_quantity × cost_price
-   + متأكدة لسه ما اتشحنتش  × التكلفة       — confirmed: already taken out of stock
+   + متأكدة لسه ما اتشحنتش  × التكلفة       — confirmed: off the stock count, still on the shelf
    + في الطريق مع بوسطة     × التكلفة       — shipped, not delivered
    + مرتجعات راجعة          × التكلفة       — «جاري الإعادة»
    = رأس المال الحالي
 
-   "Taken out of stock" is exact: orders.stock_deducted is set when an order is
+   "Off the stock count" is exact: orders.stock_deducted is set when an order is
    confirmed and cleared when it is restocked (cancel / reject / Bosta «تم الإرجاع»),
-   so an order's units are either on the shelf count or in exactly one bucket here.
-   Cost of an order's unit = its own snapshot (unit_cost_price, the average cost at
-   confirmation), else the product's current cost price.
-   No salaries / supplier debts (owner: none on credit, salaries he tracks himself).
+   so an order is in exactly one bucket and a returned order is restocked once.
+   The product of an order = the inventory hook's own match (exact SKU → exact name
+   → alias, services/orderStatus.js resolveProductForOrder).
+
+   Two things are NOT counted, and shown apart instead (owner review 2026-11-22):
+   • confirmed orders with no goods behind them — confirming does not check the
+     shelf, so a product can go below zero. Units on the shelf = recorded stock +
+     its confirmed units; confirmed units beyond that (oldest confirmed first are
+     the ones covered) do not exist yet.
+   • shipments / returns whose status has not moved for OLD_DAYS — not really on
+     the road: mostly delivered (their cash is already in the wallet / treasury,
+     counting the goods too would count them twice) or returned unrecorded.
    ══════════════════════════════════════════════════════════════════════════ */
 'use strict';
 
 const pool = require('../config/db');
 
-const STALE_DAYS = 10;      // a shipment older than this is shown as «متأخرة»
+const STALE_DAYS = 10;      // on the road longer than this → «متأخرة» (still counted)
+const OLD_DAYS   = 30;      // status unchanged longer than this → not counted, shown apart
 const BUCKETS = {
   'تم التأكيد':   'confirmed',
   'تم الشحن':     'in_transit',
@@ -49,6 +58,8 @@ function _markSchemaReadyForTests() { schemaP = Promise.resolve(true); }
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 const r2  = (v) => parseFloat(num(v).toFixed(2));
+const unitsOf = (r) => Math.max(1, Math.trunc(num(r.quantity) || 1));
+const timeOf = (v) => { const t = v ? new Date(v).getTime() : NaN; return Number.isFinite(t) ? t : 0; };
 
 /* ── pure: the shelf ──────────────────────────────────────────────────────── */
 function summarizeWarehouse(products = []) {
@@ -74,62 +85,121 @@ function summarizeWarehouse(products = []) {
   };
 }
 
-/* ── pure: units taken out of stock but not sold yet ──────────────────────── */
-function emptyBucket() { return { orders: 0, units: 0, cost: 0, stale: { orders: 0, cost: 0 }, items: [], _byProduct: new Map() }; }
+/* ── pure: units off the stock count but not sold yet ─────────────────────── */
+function newBucket(extra = {}) { return { orders: 0, units: 0, cost: 0, stale: { orders: 0, cost: 0 }, byProduct: new Map(), orderIds: [], ...extra }; }
+
+function addTo(b, r, units, unit, { stale = false } = {}) {
+  const cost = units * unit;
+  b.orders += 1;
+  b.units += units;
+  b.cost += cost;
+  if (stale) { b.stale.orders += 1; b.stale.cost += cost; }
+  b.orderIds.push(Number(r.id));
+  const pk = r.product_id ? `p:${r.product_id}` : `n:${String(r.order_product || '').trim()}`;
+  let it = b.byProduct.get(pk);
+  if (!it) {
+    it = { product_id: r.product_id ? String(r.product_id) : null, name: r.product_name || String(r.order_product || '').trim() || '—', orders: 0, units: 0, cost: 0 };
+    b.byProduct.set(pk, it);
+  }
+  it.orders += 1;
+  it.units += units;
+  it.cost += cost;
+}
+
+function finish(b) {
+  const items = [...b.byProduct.values()]
+    .map((it) => ({ ...it, unit_cost: it.units ? r2(it.cost / it.units) : 0, cost: r2(it.cost) }))
+    .sort((a, c) => c.cost - a.cost || c.units - a.units);
+  const out = { orders: b.orders, units: b.units, cost: r2(b.cost), items, stale: { orders: b.stale.orders, cost: r2(b.stale.cost) } };
+  if (b.status !== undefined) out.status = b.status;
+  if (b.oldest !== undefined) out.oldest = b.oldest;
+  if (b.withIds) out.order_ids = b.orderIds;
+  return out;
+}
 
 function summarizeGoodsOut(rows = [], now = new Date()) {
-  const buckets = { confirmed: emptyBucket(), in_transit: emptyBucket(), returning: emptyBucket() };
-  const other = new Map();          // any other status still holding stock
-  const missingCost = [];
   const staleBefore = now.getTime() - STALE_DAYS * 86400000;
+  const oldBefore   = now.getTime() - OLD_DAYS * 86400000;
+  const unitCost = (r) => (num(r.unit_cost_price) > 0 ? num(r.unit_cost_price) : num(r.product_cost));
+
+  /* Which confirmed units have goods behind them: per product, units on the shelf
+     = recorded stock + its confirmed units; the oldest confirmations take them. */
+  const confirmedByProduct = new Map();
+  for (const r of rows) {
+    if (BUCKETS[String(r.status ?? '').trim()] !== 'confirmed' || !r.product_id) continue;
+    const g = confirmedByProduct.get(String(r.product_id)) || { stock: Math.trunc(num(r.product_stock)), rows: [] };
+    g.rows.push(r);
+    confirmedByProduct.set(String(r.product_id), g);
+  }
+  const unbackedUnits = new Map();          // order id → units with no goods behind them
+  const stockGaps = [];                     // still below zero after counting confirmed units
+  for (const [, g] of confirmedByProduct) {
+    const C = g.rows.reduce((s, r) => s + unitsOf(r), 0);
+    const onShelf = g.stock + C;
+    let covered = Math.min(C, Math.max(0, onShelf));
+    g.rows.sort((a, b) => timeOf(a.since) - timeOf(b.since) || Number(a.id) - Number(b.id));
+    for (const r of g.rows) {
+      const u = unitsOf(r);
+      const take = Math.min(u, covered);
+      covered -= take;
+      if (u - take > 0) unbackedUnits.set(Number(r.id), u - take);
+    }
+    if (onShelf < 0) stockGaps.push({ product_id: String(g.rows[0].product_id), name: g.rows[0].product_name, units_below_zero: -onShelf });
+  }
+
+  const confirmed  = newBucket();
+  const unbacked   = newBucket({ withIds: true });
+  const inTransit  = newBucket();
+  const returning  = newBucket();
+  const old        = { in_transit: newBucket({ withIds: true }), returning: newBucket({ withIds: true }) };
+  const other      = new Map();
+  const missingCost = [];
 
   for (const r of rows) {
     const status = String(r.status ?? '').trim();
     const key = BUCKETS[status];
-    let b = key ? buckets[key] : other.get(status);
-    if (!b) { b = emptyBucket(); b.status = status; other.set(status, b); }
-    const units = Math.max(1, Math.trunc(num(r.quantity) || 1));
-    const unit = num(r.unit_cost_price) > 0 ? num(r.unit_cost_price) : num(r.product_cost);
-    const cost = units * unit;
+    const units = unitsOf(r);
+    const unit = unitCost(r);
+    const since = timeOf(r.since);
+
+    if (key === 'confirmed') {
+      const nb = unbackedUnits.get(Number(r.id)) || 0;
+      if (units - nb > 0) addTo(confirmed, r, units - nb, unit);
+      if (nb > 0) addTo(unbacked, r, nb, unit);
+      if (unit <= 0 && units - nb > 0) missingCost.push({ order_id: Number(r.id), product: r.product_name || r.order_product || null, status });
+      continue;
+    }
+    if (key === 'in_transit' || key === 'returning') {
+      if (since && since < oldBefore) {
+        const ob = old[key];
+        addTo(ob, r, units, unit);
+        const day = new Date(since).toISOString().slice(0, 10);
+        if (ob.oldest === undefined || day < ob.oldest) ob.oldest = day;
+        continue;                                        // not counted, shown apart
+      }
+      addTo(key === 'in_transit' ? inTransit : returning, r, units, unit, { stale: Boolean(since) && since < staleBefore });
+      if (unit <= 0) missingCost.push({ order_id: Number(r.id), product: r.product_name || r.order_product || null, status });
+      continue;
+    }
+    let b = other.get(status);
+    if (!b) { b = newBucket({ status }); other.set(status, b); }
+    addTo(b, r, units, unit);
     if (unit <= 0) missingCost.push({ order_id: Number(r.id), product: r.product_name || r.order_product || null, status });
-    b.orders += 1;
-    b.units += units;
-    b.cost += cost;
-    const since = r.since ? new Date(r.since).getTime() : null;
-    if (key && key !== 'confirmed' && since !== null && since < staleBefore) {
-      b.stale.orders += 1;
-      b.stale.cost += cost;
-    }
-    const pk = r.product_id ? `p:${r.product_id}` : `n:${String(r.order_product || '').trim()}`;
-    let it = b._byProduct.get(pk);
-    if (!it) {
-      it = { product_id: r.product_id ? String(r.product_id) : null, name: r.product_name || String(r.order_product || '').trim() || '—', orders: 0, units: 0, cost: 0 };
-      b._byProduct.set(pk, it);
-    }
-    it.orders += 1;
-    it.units += units;
-    it.cost += cost;
   }
 
-  const finish = (b) => {
-    const items = [...b._byProduct.values()]
-      .map((it) => ({ ...it, unit_cost: it.units ? r2(it.cost / it.units) : 0, cost: r2(it.cost) }))
-      .sort((a, c) => c.cost - a.cost || c.units - a.units);
-    const out = { orders: b.orders, units: b.units, cost: r2(b.cost), items };
-    if (b.status !== undefined) out.status = b.status;
-    out.stale = { orders: b.stale.orders, cost: r2(b.stale.cost) };
-    return out;
-  };
   return {
-    confirmed:  finish(buckets.confirmed),
-    in_transit: finish(buckets.in_transit),
-    returning:  finish(buckets.returning),
-    other:      [...other.values()].map(finish).filter((b) => b.orders > 0),
-    missing_cost: missingCost,
+    confirmed:          finish(confirmed),
+    confirmed_unbacked: finish(unbacked),
+    in_transit:         finish(inTransit),
+    returning:          finish(returning),
+    old:                { in_transit: finish(old.in_transit), returning: finish(old.returning) },
+    other:              [...other.values()].map(finish).filter((b) => b.orders > 0),
+    missing_cost:       missingCost,
+    stock_gaps:         stockGaps,
   };
 }
 
-/* ── pure: the total ──────────────────────────────────────────────────────── */
+/* ── pure: the total (only what is counted) ───────────────────────────────── */
 function total({ wallet, treasury, warehouse, out }) {
   const walletAmount = wallet && wallet.ok ? num(wallet.balance) : 0;
   const money = r2(walletAmount + num(treasury.balance));
@@ -156,25 +226,26 @@ async function loadWarehouse(businessId) {
   return summarizeWarehouse(rows);
 }
 
-/* Every order whose units are off the shelf count but not sold (not delivered),
-   with its cost snapshot and its product (SKU first, name only when the SKU
-   matches no product — the same match the profitability report uses). */
+/* Every order whose units are off the stock count but not sold (not delivered),
+   matched to its product exactly like the inventory hook does. */
 async function loadGoodsOut(businessId) {
   const { rows } = await pool.query(`
     SELECT o.id, btrim(o."Status") AS status, o.quantity, o.unit_cost_price,
            o."ProductName" AS order_product,
            COALESCE(o.shipped_at, o.status_changed_at, o."updatedAt") AS since,
-           p.id AS product_id, p.name AS product_name, p.cost_price AS product_cost
+           p.id AS product_id, p.name AS product_name, p.cost_price AS product_cost, p.stock_quantity AS product_stock
       FROM orders o
       LEFT JOIN LATERAL (
-        SELECT px.id, px.name, px.cost_price FROM products px
+        SELECT px.id, px.name, px.cost_price, px.stock_quantity FROM products px
          WHERE px.business_id = o.business_id
-           AND ( ( COALESCE(o.sku, '') <> '' AND UPPER(o.sku) = UPPER(px.sku) )
-              OR ( UPPER(TRIM(COALESCE(o."ProductName", ''))) = UPPER(TRIM(px.name))
-                   AND NOT EXISTS (SELECT 1 FROM products py
-                                    WHERE py.business_id = o.business_id AND COALESCE(o.sku, '') <> ''
-                                      AND UPPER(py.sku) = UPPER(o.sku)) ) )
-         ORDER BY ( COALESCE(o.sku, '') <> '' AND UPPER(o.sku) = UPPER(px.sku) ) DESC
+           AND ( LOWER(TRIM(px.sku))  = LOWER(NULLIF(TRIM(COALESCE(o.sku, '')), ''))
+              OR LOWER(TRIM(px.name)) = LOWER(NULLIF(TRIM(COALESCE(o."ProductName", '')), ''))
+              OR EXISTS (SELECT 1 FROM unnest(COALESCE(px.aliases, '{}'::text[])) a
+                          WHERE LOWER(TRIM(a)) = LOWER(NULLIF(TRIM(COALESCE(o.sku, '')), ''))
+                             OR LOWER(TRIM(a)) = LOWER(NULLIF(TRIM(COALESCE(o."ProductName", '')), ''))) )
+         ORDER BY CASE WHEN LOWER(TRIM(px.sku))  = LOWER(NULLIF(TRIM(COALESCE(o.sku, '')), '')) THEN 1
+                       WHEN LOWER(TRIM(px.name)) = LOWER(NULLIF(TRIM(COALESCE(o."ProductName", '')), '')) THEN 2
+                       ELSE 3 END
          LIMIT 1) p ON TRUE
      WHERE o.business_id = $1
        AND o.stock_deducted = true
@@ -236,27 +307,35 @@ async function computeCapital({ businessId, fetchWallet }) {
     in_transit: out.in_transit.cost,
     returning:  out.returning.cost,
     other:      r2(out.other.reduce((s, b) => s + b.cost, 0)),
+    not_counted: {
+      confirmed_no_goods: out.confirmed_unbacked.cost,
+      old_shipments:      r2(out.old.in_transit.cost + out.old.returning.cost),
+    },
   };
   await saveSnapshot(businessId, t, parts).catch((err) => console.warn('[capital] snapshot not saved:', err.message));
   const history = await loadHistory(businessId).catch(() => []);
   return {
-    generated_at: new Date().toISOString(),
-    stale_days:   STALE_DAYS,
-    total:        t,
+    generated_at:       new Date().toISOString(),
+    stale_days:         STALE_DAYS,
+    old_days:           OLD_DAYS,
+    total:              t,
     parts,
-    wallet:       { ok: Boolean(wallet.ok), balance: wallet.ok ? r2(wallet.balance) : null, error: wallet.ok ? null : (wallet.error || 'تعذّر جلب رصيد المحفظة') },
+    wallet:             { ok: Boolean(wallet.ok), balance: wallet.ok ? r2(wallet.balance) : null, error: wallet.ok ? null : (wallet.error || 'تعذّر جلب رصيد المحفظة') },
     treasury,
     warehouse,
-    confirmed:    out.confirmed,
-    in_transit:   out.in_transit,
-    returning:    { ...out.returning, avg_return_fee: returnFee, expected_return_fees: returnFee ? r2(returnFee * out.returning.orders) : null },
-    other:        out.other,
-    missing_cost: { orders: out.missing_cost, products: warehouse.missing_cost },
+    confirmed:          out.confirmed,
+    confirmed_unbacked: out.confirmed_unbacked,
+    in_transit:         out.in_transit,
+    returning:          { ...out.returning, avg_return_fee: returnFee, expected_return_fees: returnFee ? r2(returnFee * out.returning.orders) : null },
+    old_shipments:      out.old,
+    other:              out.other,
+    stock_gaps:         out.stock_gaps,
+    missing_cost:       { orders: out.missing_cost, products: warehouse.missing_cost },
     history,
   };
 }
 
 module.exports = {
-  STALE_DAYS, DDL, ensureSchema, _markSchemaReadyForTests,
+  STALE_DAYS, OLD_DAYS, DDL, ensureSchema, _markSchemaReadyForTests,
   summarizeWarehouse, summarizeGoodsOut, total, cairoDay, computeCapital,
 };
