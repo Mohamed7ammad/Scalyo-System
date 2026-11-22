@@ -17,14 +17,17 @@
    The product of an order = the inventory hook's own match (exact SKU → exact name
    → alias, services/orderStatus.js resolveProductForOrder).
 
-   Two things are NOT counted, and shown apart instead (owner review 2026-11-22):
+   Owner review (2026-11-22/23):
    • confirmed orders with no goods behind them — confirming does not check the
-     shelf, so a product can go below zero. Units on the shelf = recorded stock +
-     its confirmed units; confirmed units beyond that (oldest confirmed first are
-     the ones covered) do not exist yet.
-   • shipments / returns whose status has not moved for OLD_DAYS — not really on
-     the road: mostly delivered (their cash is already in the wallet / treasury,
-     counting the goods too would count them twice) or returned unrecorded.
+     shelf, so a product can go below zero. The shelf line is Σ stock × cost
+     exactly like the inventory page, negatives included: the negative line of
+     such a product cancels its confirmed units that have no goods (the oldest
+     confirmations are the covered ones), so they add nothing — and the page
+     names those orders.
+   • shipments / returns whose status has not moved for OLD_DAYS are NOT counted
+     and shown apart — not really on the road: mostly delivered (their cash is
+     already in the wallet / treasury, counting the goods too would count them
+     twice) or returned unrecorded.
    ══════════════════════════════════════════════════════════════════════════ */
 'use strict';
 
@@ -61,22 +64,36 @@ const r2  = (v) => parseFloat(num(v).toFixed(2));
 const unitsOf = (r) => Math.max(1, Math.trunc(num(r.quantity) || 1));
 const timeOf = (v) => { const t = v ? new Date(v).getTime() : NaN; return Number.isFinite(t) ? t : 0; };
 
-/* ── pure: the shelf ──────────────────────────────────────────────────────── */
-function summarizeWarehouse(products = []) {
+/* ── pure: the shelf ──────────────────────────────────────────────────────────
+   Σ stock × cost — the SAME total as the inventory page («إجمالي التكلفة»),
+   negative stock included: a product below zero had more confirmed than it held,
+   and its negative line cancels exactly those confirmed units (which the
+   «متأكدة» line counts), so nothing is counted that isn't there. A negative
+   larger than the product's confirmed units (units shipped beyond recorded
+   stock — unrecorded purchases) is capped at −confirmed and flagged instead of
+   pulling capital below what physically exists.
+   confirmedUnits: Map(product id → confirmed units off the stock count). */
+function summarizeWarehouse(products = [], confirmedUnits = new Map()) {
   const items = [];
   const missingCost = [];
   const negative = [];
   for (const p of products) {
     const qty = Math.trunc(num(p.stock_quantity));
     const unit = num(p.cost_price);
-    if (qty < 0) { negative.push({ product_id: String(p.id), name: p.name, units: qty }); continue; }
     if (qty === 0) continue;
+    if (qty < 0) {
+      const C = Math.trunc(num(confirmedUnits.get(String(p.id))));
+      const cancels = Math.min(-qty, C);                       // confirmed units with no goods
+      negative.push({ product_id: String(p.id), name: p.name, units: qty, cancels_confirmed: cancels, gap: -qty - cancels });
+      if (cancels > 0) items.push({ product_id: String(p.id), name: p.name, units: -cancels, unit_cost: r2(unit), cost: r2(-cancels * unit), negative: true });
+      continue;
+    }
     if (unit <= 0) missingCost.push({ product_id: String(p.id), name: p.name, units: qty });
     items.push({ product_id: String(p.id), name: p.name, units: qty, unit_cost: r2(unit), cost: r2(qty * unit) });
   }
   items.sort((a, b) => b.cost - a.cost || b.units - a.units);
   return {
-    products: items.length,
+    products: items.filter((x) => !x.negative).length,
     units:    items.reduce((s, x) => s + x.units, 0),
     cost:     r2(items.reduce((s, x) => s + x.cost, 0)),
     items,
@@ -163,10 +180,13 @@ function summarizeGoodsOut(rows = [], now = new Date()) {
     const since = timeOf(r.since);
 
     if (key === 'confirmed') {
+      /* every confirmed unit is counted here; the ones with no goods behind them are
+         cancelled by their product's negative line on the shelf (summarizeWarehouse)
+         and reported apart so the owner sees which orders they are */
+      addTo(confirmed, r, units, unit);
       const nb = unbackedUnits.get(Number(r.id)) || 0;
-      if (units - nb > 0) addTo(confirmed, r, units - nb, unit);
       if (nb > 0) addTo(unbacked, r, nb, unit);
-      if (unit <= 0 && units - nb > 0) missingCost.push({ order_id: Number(r.id), product: r.product_name || r.order_product || null, status });
+      if (unit <= 0) missingCost.push({ order_id: Number(r.id), product: r.product_name || r.order_product || null, status });
       continue;
     }
     if (key === 'in_transit' || key === 'returning') {
@@ -199,6 +219,16 @@ function summarizeGoodsOut(rows = [], now = new Date()) {
   };
 }
 
+/* confirmed units off the stock count, per product (feeds the shelf's negative lines) */
+function confirmedUnitsByProduct(rows = []) {
+  const m = new Map();
+  for (const r of rows) {
+    if (BUCKETS[String(r.status ?? '').trim()] !== 'confirmed' || !r.product_id) continue;
+    m.set(String(r.product_id), (m.get(String(r.product_id)) || 0) + unitsOf(r));
+  }
+  return m;
+}
+
 /* ── pure: the total (only what is counted) ───────────────────────────────── */
 function total({ wallet, treasury, warehouse, out }) {
   const walletAmount = wallet && wallet.ok ? num(wallet.balance) : 0;
@@ -219,16 +249,16 @@ async function loadTreasury(businessId) {
   return { balance: r2(t.balance), last_entry_at: t.last_entry_at, entries: t.entries };
 }
 
-async function loadWarehouse(businessId) {
+async function loadProducts(businessId) {
   const { rows } = await pool.query(`
     SELECT id, name, stock_quantity, cost_price FROM products
      WHERE business_id = $1 AND COALESCE(stock_quantity, 0) <> 0`, [businessId]);
-  return summarizeWarehouse(rows);
+  return rows;
 }
 
 /* Every order whose units are off the stock count but not sold (not delivered),
    matched to its product exactly like the inventory hook does. */
-async function loadGoodsOut(businessId) {
+async function loadGoodsRows(businessId) {
   const { rows } = await pool.query(`
     SELECT o.id, btrim(o."Status") AS status, o.quantity, o.unit_cost_price,
            o."ProductName" AS order_product,
@@ -250,7 +280,7 @@ async function loadGoodsOut(businessId) {
      WHERE o.business_id = $1
        AND o.stock_deducted = true
        AND btrim(o."Status") <> 'تم التوصيل'`, [businessId]);
-  return summarizeGoodsOut(rows);
+  return rows;
 }
 
 /* Average Bosta fee charged on recent returns — only for the note under «مرتجعات»
@@ -291,13 +321,15 @@ async function loadHistory(businessId, days = 60) {
 /* fetchWallet() → { ok, balance, error } — injected by the route (the same Bosta
    wallet read the treasury page uses), so tests and previews never touch Bosta. */
 async function computeCapital({ businessId, fetchWallet }) {
-  const [wallet, treasury, warehouse, out, returnFee] = await Promise.all([
+  const [wallet, treasury, productRows, goodsRows, returnFee] = await Promise.all([
     Promise.resolve().then(fetchWallet).catch((err) => ({ ok: false, balance: null, error: err.message })),
     loadTreasury(businessId),
-    loadWarehouse(businessId),
-    loadGoodsOut(businessId),
+    loadProducts(businessId),
+    loadGoodsRows(businessId),
     loadReturnFee(businessId).catch(() => null),
   ]);
+  const out = summarizeGoodsOut(goodsRows);
+  const warehouse = summarizeWarehouse(productRows, confirmedUnitsByProduct(goodsRows));
   const t = total({ wallet, treasury, warehouse, out });
   const parts = {
     wallet:     wallet.ok ? r2(wallet.balance) : null,
@@ -308,8 +340,7 @@ async function computeCapital({ businessId, fetchWallet }) {
     returning:  out.returning.cost,
     other:      r2(out.other.reduce((s, b) => s + b.cost, 0)),
     not_counted: {
-      confirmed_no_goods: out.confirmed_unbacked.cost,
-      old_shipments:      r2(out.old.in_transit.cost + out.old.returning.cost),
+      old_shipments: r2(out.old.in_transit.cost + out.old.returning.cost),
     },
   };
   await saveSnapshot(businessId, t, parts).catch((err) => console.warn('[capital] snapshot not saved:', err.message));
@@ -337,5 +368,5 @@ async function computeCapital({ businessId, fetchWallet }) {
 
 module.exports = {
   STALE_DAYS, OLD_DAYS, DDL, ensureSchema, _markSchemaReadyForTests,
-  summarizeWarehouse, summarizeGoodsOut, total, cairoDay, computeCapital,
+  summarizeWarehouse, summarizeGoodsOut, confirmedUnitsByProduct, total, cairoDay, computeCapital,
 };

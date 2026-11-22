@@ -1659,6 +1659,8 @@ export interface CapitalItem {
   orders?:    number;
   unit_cost:  number;
   cost:       number;
+  /** a below-zero product: its line cancels confirmed units that have no goods */
+  negative?:  boolean;
 }
 
 export interface CapitalBucket {
@@ -1677,7 +1679,7 @@ export interface CapitalResponse {
   stale_days:   number;
   old_days:     number;
   total:        { money: number; goods: number; capital: number; complete: boolean };
-  /** confirmed orders whose product is out of stock — the goods don't exist yet (NOT counted) */
+  /** confirmed orders whose product is out of stock — counted in «confirmed», cancelled by the shelf's negative line */
   confirmed_unbacked: CapitalBucket;
   /** shipments / returns whose status hasn't moved for old_days (NOT counted) */
   old_shipments: { in_transit: CapitalBucket; returning: CapitalBucket };
@@ -1686,7 +1688,7 @@ export interface CapitalResponse {
   treasury:     { balance: number; last_entry_at: string | null; entries: number };
   warehouse:    { products: number; units: number; cost: number; items: CapitalItem[];
                   missing_cost: { product_id: string; name: string; units: number }[];
-                  negative: { product_id: string; name: string; units: number }[] };
+                  negative: { product_id: string; name: string; units: number; cancels_confirmed: number; gap: number }[] };
   confirmed:    CapitalBucket;
   in_transit:   CapitalBucket;
   returning:    CapitalBucket & { avg_return_fee: number | null; expected_return_fees: number | null };
