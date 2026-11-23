@@ -7,7 +7,7 @@ const test   = require('node:test');
 const assert = require('node:assert/strict');
 const cap    = require('./capital');
 
-test('the shelf = Σ stock × cost like the inventory page; a negative only cancels its confirmed units', () => {
+test('the shelf counts only goods that exist; the inventory page total (negatives included) is kept for reconciliation', () => {
   const w = cap.summarizeWarehouse([
     { id: 'a', name: 'داش كام', stock_quantity: 72, cost_price: '900.00' },
     { id: 'b', name: 'سوار', stock_quantity: 10, cost_price: 300 },
@@ -20,18 +20,20 @@ test('the shelf = Σ stock × cost like the inventory page; a negative only canc
   assert.equal(w.products, 3);
   assert.deepEqual(w.items.map((x) => x.name), ['داش كام', 'سوار', 'منتج بدون تكلفة']);
   assert.deepEqual(w.missing_cost, [{ product_id: 'c', name: 'منتج بدون تكلفة', units: 5 }]);
-  assert.deepEqual(w.negative, [{ product_id: 'd', name: 'سالب', units: -11, cancels_confirmed: 0, gap: 11 }], 'no confirmed orders → nothing to cancel, flagged as a gap');
+  assert.deepEqual(w.negative, [{ product_id: 'd', name: 'سالب', units: -11, unit_cost: 200, cost: -2200, no_goods_confirmed: 0, gap: 11 }], 'no confirmed orders → flagged as a gap');
+  assert.equal(w.inventory_page_total, 72 * 900 + 10 * 300 - 11 * 200, 'the inventory page subtracts the negatives');
 
-  /* the hair cap: −7 with 13 confirmed units → its line is −7 × cost, exactly what the inventory page subtracts */
+  /* the hair cap: −7 with 13 confirmed → nothing free on the shelf, 7 confirmed units have no goods */
   const w2 = cap.summarizeWarehouse([{ id: 'cap', name: 'كاب', stock_quantity: -7, cost_price: 850 }, { id: 'a', name: 'داش كام', stock_quantity: 2, cost_price: 900 }],
     new Map([['cap', 13]]));
-  assert.equal(w2.cost, 2 * 900 - 7 * 850);
-  assert.deepEqual(w2.negative, [{ product_id: 'cap', name: 'كاب', units: -7, cancels_confirmed: 7, gap: 0 }]);
-  assert.equal(w2.products, 1, 'a negative line is not a product on the shelf');
-  /* −10 with only 3 confirmed: cancels 3, the other 7 are a gap (never pulled below what exists) */
+  assert.equal(w2.cost, 2 * 900, 'a product below zero adds nothing to the shelf');
+  assert.equal(w2.inventory_page_total, 2 * 900 - 7 * 850);
+  assert.deepEqual(w2.negative, [{ product_id: 'cap', name: 'كاب', units: -7, unit_cost: 850, cost: -5950, no_goods_confirmed: 7, gap: 0 }]);
+  assert.equal(w2.products, 1);
+  /* −10 with only 3 confirmed: 3 confirmed have no goods, the other 7 are a recorded-stock gap */
   const w3 = cap.summarizeWarehouse([{ id: 'y', name: 'y', stock_quantity: -10, cost_price: 100 }], new Map([['y', 3]]));
-  assert.equal(w3.cost, -300);
-  assert.deepEqual(w3.negative[0], { product_id: 'y', name: 'y', units: -10, cancels_confirmed: 3, gap: 7 });
+  assert.equal(w3.cost, 0);
+  assert.deepEqual([w3.negative[0].no_goods_confirmed, w3.negative[0].gap], [3, 7]);
 });
 
 test('goods off the shelf: each status in its bucket, the order snapshot cost first', () => {
@@ -65,7 +67,7 @@ test('goods off the shelf: each status in its bucket, the order snapshot cost fi
   assert.deepEqual(g.missing_cost, [{ order_id: 5, product: 'منتج مش في المخزون', status: 'تم الشحن' }]);
 });
 
-test('confirmed orders beyond the shelf: all counted, the no-goods ones named and cancelled by the shelf', () => {
+test('confirmed orders beyond the shelf have no goods → counted nowhere (oldest confirmations are the covered ones)', () => {
   const now = new Date('2026-11-22T12:00:00Z');
   /* the hair cap: recorded stock −7, 13 confirmed orders of 1 unit → 6 really on the shelf */
   const cap13 = Array.from({ length: 13 }, (_, i) => ({
@@ -73,11 +75,12 @@ test('confirmed orders beyond the shelf: all counted, the no-goods ones named an
     product_id: 'cap', product_name: 'كاب', product_stock: -7, since: new Date(Date.UTC(2026, 10, 1 + i)).toISOString(),
   }));
   const g = cap.summarizeGoodsOut(cap13, now);
-  assert.equal(g.confirmed.units, 13);
-  assert.equal(g.confirmed.cost, 13 * 850);
+  assert.equal(g.confirmed.units, 6);
+  assert.equal(g.confirmed.cost, 6 * 850);
   assert.equal(g.confirmed_unbacked.units, 7);
   const shelf = cap.summarizeWarehouse([{ id: 'cap', name: 'كاب', stock_quantity: -7, cost_price: 850 }], cap.confirmedUnitsByProduct(cap13));
   assert.equal(shelf.cost + g.confirmed.cost, 6 * 850, 'shelf + confirmed = the 6 units physically there');
+  assert.equal(shelf.inventory_page_total + g.confirmed.cost + g.confirmed_unbacked.cost, 6 * 850, 'and the inventory page total reconciles: its −7 are exactly the 7 with no goods');
   assert.equal(g.confirmed_unbacked.cost, 7 * 850);
   assert.deepEqual(g.confirmed_unbacked.order_ids, [106, 107, 108, 109, 110, 111, 112], 'the 7 newest have no goods');
   assert.deepEqual(g.stock_gaps, []);
@@ -85,12 +88,12 @@ test('confirmed orders beyond the shelf: all counted, the no-goods ones named an
   /* one order of 2 units with only 1 on the shelf → split */
   const split = cap.summarizeGoodsOut([{ id: 1, status: 'تم التأكيد', quantity: 2, unit_cost_price: 100,
     product_id: 'x', product_name: 'x', product_stock: -1, since: now.toISOString() }], now);
-  assert.deepEqual([split.confirmed.units, split.confirmed_unbacked.units], [2, 1]);
+  assert.deepEqual([split.confirmed.units, split.confirmed_unbacked.units], [1, 1]);
 
   /* still below zero after the confirmed units → a recorded-stock gap */
   const gap = cap.summarizeGoodsOut([{ id: 2, status: 'تم التأكيد', quantity: 3, unit_cost_price: 100,
     product_id: 'y', product_name: 'y', product_stock: -10, since: now.toISOString() }], now);
-  assert.equal(gap.confirmed.units, 3);
+  assert.equal(gap.confirmed.units, 0);
   assert.equal(gap.confirmed_unbacked.units, 3);
   assert.deepEqual(gap.stock_gaps, [{ product_id: 'y', name: 'y', units_below_zero: 7 }]);
 

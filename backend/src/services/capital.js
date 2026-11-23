@@ -17,17 +17,17 @@
    The product of an order = the inventory hook's own match (exact SKU → exact name
    → alias, services/orderStatus.js resolveProductForOrder).
 
-   Owner review (2026-11-22/23):
+   Owner review (2026-11-22/23) — two things are NOT counted anywhere, shown apart:
    • confirmed orders with no goods behind them — confirming does not check the
-     shelf, so a product can go below zero. The shelf line is Σ stock × cost
-     exactly like the inventory page, negatives included: the negative line of
-     such a product cancels its confirmed units that have no goods (the oldest
-     confirmations are the covered ones), so they add nothing — and the page
-     names those orders.
-   • shipments / returns whose status has not moved for OLD_DAYS are NOT counted
-     and shown apart — not really on the road: mostly delivered (their cash is
-     already in the wallet / treasury, counting the goods too would count them
-     twice) or returned unrecorded.
+     shelf, so a product can go below zero. Units really on the shelf = recorded
+     stock + its confirmed units; the oldest confirmations are the covered ones,
+     the rest do not exist. The owner: "negative means it isn't in the warehouse
+     at all" — so they appear in neither the shelf nor «المتأكدة». The inventory
+     page's «إجمالي التكلفة» is lower by exactly those negatives (it subtracts
+     them); the page shows that reconciliation (inventory_page_total).
+   • shipments / returns whose status has not moved for OLD_DAYS — not really on
+     the road: mostly delivered (their cash is already in the wallet / treasury,
+     counting the goods too would count them twice) or returned unrecorded.
    ══════════════════════════════════════════════════════════════════════════ */
 'use strict';
 
@@ -65,27 +65,27 @@ const unitsOf = (r) => Math.max(1, Math.trunc(num(r.quantity) || 1));
 const timeOf = (v) => { const t = v ? new Date(v).getTime() : NaN; return Number.isFinite(t) ? t : 0; };
 
 /* ── pure: the shelf ──────────────────────────────────────────────────────────
-   Σ stock × cost — the SAME total as the inventory page («إجمالي التكلفة»),
-   negative stock included: a product below zero had more confirmed than it held,
-   and its negative line cancels exactly those confirmed units (which the
-   «متأكدة» line counts), so nothing is counted that isn't there. A negative
-   larger than the product's confirmed units (units shipped beyond recorded
-   stock — unrecorded purchases) is capped at −confirmed and flagged instead of
-   pulling capital below what physically exists.
+   Only goods that physically exist: products with stock above zero. A product
+   below zero has nothing free on the shelf (its few real units are reserved by
+   confirmed orders and counted in «المتأكدة»), so it adds 0 here.
+   inventory_page_total = Σ stock × cost over every product, negatives included —
+   the inventory page's «إجمالي التكلفة», for the reconciliation line.
    confirmedUnits: Map(product id → confirmed units off the stock count). */
 function summarizeWarehouse(products = [], confirmedUnits = new Map()) {
   const items = [];
   const missingCost = [];
   const negative = [];
+  let inventoryPage = 0;
   for (const p of products) {
     const qty = Math.trunc(num(p.stock_quantity));
     const unit = num(p.cost_price);
     if (qty === 0) continue;
+    inventoryPage += qty * unit;
     if (qty < 0) {
       const C = Math.trunc(num(confirmedUnits.get(String(p.id))));
-      const cancels = Math.min(-qty, C);                       // confirmed units with no goods
-      negative.push({ product_id: String(p.id), name: p.name, units: qty, cancels_confirmed: cancels, gap: -qty - cancels });
-      if (cancels > 0) items.push({ product_id: String(p.id), name: p.name, units: -cancels, unit_cost: r2(unit), cost: r2(-cancels * unit), negative: true });
+      const noGoods = Math.min(-qty, C);                       // confirmed units with no goods behind them
+      negative.push({ product_id: String(p.id), name: p.name, units: qty, unit_cost: r2(unit), cost: r2(qty * unit),
+        no_goods_confirmed: noGoods, gap: -qty - noGoods });
       continue;
     }
     if (unit <= 0) missingCost.push({ product_id: String(p.id), name: p.name, units: qty });
@@ -93,12 +93,13 @@ function summarizeWarehouse(products = [], confirmedUnits = new Map()) {
   }
   items.sort((a, b) => b.cost - a.cost || b.units - a.units);
   return {
-    products: items.filter((x) => !x.negative).length,
+    products: items.length,
     units:    items.reduce((s, x) => s + x.units, 0),
     cost:     r2(items.reduce((s, x) => s + x.cost, 0)),
     items,
     missing_cost: missingCost,
     negative,
+    inventory_page_total: r2(inventoryPage),
   };
 }
 
@@ -180,13 +181,12 @@ function summarizeGoodsOut(rows = [], now = new Date()) {
     const since = timeOf(r.since);
 
     if (key === 'confirmed') {
-      /* every confirmed unit is counted here; the ones with no goods behind them are
-         cancelled by their product's negative line on the shelf (summarizeWarehouse)
-         and reported apart so the owner sees which orders they are */
-      addTo(confirmed, r, units, unit);
+      /* only units that physically exist; the ones with no goods behind them are
+         not counted anywhere — listed apart so the owner sees which orders they are */
       const nb = unbackedUnits.get(Number(r.id)) || 0;
+      if (units - nb > 0) addTo(confirmed, r, units - nb, unit);
       if (nb > 0) addTo(unbacked, r, nb, unit);
-      if (unit <= 0) missingCost.push({ order_id: Number(r.id), product: r.product_name || r.order_product || null, status });
+      if (unit <= 0 && units - nb > 0) missingCost.push({ order_id: Number(r.id), product: r.product_name || r.order_product || null, status });
       continue;
     }
     if (key === 'in_transit' || key === 'returning') {
@@ -340,7 +340,8 @@ async function computeCapital({ businessId, fetchWallet }) {
     returning:  out.returning.cost,
     other:      r2(out.other.reduce((s, b) => s + b.cost, 0)),
     not_counted: {
-      old_shipments: r2(out.old.in_transit.cost + out.old.returning.cost),
+      confirmed_no_goods: out.confirmed_unbacked.cost,
+      old_shipments:      r2(out.old.in_transit.cost + out.old.returning.cost),
     },
   };
   await saveSnapshot(businessId, t, parts).catch((err) => console.warn('[capital] snapshot not saved:', err.message));

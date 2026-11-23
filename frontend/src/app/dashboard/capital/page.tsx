@@ -118,8 +118,7 @@ export default function CapitalPage() {
   const missingOrders = data?.missing_cost.orders ?? [];
   const missingProducts = data?.missing_cost.products ?? [];
   const negative = data?.warehouse.negative ?? [];
-  const negativeCancels = negative.reduce((s, p) => s + (p.cancels_confirmed || 0), 0);
-  const negativeCost = (data?.warehouse.items ?? []).filter((it) => it.negative).reduce((s, it) => s + it.cost, 0);
+  const negativeCost = negative.reduce((s, p) => s + p.cost, 0);   // what the inventory page subtracts
   const history = data?.history ?? [];
 
   return (
@@ -194,32 +193,27 @@ export default function CapitalPage() {
           <div className="text-xs font-bold text-indigo-700 dark:text-indigo-400 pt-2">البضاعة (بسعر التكلفة)</div>
           <Row
             sign="+" tone="goods" title="بضاعة في المخزن" amount={data.warehouse.cost}
-            desc={`رصيد المخزن × سعر التكلفة — نفس «إجمالي التكلفة» في صفحة إدارة المخزون (${data.warehouse.products} منتج عليها رصيد)`}
-            warn={negativeCancels > 0
-              ? `فيه منتجات رصيدها بالسالب (${fmt(negativeCost)}): اتأكد عليها ${negativeCancels} قطعة مكانش ليها بضاعة. السالب ده بيلغي قيمتهم من «المتأكدة» تحت، فمش محسوبين بضاعة.`
-              : undefined}
+            desc={`${data.warehouse.units} قطعة موجودة فعلًا في ${data.warehouse.products} منتج × سعر التكلفة`}
+            note={negative.length > 0
+              ? <>
+                  صفحة إدارة المخزون بتقول <b>{fmt(data.warehouse.inventory_page_total)}</b> لأنها بتطرح المنتجات اللي رصيدها بالسالب (<bdi dir="ltr">{fmt(negativeCost)}</bdi>):{' '}
+                  {negative.map((p, i) => (
+                    <span key={p.product_id}>{i > 0 ? '، ' : ''}{p.name} <bdi dir="ltr">({p.units})</bdi></span>
+                  ))}. السالب ده أوردرات اتأكدت والبضاعة مش موجودة أصلًا، فمش محسوبة هنا خالص:{' '}
+                  <bdi dir="ltr">{fmt(data.warehouse.cost)} − {fmt(-negativeCost)} = {fmt(data.warehouse.inventory_page_total)}</bdi>.
+                </>
+              : 'نفس «إجمالي التكلفة» في صفحة إدارة المخزون.'}
           >
             <ProductTable items={data.warehouse.items} />
           </Row>
           <Row
             sign="+" tone="goods" title="متأكدة لسه ما اتشحنتش" amount={data.confirmed.cost}
-            desc={`${data.confirmed.orders} أوردر · ${data.confirmed.units} قطعة اتأكدت واتخصمت من رصيد المخزن ولسه ما اتشحنتش × سعر التكلفة`}
+            desc={`${data.confirmed.orders} أوردر · ${data.confirmed.units} قطعة موجودة فعلًا على الرف (اتخصمت من رصيد المخزن ولسه ما اتشحنتش) × سعر التكلفة`}
             warn={data.confirmed_unbacked.orders > 0
-              ? `منهم ${data.confirmed_unbacked.orders} أوردر (${data.confirmed_unbacked.units} قطعة، ${fmt(data.confirmed_unbacked.cost)}) منتجهم خلصان — قيمتهم بتتلغي بالرصيد السالب في المخزن فوق، يعني مش محسوبين. محتاج تشتري بضاعتهم.`
+              ? `فيه ${data.confirmed_unbacked.orders} أوردر متأكد تاني (${data.confirmed_unbacked.units} قطعة) منتجه خلصان — مش محسوبين لأن البضاعة مش موجودة أصلًا. تفاصيلهم تحت في «مش محسوب».`
               : undefined}
           >
             <ProductTable items={data.confirmed.items} showOrders />
-            {data.confirmed_unbacked.orders > 0 && (
-              <div className="mt-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 p-3 text-xs text-amber-900 dark:text-amber-200">
-                <div className="font-semibold mb-1">الأوردرات اللي منتجها خلصان (الأحدث تأكيدًا):</div>
-                {data.confirmed_unbacked.items.map((it) => (
-                  <div key={`${it.product_id ?? it.name}`}>{it.name}: {it.units} قطعة</div>
-                ))}
-                {data.confirmed_unbacked.order_ids && (
-                  <div className="mt-1 break-words opacity-90">{data.confirmed_unbacked.order_ids.map((id) => `#${id}`).join('، ')}</div>
-                )}
-              </div>
-            )}
           </Row>
           <Row
             sign="+" tone="goods" title="في الطريق مع بوسطة" amount={data.in_transit.cost}
@@ -257,12 +251,21 @@ export default function CapitalPage() {
           </div>
 
           {/* Not counted — on purpose */}
-          {(data.old_shipments.in_transit.orders > 0 || data.old_shipments.returning.orders > 0) && (
+          {(data.confirmed_unbacked.orders > 0 || data.old_shipments.in_transit.orders > 0 || data.old_shipments.returning.orders > 0) && (
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-4 space-y-3">
               <div>
                 <div className="font-bold text-slate-800 dark:text-slate-100">مش محسوب في رأس المال (عن قصد)</div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">حاجات مكتوبة في السيستم بس حالتها مش معروفة.</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">حاجات مكتوبة في السيستم بس مش في إيدك فعلًا، أو حالتها مش معروفة.</div>
               </div>
+              {data.confirmed_unbacked.orders > 0 && (
+                <Row sign="" tone="goods" title="أوردرات متأكدة منتجها خلصان" amount={data.confirmed_unbacked.cost}
+                  desc={`${data.confirmed_unbacked.orders} أوردر · ${data.confirmed_unbacked.units} قطعة اتأكدت والبضاعة مش موجودة في المخزن أصلًا (عشان كده رصيد المنتج بالسالب). محتاج تشتريها الأول — الرقم ده تكلفتها التقريبية لما تشتريها.`}>
+                  <ProductTable items={data.confirmed_unbacked.items} showOrders />
+                  {data.confirmed_unbacked.order_ids && data.confirmed_unbacked.order_ids.length > 0 && (
+                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400 break-words">أرقام الأوردرات (الأحدث تأكيدًا): {data.confirmed_unbacked.order_ids.map((id) => `#${id}`).join('، ')}</div>
+                  )}
+                </Row>
+              )}
               {(data.old_shipments.in_transit.orders > 0 || data.old_shipments.returning.orders > 0) && (
                 <Row sign="" tone="goods" title={`شحنات حالتها واقفة من أكتر من ${data.old_days} يوم`}
                   amount={data.old_shipments.in_transit.cost + data.old_shipments.returning.cost}
