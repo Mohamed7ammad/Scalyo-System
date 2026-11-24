@@ -105,7 +105,7 @@ test('settings input: what the owner typed is checked before it is saved', () =>
   const bad = (body, existing, re) => assert.throws(() => db.cleanSettingsInput(body, existing), (e) => e.status === 400 && re.test(e.message));
   bad({}, null, /Phone number ID/);
   bad({ phone_number_id: 'abc' }, null, /أرقام بس/);
-  bad({ phone_number_id: '106540352242922', waba_id: '12ab' }, null, /Business Account ID/);
+  bad({ phone_number_id: '106540352242922', waba_id: '12ab' }, null, /Messaging account ID/);
   bad({ phone_number_id: '106540352242922', waba_id: '106540352242922', access_token: TOKEN }, null, /رقمين مختلفين/);
   bad({ phone_number_id: '106540352242922' }, null, /الزق التوكن/);
   bad({ phone_number_id: '106540352242922', access_token: 'EAA with spaces in it and more text here' }, null, /التوكن شكله/);
@@ -159,8 +159,11 @@ test('sendTemplate sends the official request shape and returns the message id',
   assert.equal(seen.url, `https://graph.facebook.com/${cloud.VERSION}/106540352242922/messages`);
   assert.equal(seen.opts.method, 'POST');
   assert.equal(seen.opts.headers.Authorization, `Bearer ${TOKEN}`);
-  assert.deepEqual(seen.body, { messaging_product: 'whatsapp', recipient_type: 'individual', to: '201001488462',
+  assert.deepEqual(seen.body, { messaging_product: 'whatsapp', recipient_type: 'individual', to: '+201001488462',
     type: 'template', template: { name: 'hello_world', language: { code: 'en_US' } } });
+  /* already international → sent as is */
+  await cloud.sendTemplate(SETTINGS, { to: '+201001488462', name: 'hello_world', language: 'en_US' });
+  assert.equal(seen.body.to, '+201001488462');
 });
 
 test('Meta errors come back as plain Arabic the owner can act on — never with the token', async () => {

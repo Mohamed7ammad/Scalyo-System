@@ -98,12 +98,16 @@ async function checkPhoneNumber(settings) {
     `${encodeURIComponent(settings.phone_number_id)}?fields=display_phone_number,verified_name,quality_rating`);
 }
 
-/** Send an approved template to one WhatsApp number ("2010…"). */
+/* Meta: without a leading "+", the BUSINESS number's country code is prepended
+   (a US test number would turn 2010… into +12010…). Always send "+2010…". */
+const withPlus = (to) => (String(to).startsWith('+') ? String(to) : `+${to}`);
+
+/** Send an approved template to one WhatsApp number ("2010…" or "+2010…"). */
 async function sendTemplate(settings, { to, name, language, components }) {
   const data = await graph(settings, 'POST', `${encodeURIComponent(settings.phone_number_id)}/messages`, {
     messaging_product: 'whatsapp',
     recipient_type:    'individual',
-    to,
+    to:                withPlus(to),
     type:              'template',
     template: {
       name,

@@ -86,8 +86,8 @@ function cleanSettingsInput(body = {}, existing = null) {
 
   if (!phoneNumberId) throw badRequest('اكتب الـ Phone number ID');
   if (!ID_RE.test(phoneNumberId)) throw badRequest('الـ Phone number ID أرقام بس (من صفحة API Setup على ميتا)');
-  if (wabaId && !ID_RE.test(wabaId)) throw badRequest('الـ WhatsApp Business Account ID أرقام بس');
-  if (wabaId && wabaId === phoneNumberId) throw badRequest('الـ Phone number ID والـ Business Account ID رقمين مختلفين — راجعهم من صفحة API Setup');
+  if (wabaId && !ID_RE.test(wabaId)) throw badRequest('الـ Messaging account ID أرقام بس');
+  if (wabaId && wabaId === phoneNumberId) throw badRequest('الـ Phone number ID والـ Messaging account ID رقمين مختلفين — راجعهم من صفحة API Setup');
   if (token && !TOKEN_RE.test(token)) throw badRequest('التوكن شكله مش مظبوط — انسخه كله من ميتا من غير مسافات');
   if (!token && !existing?.access_token) throw badRequest('الزق التوكن (Access token)');
   if (secret && !SECRET_RE.test(secret)) throw badRequest('الـ App secret المفروض 32 حرف ورقم (من صفحة Basic في App settings)');

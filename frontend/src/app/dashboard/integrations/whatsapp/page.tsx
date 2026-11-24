@@ -370,13 +370,13 @@ export default function WhatsAppPage() {
             <input value={phoneNumberId} onChange={(e) => setPhoneNumberId(e.target.value)} dir="ltr" inputMode="numeric"
               autoComplete="off" placeholder="106540352242922" className={`${inputCls} font-mono`} />
           </Field>
-          <Field label="WhatsApp Business Account ID" help="نفس الصفحة، تحت رقم التليفون">
+          <Field label="Messaging account ID" help={<>نفس الصفحة — ميتا بتسميه كمان <Path>WhatsApp Business Account ID</Path></>}>
             <input value={wabaId} onChange={(e) => setWabaId(e.target.value)} dir="ltr" inputMode="numeric"
               autoComplete="off" placeholder="102290129340398" className={`${inputCls} font-mono`} />
           </Field>
         </div>
         <Field label="Access token" saved={s.has_token ? s.token_hint : null}
-          help={<>التوكن الدائم من <Path>Business Settings → System users</Path>، بصلاحية <Path>whatsapp_business_messaging</Path> و <Path>whatsapp_business_management</Path></>}>
+          help={<>للتجربة: التوكن المؤقت من <Path>API Setup → Generate access token</Path> (بيخلص بعد ساعات). وبعدين الدائم من <Path>Business Settings → System users</Path>، بصلاحيات <Path>business_management</Path> و <Path>whatsapp_business_messaging</Path> و <Path>whatsapp_business_management</Path></>}>
           <input value={token} onChange={(e) => setToken(e.target.value)} dir="ltr" type={secretType}
             autoComplete="new-password" data-lpignore="true" data-1p-ignore spellCheck={false}
             placeholder={s.has_token ? '••••••••••••' : 'EAAG…'}
