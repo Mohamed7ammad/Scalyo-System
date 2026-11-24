@@ -1703,6 +1703,69 @@ export interface CapitalResponse {
 /** The owner's capital right now: Bosta wallet + treasury + goods at cost. Admin only. */
 export const getCapital = () => api.get<CapitalResponse>('/api/capital');
 
+/* ── «الربط مع واتساب» — WhatsApp Cloud API connection (owner only) ─── */
+/** What the page may know about the saved keys — never the token or the app secret themselves. */
+export interface WhatsAppSettings {
+  configured:       boolean;
+  phone_number_id:  string | null;
+  waba_id:          string | null;
+  has_token:        boolean;
+  token_hint:       string | null;   // "…ab12"
+  has_app_secret:   boolean;
+  app_secret_hint:  string | null;
+  verify_token:     string | null;   // goes into Meta's webhook settings
+  display_phone:    string | null;
+  verified_name:    string | null;
+  quality_rating:   string | null;   // GREEN | YELLOW | RED | UNKNOWN
+  last_check_at:    string | null;
+  last_check_error: string | null;
+  last_webhook_at:  string | null;
+  updated_at:       string | null;
+  updated_by:       string | null;
+}
+
+export type WhatsAppMessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed' | 'received';
+
+export interface WhatsAppMessage {
+  id:            number;
+  order_id:      number | null;
+  direction:     'out' | 'in';
+  kind:          string;            // test | confirm | reminder | button | text | …
+  phone:         string;            // "2010…"
+  template:      string | null;
+  wa_message_id: string | null;
+  status:        WhatsAppMessageStatus;
+  error_code:    number | null;
+  error_text:    string | null;
+  reply:         string | null;     // what the customer tapped / typed
+  created_by:    string | null;
+  created_at:    string;
+  status_at:     string | null;
+}
+
+export interface WhatsAppSettingsResponse {
+  settings:      WhatsAppSettings;
+  webhook_url:   string;
+  graph_version: string;
+  test_per_hour: number;
+  test_template: string;
+  messages:      WhatsAppMessage[];
+}
+
+export interface WhatsAppSettingsInput {
+  phone_number_id: string;
+  waba_id:         string;
+  access_token:    string;   // '' = keep the saved one
+  app_secret:      string;   // '' = keep the saved one
+}
+
+export const getWhatsAppSettings  = () => api.get<WhatsAppSettingsResponse>('/api/whatsapp/settings');
+export const saveWhatsAppSettings = (data: WhatsAppSettingsInput) =>
+  api.put<WhatsAppSettingsResponse>('/api/whatsapp/settings', data);
+export const checkWhatsApp        = () => api.post<{ ok: true; settings: WhatsAppSettings }>('/api/whatsapp/check');
+export const sendWhatsAppTest     = (phone: string) =>
+  api.post<{ ok: true; message: WhatsAppMessage }>('/api/whatsapp/test', { phone });
+
 /* ── Treasury ────────────────────────────────────────────────────── */
 export interface TreasuryTransaction {
   id:               number;

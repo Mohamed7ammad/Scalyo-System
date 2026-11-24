@@ -74,6 +74,8 @@ const returnPickupsRoutes     = require('./routes/returnPickups');
 const apiKeysRoutes           = require('./routes/apiKeys');
 const externalApiRoutes       = require('./routes/externalApi');
 const capitalRoutes           = require('./routes/capital');
+const whatsappRoutes          = require('./routes/whatsapp');
+const whatsappWebhookRoutes   = require('./routes/whatsappWebhook');
 const trackAction             = require('./middleware/trackAction');
 
 const app = express();
@@ -91,6 +93,9 @@ app.use(cors({
 /* gzip every JSON response over 1 KB — a page of 100 orders goes from ~91 KB
    to a fraction on the agents' phones (no streaming endpoints to protect). */
 app.use(compression({ threshold: 1024 }));
+/* Meta signs WhatsApp webhooks over the RAW body — this one route reads it itself,
+   so it is mounted before express.json() parses (and discards) the bytes. */
+app.use('/api/whatsapp/webhook', whatsappWebhookRoutes);
 app.use(express.json());
 
 app.use('/api/auth',             authRoutes);
@@ -121,6 +126,7 @@ app.use('/api/return-pickups',   returnPickupsRoutes);  // Bosta pickups/exchang
 app.use('/api/api-keys',         apiKeysRoutes);        // «مفاتيح API» — the owner creates / stops read-only keys
 app.use('/api/v1',               externalApiRoutes);    // READ-ONLY API for other systems (key auth) — docs/external-api.md
 app.use('/api/capital',          capitalRoutes);        // «رأس المال» — money + goods at cost (owner only)
+app.use('/api/whatsapp',         whatsappRoutes);       // «الربط مع واتساب» — Meta keys, test message, message log (owner only)
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
