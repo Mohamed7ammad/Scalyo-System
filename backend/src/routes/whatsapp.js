@@ -118,14 +118,22 @@ router.post('/test', authenticate, requireAdmin, async (req, res) => {
    events)? `subscribe: true` creates the link first. Never throws a Meta error
    upward: the answer says what Meta said. */
 async function accountLink(settings, { subscribe = false } = {}) {
-  if (!settings?.waba_id) return { linked: null, apps: [], error: 'اكتب الـ Messaging account ID في الخطوة 1 واحفظ' };
+  if (!settings?.waba_id) return { linked: null, app: null, apps: [], error: 'اكتب الـ Messaging account ID في الخطوة 1 واحفظ' };
   try {
     if (subscribe) await cloud.subscribeApp(settings);
-    const apps = await cloud.listSubscribedApps(settings);
-    return { linked: apps.length > 0, apps: apps.map((a) => a.name || a.id).filter(Boolean), error: null };
+    const [apps, own] = await Promise.all([cloud.listSubscribedApps(settings), cloud.ownApp(settings)]);
+    /* linked = OUR app is in the list. Meta's own «WA DevX Webhook Events» test app
+       is there on every new account and proves nothing. */
+    const mine = own.id ? apps.find((a) => a.id === own.id) : null;
+    return {
+      linked: own.id ? Boolean(mine) : null,
+      app:    own.name || null,
+      apps:   apps.filter((a) => a !== mine).map((a) => a.name || a.id).filter(Boolean),
+      error:  null,
+    };
   } catch (e) {
     if (!(e instanceof cloud.GraphError)) throw e;
-    return { linked: null, apps: [], error: e.message };
+    return { linked: null, app: null, apps: [], error: e.message };
   }
 }
 

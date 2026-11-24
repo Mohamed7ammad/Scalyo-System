@@ -133,10 +133,16 @@ async function listSubscribedApps(settings) {
   }));
 }
 
+/** The Meta app this token belongs to — "our" app in the subscribed list. */
+async function ownApp(settings) {
+  const data = await graph(settings, 'GET', 'app?fields=id,name');
+  return { id: data?.id ? String(data.id) : null, name: data?.name || null };
+}
+
 async function subscribeApp(settings) {
   const data = await graph(settings, 'POST', `${encodeURIComponent(settings.waba_id)}/subscribed_apps`);
   return data?.success === true;
 }
 
 module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, sendTemplate,
-  listSubscribedApps, subscribeApp, _setFetchForTests };
+  listSubscribedApps, subscribeApp, ownApp, _setFetchForTests };

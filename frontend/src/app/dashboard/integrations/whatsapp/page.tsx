@@ -289,7 +289,7 @@ export default function WhatsAppPage() {
       showToast(d.linked ? 'حساب الواتساب اتربط بالتطبيق ✓' : 'ميتا مأكدتش الربط — جرّب تاني', d.linked ? 'success' : 'error');
     } catch (e) {
       const msg = errMsg(e, 'تعذّر الربط');
-      setLink({ linked: null, apps: [], error: msg });
+      setLink({ linked: null, app: null, apps: [], error: msg });
       showToast(msg, 'error');
     } finally {
       setLinking(false);
@@ -506,10 +506,14 @@ export default function WhatsAppPage() {
               </div>
               {link?.linked === true && (
                 <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
-                  ✓ مربوط{link.apps.length ? <> — <bdi dir="ltr">{link.apps.join(', ')}</bdi></> : null}
+                  ✓ مربوط{link.app ? <> بتطبيق <bdi dir="ltr">{link.app}</bdi></> : null}
                 </p>
               )}
-              {link?.linked === false && <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">لسه مش مربوط — دوس «اربط دلوقتي».</p>}
+              {link?.linked === false && (
+                <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">
+                  لسه مش مربوط{link.app ? <> بتطبيق <bdi dir="ltr">{link.app}</bdi></> : null} — دوس «اربط دلوقتي».
+                </p>
+              )}
               {link?.error && <p className="text-xs text-red-600 dark:text-red-400 leading-relaxed">{link.error}</p>}
               {!s.waba_id && <p className="text-xs text-amber-700 dark:text-amber-300">اكتب الـ Messaging account ID في الخطوة 1 واحفظ الأول.</p>}
             </div>

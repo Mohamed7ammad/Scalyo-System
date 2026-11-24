@@ -208,6 +208,40 @@ test('account ↔ app link: list and subscribe use the Messaging account id', as
   assert.deepEqual(await cloud.listSubscribedApps(st), []);
 });
 
+test("account link counts only OUR app — Meta's own test app in the list proves nothing", async () => {
+  const express = require('express');
+  const storePath = require.resolve('./db');
+  const realStore = require.cache[storePath].exports;
+  const st = { ...SETTINGS, waba_id: '4058073467662975' };
+  require.cache[storePath].exports = { ...realStore, getSettings: async () => st };
+  const authPath = require.resolve('../../middleware/auth');
+  require(authPath);
+  const realAuth = require.cache[authPath].exports;
+  require.cache[authPath].exports = (req, _res, next) => { req.user = { id: 1, email: 'o@test', role: 'admin', roles: ['admin'], business_id: 1 }; next(); };
+  delete require.cache[require.resolve('../../routes/whatsapp')];
+  const router = require('../../routes/whatsapp');
+  require.cache[storePath].exports = realStore;
+  require.cache[authPath].exports = realAuth;
+
+  let subscribed = [{ whatsapp_business_api_data: { id: '111', name: 'WA DevX Webhook Events 1P App' } }];
+  cloud._setFetchForTests(async (url, opts) => {
+    let body;
+    if (url.includes('/app?')) body = { id: '777', name: 'Scalyo-MSG' };
+    else if (opts.method === 'POST') { subscribed = [...subscribed, { whatsapp_business_api_data: { id: '777', name: 'Scalyo-MSG' } }]; body = { success: true }; }
+    else body = { data: subscribed };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  });
+  const app = express();
+  app.use(express.json());
+  app.use('/api/whatsapp', router);
+  const server = await new Promise((r) => { const s = app.listen(0, () => r(s)); });
+  const call = async (method) => (await fetch(`http://127.0.0.1:${server.address().port}/api/whatsapp/account-link`, { method })).json();
+  try {
+    assert.deepEqual(await call('GET'), { linked: false, app: 'Scalyo-MSG', apps: ['WA DevX Webhook Events 1P App'], error: null });
+    assert.deepEqual(await call('POST'), { linked: true, app: 'Scalyo-MSG', apps: ['WA DevX Webhook Events 1P App'], error: null });
+  } finally { server.close(); }
+});
+
 /* ── the webhook route, end to end over HTTP (store stubbed) ───────────────── */
 
 test('webhook: handshake, signature, routing by phone number, 500 on a store error', async () => {

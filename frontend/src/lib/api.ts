@@ -1767,7 +1767,12 @@ export const sendWhatsAppTest     = (phone: string) =>
   api.post<{ ok: true; message: WhatsAppMessage }>('/api/whatsapp/test', { phone });
 
 /** Is the WhatsApp account linked to our Meta app, so Meta sends us its real events? */
-export interface WhatsAppAccountLink { linked: boolean | null; apps: string[]; error: string | null }
+export interface WhatsAppAccountLink {
+  linked: boolean | null;   // is OUR Meta app subscribed to the account?
+  app:    string | null;    // our app's name
+  apps:   string[];         // other apps subscribed to it (e.g. Meta's own test app)
+  error:  string | null;
+}
 export const getWhatsAppAccountLink  = () => api.get<WhatsAppAccountLink>('/api/whatsapp/account-link');
 export const linkWhatsAppAccount     = () => api.post<WhatsAppAccountLink>('/api/whatsapp/account-link');
 
