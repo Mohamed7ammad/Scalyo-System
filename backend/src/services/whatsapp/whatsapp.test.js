@@ -189,6 +189,25 @@ test('Meta errors come back as plain Arabic the owner can act on — never with 
   await assert.rejects(cloud.checkPhoneNumber({ phone_number_id: '1' }), (e) => e.code === 'missing_token');
 });
 
+test('account ↔ app link: list and subscribe use the Messaging account id', async () => {
+  const calls = [];
+  cloud._setFetchForTests(async (url, opts) => {
+    calls.push([opts.method, url]);
+    const body = opts.method === 'POST' ? { success: true }
+      : { data: [{ whatsapp_business_api_data: { id: '777', name: 'Scalyo-MSG', link: 'x' } }] };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  });
+  const st = { ...SETTINGS, waba_id: '4058073467662975' };
+  assert.equal(await cloud.subscribeApp(st), true);
+  assert.deepEqual(await cloud.listSubscribedApps(st), [{ id: '777', name: 'Scalyo-MSG' }]);
+  assert.deepEqual(calls, [
+    ['POST', `https://graph.facebook.com/${cloud.VERSION}/4058073467662975/subscribed_apps`],
+    ['GET',  `https://graph.facebook.com/${cloud.VERSION}/4058073467662975/subscribed_apps`],
+  ]);
+  cloud._setFetchForTests(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ data: [] }) }));
+  assert.deepEqual(await cloud.listSubscribedApps(st), []);
+});
+
 /* ── the webhook route, end to end over HTTP (store stubbed) ───────────────── */
 
 test('webhook: handshake, signature, routing by phone number, 500 on a store error', async () => {

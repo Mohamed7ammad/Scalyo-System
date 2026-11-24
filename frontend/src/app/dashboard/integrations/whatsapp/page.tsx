@@ -12,6 +12,9 @@ import {
   saveWhatsAppSettings,
   checkWhatsApp,
   sendWhatsAppTest,
+  getWhatsAppAccountLink,
+  linkWhatsAppAccount,
+  type WhatsAppAccountLink,
   type WhatsAppMessage,
   type WhatsAppSettingsResponse,
 } from '@/lib/api';
@@ -180,6 +183,8 @@ export default function WhatsAppPage() {
   const [testing, setTesting]     = useState(false);
   const [testError, setTestErr]   = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [link, setLink]         = useState<WhatsAppAccountLink | null>(null);
+  const [linking, setLinking]   = useState(false);
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type });
@@ -262,6 +267,32 @@ export default function WhatsAppPage() {
       setFormErr(errMsg(e, 'تعذّر الحفظ'));
     } finally {
       setSaving(false);
+    }
+  };
+
+  /* is the WhatsApp account linked to our Meta app? (asked once the keys are saved) */
+  const canAskLink = !!data?.settings.configured && !!data?.settings.waba_id;
+  useEffect(() => {
+    if (!canAskLink) { setLink(null); return; }
+    let off = false;
+    getWhatsAppAccountLink()
+      .then(({ data: d }) => { if (!off) setLink(d); })
+      .catch(() => { /* the button below still works */ });
+    return () => { off = true; };
+  }, [canAskLink, data?.settings.updated_at]);
+
+  const handleLink = async () => {
+    setLinking(true);
+    try {
+      const { data: d } = await linkWhatsAppAccount();
+      setLink(d);
+      showToast(d.linked ? 'حساب الواتساب اتربط بالتطبيق ✓' : 'ميتا مأكدتش الربط — جرّب تاني', d.linked ? 'success' : 'error');
+    } catch (e) {
+      const msg = errMsg(e, 'تعذّر الربط');
+      setLink({ linked: null, apps: [], error: msg });
+      showToast(msg, 'error');
+    } finally {
+      setLinking(false);
     }
   };
 
@@ -433,9 +464,10 @@ export default function WhatsAppPage() {
         ) : (
           <>
             <ol className="list-decimal pr-5 space-y-1 text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
-              <li>في صفحة التطبيق على ميتا: <Path>WhatsApp → Configuration</Path>.</li>
-              <li>عند <Path>Webhook</Path> دوس <Path>Edit</Path>، والزق العنوان والكلمة دول، ودوس <Path>Verify and save</Path>.</li>
-              <li>تحت <Path>Webhook fields</Path> فعّل <Path>messages</Path>.</li>
+              <li>في صفحة التطبيق على ميتا: «حالات الاستخدام» ثم «تخصيص» ثم «الخطوة 2. إعداد التشغيل»، وافتح سطر «تكوين Webhooks».</li>
+              <li>الزق العنوان والكلمة دول، ودوس «التحقق والحفظ».</li>
+              <li>في قايمة الحقول خلّي <Path>messages</Path> «مشترك».</li>
+              <li>ارجع هنا ودوس «اربط دلوقتي» تحت.</li>
             </ol>
             <Field label="Callback URL">
               <div className="flex flex-col sm:flex-row items-stretch gap-2">
@@ -457,6 +489,30 @@ export default function WhatsAppPage() {
             <p className={`text-sm font-semibold ${webhookWired ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-400'}`}>
               {webhookWired ? `✓ ميتا بتبعتلنا — آخر حاجة وصلت ${fmtAgo(s.last_webhook_at)}` : 'لسه موصلش حاجة من ميتا'}
             </p>
+            {/* the account ↔ app link: without it Meta sends its dashboard test only, never real events */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 space-y-2">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">ربط حساب الواتساب بالتطبيق</div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed mt-0.5">
+                    من غير الربط ده ميتا مش بتبعتلنا علامات «وصلت / اتقرت» ولا ردود العملاء.
+                  </p>
+                </div>
+                {link?.linked !== true && (
+                  <button type="button" onClick={handleLink} disabled={linking || !s.waba_id} className={`shrink-0 ${primaryBtn}`}>
+                    {linking ? 'بيربط…' : 'اربط دلوقتي'}
+                  </button>
+                )}
+              </div>
+              {link?.linked === true && (
+                <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                  ✓ مربوط{link.apps.length ? <> — <bdi dir="ltr">{link.apps.join(', ')}</bdi></> : null}
+                </p>
+              )}
+              {link?.linked === false && <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">لسه مش مربوط — دوس «اربط دلوقتي».</p>}
+              {link?.error && <p className="text-xs text-red-600 dark:text-red-400 leading-relaxed">{link.error}</p>}
+              {!s.waba_id && <p className="text-xs text-amber-700 dark:text-amber-300">اكتب الـ Messaging account ID في الخطوة 1 واحفظ الأول.</p>}
+            </div>
           </>
         )}
       </div>

@@ -114,4 +114,40 @@ router.post('/test', authenticate, requireAdmin, async (req, res) => {
   } catch (err) { fail(res, err, 'تعذّر إرسال رسالة التجربة'); }
 });
 
+/* Is the WhatsApp account linked to our Meta app (so Meta sends us its real
+   events)? `subscribe: true` creates the link first. Never throws a Meta error
+   upward: the answer says what Meta said. */
+async function accountLink(settings, { subscribe = false } = {}) {
+  if (!settings?.waba_id) return { linked: null, apps: [], error: 'اكتب الـ Messaging account ID في الخطوة 1 واحفظ' };
+  try {
+    if (subscribe) await cloud.subscribeApp(settings);
+    const apps = await cloud.listSubscribedApps(settings);
+    return { linked: apps.length > 0, apps: apps.map((a) => a.name || a.id).filter(Boolean), error: null };
+  } catch (e) {
+    if (!(e instanceof cloud.GraphError)) throw e;
+    return { linked: null, apps: [], error: e.message };
+  }
+}
+
+router.get('/account-link', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const settings = await store.getSettings(req.user.business_id);
+    if (!settings?.access_token) return res.status(400).json({ error: 'احفظ مفاتيح ميتا الأول' });
+    res.set('Cache-Control', 'no-store');
+    res.json(await accountLink(settings));
+  } catch (err) { fail(res, err, 'تعذّر فحص ربط حساب الواتساب'); }
+});
+
+router.post('/account-link', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const settings = await store.getSettings(req.user.business_id);
+    if (!settings?.access_token) return res.status(400).json({ error: 'احفظ مفاتيح ميتا الأول' });
+    const r = await accountLink(settings, { subscribe: true });
+    console.log(`[whatsapp] account-link by ${actor(req.user)} → linked=${r.linked}${r.error ? ' (error)' : ''}`);
+    res.set('Cache-Control', 'no-store');
+    if (r.error) return res.status(400).json({ error: r.error, ...r });
+    res.json(r);
+  } catch (err) { fail(res, err, 'تعذّر ربط حساب الواتساب بالتطبيق'); }
+});
+
 module.exports = router;

@@ -122,4 +122,21 @@ async function sendTemplate(settings, { to, name, language, components }) {
   };
 }
 
-module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, sendTemplate, _setFetchForTests };
+/* Meta only delivers a WhatsApp account's real events (delivery reports, customer
+   messages) to apps that account is SUBSCRIBED to — the dashboard's webhook
+   fields alone are not enough. These two read and create that link. */
+async function listSubscribedApps(settings) {
+  const data = await graph(settings, 'GET', `${encodeURIComponent(settings.waba_id)}/subscribed_apps`);
+  return (data?.data || []).map((a) => ({
+    id:   a?.whatsapp_business_api_data?.id ? String(a.whatsapp_business_api_data.id) : null,
+    name: a?.whatsapp_business_api_data?.name || null,
+  }));
+}
+
+async function subscribeApp(settings) {
+  const data = await graph(settings, 'POST', `${encodeURIComponent(settings.waba_id)}/subscribed_apps`);
+  return data?.success === true;
+}
+
+module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, sendTemplate,
+  listSubscribedApps, subscribeApp, _setFetchForTests };

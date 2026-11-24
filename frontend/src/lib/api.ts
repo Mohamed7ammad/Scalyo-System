@@ -1766,6 +1766,11 @@ export const checkWhatsApp        = () => api.post<{ ok: true; settings: WhatsAp
 export const sendWhatsAppTest     = (phone: string) =>
   api.post<{ ok: true; message: WhatsAppMessage }>('/api/whatsapp/test', { phone });
 
+/** Is the WhatsApp account linked to our Meta app, so Meta sends us its real events? */
+export interface WhatsAppAccountLink { linked: boolean | null; apps: string[]; error: string | null }
+export const getWhatsAppAccountLink  = () => api.get<WhatsAppAccountLink>('/api/whatsapp/account-link');
+export const linkWhatsAppAccount     = () => api.post<WhatsAppAccountLink>('/api/whatsapp/account-link');
+
 /* ── Treasury ────────────────────────────────────────────────────── */
 export interface TreasuryTransaction {
   id:               number;
