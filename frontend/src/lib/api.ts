@@ -1766,6 +1766,25 @@ export const checkWhatsApp        = () => api.post<{ ok: true; settings: WhatsAp
 export const sendWhatsAppTest     = (phone: string) =>
   api.post<{ ok: true; message: WhatsAppMessage }>('/api/whatsapp/test', { phone });
 
+/** One of our message templates + what Meta says about it (null = not submitted yet). */
+export interface WhatsAppTemplate {
+  key:      string;
+  name:     string;
+  title:    string;
+  when:     string;
+  language: string;
+  category: string;
+  body:     string;
+  preview:  string;      // the body with example values filled in
+  example:  string[];
+  buttons:  string[];
+  meta:     { status: string | null; category: string | null; rejected_reason: string | null } | null;
+}
+export interface WhatsAppTemplatesResponse { error: string | null; templates: WhatsAppTemplate[] }
+export const getWhatsAppTemplates   = () => api.get<WhatsAppTemplatesResponse>('/api/whatsapp/templates');
+export const submitWhatsAppTemplate = (key: string) =>
+  api.post<WhatsAppTemplatesResponse>(`/api/whatsapp/templates/${key}/submit`);
+
 /** Is the WhatsApp account linked to our Meta app, so Meta sends us its real events? */
 export interface WhatsAppAccountLink {
   linked: boolean | null;   // is OUR Meta app subscribed to the account?

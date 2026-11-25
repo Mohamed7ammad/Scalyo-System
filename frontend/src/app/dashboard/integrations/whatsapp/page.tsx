@@ -14,6 +14,10 @@ import {
   sendWhatsAppTest,
   getWhatsAppAccountLink,
   linkWhatsAppAccount,
+  getWhatsAppTemplates,
+  submitWhatsAppTemplate,
+  type WhatsAppTemplate,
+  type WhatsAppTemplatesResponse,
   type WhatsAppAccountLink,
   type WhatsAppMessage,
   type WhatsAppSettingsResponse,
@@ -133,6 +137,58 @@ function Field({ label, saved, help, children }: {
   );
 }
 
+/* What Meta says about a template, in the owner's words. */
+const TEMPLATE_STATUS: Record<string, { label: string; cls: string }> = {
+  APPROVED: { label: 'متوافق عليه ✓', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
+  PENDING:  { label: 'ميتا بتراجعه…', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+  REJECTED: { label: 'مرفوض ✗', cls: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
+  PAUSED:   { label: 'موقوف مؤقتًا', cls: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
+  DISABLED: { label: 'متعطّل', cls: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
+};
+const NOT_SENT = { label: 'لسه متبعتش لميتا', cls: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300' };
+
+function TemplateCard({ t, busy, canSubmit, onSubmit }: {
+  t: WhatsAppTemplate; busy: boolean; canSubmit: boolean; onSubmit: () => void;
+}) {
+  const st = t.meta ? (TEMPLATE_STATUS[t.meta.status ?? ''] ?? { label: t.meta.status ?? '—', cls: NOT_SENT.cls }) : NOT_SENT;
+  const marketing = t.meta?.category && t.meta.category !== 'UTILITY';
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-sm font-bold text-slate-900 dark:text-white">{t.title}</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400">{t.when}</div>
+        </div>
+        <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${st.cls}`}>{st.label}</span>
+      </div>
+      {/* the message as the customer reads it (example values) */}
+      <div className="rounded-2xl rounded-tr-sm bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/50 p-3 max-w-md">
+        <p dir="rtl" className="text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap leading-relaxed break-words">{t.preview}</p>
+        <div className="mt-3 pt-2 border-t border-emerald-200/70 dark:border-emerald-900/60 flex flex-col gap-1.5">
+          {t.buttons.map((b) => (
+            <span key={b} className="text-center text-sm font-semibold text-sky-700 dark:text-sky-300 bg-white dark:bg-slate-900
+              rounded-lg py-1.5 border border-slate-200 dark:border-slate-700">{b}</span>
+          ))}
+        </div>
+      </div>
+      <p className="text-[11px] text-slate-400">الاسم والمنتج والمبلغ والعنوان اللي فوق مثال — بيتبدّلوا ببيانات كل أوردر.</p>
+      {marketing && (
+        <p className="text-xs font-semibold text-red-600 dark:text-red-400 leading-relaxed">
+          ميتا صنّفت القالب ده «تسويق» مش «خدمة»، وده سعره أغلى — متستخدموش قبل ما نراجعه.
+        </p>
+      )}
+      {t.meta?.rejected_reason && (
+        <p className="text-xs text-red-600 dark:text-red-400">سبب الرفض من ميتا: <bdi dir="ltr">{t.meta.rejected_reason}</bdi></p>
+      )}
+      {!t.meta && (
+        <button type="button" onClick={onSubmit} disabled={busy || !canSubmit} className={`w-full sm:w-auto ${primaryBtn}`}>
+          {busy ? 'بيتبعت…' : 'ابعت لميتا للمراجعة'}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function MessageRow({ m }: { m: WhatsAppMessage }) {
   const st = STATUS[m.status] ?? STATUS.sent;
   const out = m.direction === 'out';
@@ -185,6 +241,8 @@ export default function WhatsAppPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [link, setLink]         = useState<WhatsAppAccountLink | null>(null);
   const [linking, setLinking]   = useState(false);
+  const [tpl, setTpl]           = useState<WhatsAppTemplatesResponse | null>(null);
+  const [tplBusy, setTplBusy]   = useState<string | null>(null);
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type });
@@ -280,6 +338,32 @@ export default function WhatsAppPage() {
       .catch(() => { /* the button below still works */ });
     return () => { off = true; };
   }, [canAskLink, data?.settings.updated_at]);
+
+  /* our message templates + what Meta says about each */
+  const loadTemplates = useCallback(async () => {
+    try {
+      const { data: d } = await getWhatsAppTemplates();
+      setTpl(d);
+    } catch (e) {
+      setTpl({ error: errMsg(e, 'تعذّر تحميل قوالب الرسايل'), templates: [] });
+    }
+  }, []);
+  useEffect(() => { loadTemplates(); }, [loadTemplates, data?.settings.updated_at]);
+
+  const handleSubmitTemplate = async (t: WhatsAppTemplate) => {
+    if (!window.confirm(`نبعت «${t.title}» لميتا تراجعها؟\n\nبعد الإرسال النص مش بيتعدّل — لو حبيت تغيّره بعدين بنعمل نسخة جديدة.`)) return;
+    setTplBusy(t.key);
+    try {
+      const { data: d } = await submitWhatsAppTemplate(t.key);
+      setTpl(d);
+      showToast('اتبعت لميتا ✓ المراجعة بتاخد من دقايق لـ 24 ساعة', 'success');
+    } catch (e) {
+      showToast(errMsg(e, 'تعذّر إرسال القالب'), 'error');
+      loadTemplates();
+    } finally {
+      setTplBusy(null);
+    }
+  };
 
   const handleLink = async () => {
     setLinking(true);
@@ -518,6 +602,33 @@ export default function WhatsAppPage() {
               {!s.waba_id && <p className="text-xs text-amber-700 dark:text-amber-300">اكتب الـ Messaging account ID في الخطوة 1 واحفظ الأول.</p>}
             </div>
           </>
+        )}
+      </div>
+
+      {/* 4 — message templates */}
+      <div className={card}>
+        <div className="flex items-center justify-between gap-3">
+          <StepTitle n={4} title="قوالب الرسايل" done={!!tpl?.templates.length && tpl.templates.every((t) => t.meta?.status === 'APPROVED')} />
+          <button type="button" onClick={loadTemplates}
+            className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700
+              text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">
+            تحديث
+          </button>
+        </div>
+        <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+          أي رسالة بنبدأ بيها الكلام مع العميل لازم ميتا تكون راجعت نصها الأول. دوس «ابعت لميتا للمراجعة» مرة واحدة لكل رسالة.
+          الإرسال للمراجعة مش بيبعت حاجة لأي عميل.
+        </p>
+        {tpl?.error && <p className="text-sm text-red-600 dark:text-red-400 leading-relaxed">{tpl.error}</p>}
+        {!tpl ? (
+          <p className="text-sm text-slate-400 py-4 text-center">بيحمّل…</p>
+        ) : (
+          <div className="space-y-3">
+            {tpl.templates.map((t) => (
+              <TemplateCard key={t.key} t={t} busy={tplBusy === t.key} canSubmit={!tpl.error && !tplBusy}
+                onSubmit={() => handleSubmitTemplate(t)} />
+            ))}
+          </div>
         )}
       </div>
 

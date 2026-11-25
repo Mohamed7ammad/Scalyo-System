@@ -12,6 +12,8 @@ const { requireAdmin } = require('../middleware/roleGuard');
 const store            = require('../services/whatsapp/db');
 const cloud            = require('../services/whatsapp/cloudApi');
 const { whatsappNumber } = require('../utils/phone');
+const templates        = require('../services/whatsapp/templates');
+const pool             = require('../config/db');
 
 const router = express.Router();
 
@@ -39,7 +41,9 @@ async function view(req, row) {
     graph_version: cloud.VERSION,
     test_per_hour: TEST_PER_HOUR,
     test_template: TEST_TEMPLATE.name,
-    messages:      await store.recentMessages(req.user.business_id, 30),
+    /* failures Meta reported later arrive in English — show the Arabic meaning (the raw text stays in the DB) */
+    messages:      (await store.recentMessages(req.user.business_id, 30))
+      .map((m) => (m.status === 'failed' ? { ...m, error_text: cloud.friendlyForCode(m.error_code, m.error_text) } : m)),
   };
 }
 
@@ -133,9 +137,65 @@ async function accountLink(settings, { subscribe = false } = {}) {
     };
   } catch (e) {
     if (!(e instanceof cloud.GraphError)) throw e;
-    return { linked: null, app: null, apps: [], error: e.message };
+    return { linked: null, app: null, apps: [], error: e.message, meta: `#${e.code}: ${String(e.metaMessage || '').slice(0, 160)}` };
   }
 }
+
+/* ── message templates (step 5): the approved texts + what Meta says about each ── */
+async function templateList(businessId, settings) {
+  const { rows: [bp] } = await pool.query('SELECT brand_name FROM business_profile WHERE id = $1', [businessId]);
+  const mine = templates.build(bp?.brand_name);
+  let onMeta = [];
+  let error = null;
+  if (!settings?.waba_id || !settings?.access_token) {
+    error = 'احفظ مفاتيح ميتا والـ Messaging account ID الأول';
+  } else {
+    try { onMeta = await cloud.listTemplates(settings); } catch (e) {
+      if (!(e instanceof cloud.GraphError)) throw e;
+      error = e.message;
+    }
+  }
+  return {
+    error,
+    templates: mine.map((t) => {
+      const m = onMeta.find((x) => x.name === t.name && x.language === t.language) || null;
+      return { ...t, preview: templates.preview(t),
+        meta: m ? { status: m.status, category: m.category, rejected_reason: m.rejected_reason } : null };
+    }),
+  };
+}
+
+router.get('/templates', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const settings = await store.getSettings(req.user.business_id);
+    res.set('Cache-Control', 'no-store');
+    res.json(await templateList(req.user.business_id, settings));
+  } catch (err) { fail(res, err, 'تعذّر تحميل قوالب الرسايل'); }
+});
+
+/* Send ONE of our templates to Meta for review. Creates nothing on our side and
+   messages no one; a template already on Meta is never submitted twice. */
+router.post('/templates/:key/submit', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  try {
+    const settings = await store.getSettings(businessId);
+    const before = await templateList(businessId, settings);
+    if (before.error) return res.status(400).json({ error: before.error });
+    const t = before.templates.find((x) => x.key === req.params.key);
+    if (!t) return res.status(404).json({ error: 'القالب ده مش موجود' });
+    if (t.meta) return res.status(409).json({ error: 'القالب ده متبعت لميتا قبل كده', ...before });
+    try {
+      const r = await cloud.createTemplate(settings, templates.toMetaPayload(t));
+      console.log(`[whatsapp] template ${t.name} submitted by ${actor(req.user)} → ${r.status} (${r.category})`);
+    } catch (e) {
+      if (!(e instanceof cloud.GraphError)) throw e;
+      console.warn(`[whatsapp] template ${t.name} refused: #${e.code} ${String(e.metaMessage || '').slice(0, 200)}`);
+      return res.status(400).json({ error: e.message });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json(await templateList(businessId, settings));
+  } catch (err) { fail(res, err, 'تعذّر إرسال القالب لميتا'); }
+});
 
 router.get('/account-link', authenticate, requireAdmin, async (req, res) => {
   try {
@@ -151,7 +211,7 @@ router.post('/account-link', authenticate, requireAdmin, async (req, res) => {
     const settings = await store.getSettings(req.user.business_id);
     if (!settings?.access_token) return res.status(400).json({ error: 'احفظ مفاتيح ميتا الأول' });
     const r = await accountLink(settings, { subscribe: true });
-    console.log(`[whatsapp] account-link by ${actor(req.user)} → linked=${r.linked}${r.error ? ' (error)' : ''}`);
+    console.log(`[whatsapp] account-link by ${actor(req.user)} → linked=${r.linked}${r.error ? ` (meta ${r.meta || 'error'})` : ''}`);
     res.set('Cache-Control', 'no-store');
     if (r.error) return res.status(400).json({ error: r.error, ...r });
     res.json(r);

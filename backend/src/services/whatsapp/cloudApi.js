@@ -12,14 +12,14 @@ let fetchImpl = (...a) => globalThis.fetch(...a);
 function _setFetchForTests(fn) { fetchImpl = fn; }
 
 const SAME_RATE = 'بعتنا رسايل كتير بسرعة — استنى شوية وجرّب تاني.';
-const NO_PERMISSION = 'التوكن ده مالوش صلاحية على واتساب — وانت بتعمله اختار whatsapp_business_messaging و whatsapp_business_management.';
+const NO_PERMISSION = 'التوكن مالوش صلاحية للعملية دي. اتأكد إن مستخدم النظام متعيّن له ٣ حاجات بتحكم كامل: التطبيق، ورقم الواتساب، وحساب المراسلة (Messaging account) — وإن التوكن فيه whatsapp_business_messaging و whatsapp_business_management.';
 
 /* Meta error code → what the owner should do. Unknown codes fall back to Meta's own text. */
 const FRIENDLY = {
   190:    'التوكن انتهى أو اتلغى — اعمل توكن جديد من ميتا والزقه هنا.',
   10:     NO_PERMISSION,
   200:    NO_PERMISSION,
-  100:    'ميتا رفضت الطلب لأن فيه رقم غلط — راجع الـ Phone number ID.',
+  100:    'ميتا مش لاقية الحساب أو الرقم ده بالتوكن الحالي: يا إما الـ ID مكتوب غلط، يا إما مستخدم النظام مش متعيّن له حساب المراسلة (Messaging account) بتحكم كامل.',
   4:      SAME_RATE,
   80007:  SAME_RATE,
   130429: SAME_RATE,
@@ -52,6 +52,11 @@ function friendlyMessage(code, metaMessage) {
   return metaMessage ? `ميتا ردّت: ${String(metaMessage).slice(0, 300)}` : 'ميتا رفضت الطلب من غير سبب واضح.';
 }
 
+/* A failure Meta reports later (webhook) carries only its code + English text. */
+function friendlyForCode(code, fallback) {
+  return code !== null && code !== undefined && FRIENDLY[code] ? FRIENDLY[code] : (fallback || null);
+}
+
 function toGraphError(httpStatus, err) {
   const code = Number.isInteger(err?.code) ? err.code : null;
   return new GraphError({
@@ -60,7 +65,7 @@ function toGraphError(httpStatus, err) {
     subcode:     err?.error_subcode ?? null,
     details:     err?.error_data?.details ?? null,
     httpStatus,
-    metaMessage: err?.message ?? null,
+    metaMessage: err?.error_user_msg || err?.message || null,
   });
 }
 
@@ -139,10 +144,26 @@ async function ownApp(settings) {
   return { id: data?.id ? String(data.id) : null, name: data?.name || null };
 }
 
+/* Message templates on the Messaging account: what Meta has, and submit a new one. */
+async function listTemplates(settings) {
+  const data = await graph(settings, 'GET',
+    `${encodeURIComponent(settings.waba_id)}/message_templates?fields=name,status,category,language,rejected_reason&limit=200`);
+  return (data?.data || []).map((t) => ({
+    id: t.id ? String(t.id) : null, name: t.name, status: t.status || null, category: t.category || null,
+    language: t.language || null,
+    rejected_reason: t.rejected_reason && t.rejected_reason !== 'NONE' ? t.rejected_reason : null,
+  }));
+}
+
+async function createTemplate(settings, payload) {
+  const data = await graph(settings, 'POST', `${encodeURIComponent(settings.waba_id)}/message_templates`, payload);
+  return { id: data?.id ? String(data.id) : null, status: data?.status || null, category: data?.category || null };
+}
+
 async function subscribeApp(settings) {
   const data = await graph(settings, 'POST', `${encodeURIComponent(settings.waba_id)}/subscribed_apps`);
   return data?.success === true;
 }
 
 module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, sendTemplate,
-  listSubscribedApps, subscribeApp, ownApp, _setFetchForTests };
+  listSubscribedApps, subscribeApp, ownApp, listTemplates, createTemplate, friendlyForCode, _setFetchForTests };
