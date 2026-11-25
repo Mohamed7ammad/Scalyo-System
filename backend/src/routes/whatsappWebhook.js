@@ -6,12 +6,14 @@
 
    Answers 200 only after the events are stored; on a database error it answers
    500 so Meta delivers again (stored ids make a repeat harmless).
-   Step 2: events are only RECORDED — no order changes here yet. */
+   A customer's tap / message is then handed to services/whatsapp/engine.js,
+   which changes the order only through services/orderStatus.js. */
 'use strict';
 
 const express = require('express');
 const store   = require('../services/whatsapp/db');
 const { matchSigners, parseEvents } = require('../services/whatsapp/webhook');
+const engine  = require('../services/whatsapp/engine');
 
 const router = express.Router();
 
@@ -62,9 +64,15 @@ router.post('/', express.raw({ type: () => true, limit: '1mb' }), async (req, re
       const owner = signers.find((s) => String(s.phone_number_id) === ev.phone_number_id);
       if (!owner) continue;                    // not this app's number → ignore
       if (ev.type === 'status') {
-        if (await store.applyStatus(owner.business_id, ev)) stored += 1;
+        if (await store.applyStatus(owner.business_id, ev)) {
+          stored += 1;
+          /* our confirmation could not be delivered → the held order goes to the agents now */
+          if (ev.status === 'failed') await engine.handleFailedStatus(owner.business_id, ev.wa_message_id);
+        }
       } else if (await store.recordInbound(owner.business_id, ev)) {
         stored += 1;
+        /* stored once (Meta may repeat a delivery) → acted on once. Never throws. */
+        await engine.handleInbound(owner.business_id, ev);
       }
     }
     /* a correctly signed delivery proves the Callback URL is wired, even Meta's

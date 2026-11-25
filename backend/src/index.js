@@ -13,6 +13,7 @@ const { startDeliveryRateBackfillCron } = require('./cron/deliveryRateBackfill')
 const { startEasyOrderRateCron } = require('./cron/easyOrderRate');
 const { startAgentDisciplineCron } = require('./cron/agentDiscipline');
 const { startPostponedCallbacksCron } = require('./cron/postponedCallbacks');
+const { startWhatsappFlowCron } = require('./cron/whatsappFlow');
 const pool                    = require('./config/db');
 const { initTenancy }         = require('./config/initTenancy');
 
@@ -164,6 +165,9 @@ app.listen(PORT, async () => {
     startAgentDisciplineCron();
     /* «مؤجل» callbacks: 11:30 rebalance away from absent agents, 23:05 expiry → «لا يرد». */
     startPostponedCallbacksCron();
+    /* WhatsApp order confirmation: sends, 30-min hold release, reminders, watchdog.
+       Does nothing while «الربط مع واتساب» → التشغيل is off (the default). */
+    startWhatsappFlowCron();
   } else {
     console.log(`⚠️ [CRON] NODE_ENV="${process.env.NODE_ENV ?? '(unset)'}" (not "production") → ALL cron jobs DISABLED (Sheets sync, Bosta enrich/reconcile, Meta, Taager, staff alerts). This is the safe local-dev default — set NODE_ENV=production ONLY on the server.`);
   }

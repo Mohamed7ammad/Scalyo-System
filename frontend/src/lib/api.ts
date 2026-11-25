@@ -18,6 +18,8 @@ export interface Order {
   FullName: string;
   Phone: string;
   DeliveryRate: string;
+  /** 'whatsapp' when the customer confirmed the order themselves on WhatsApp (no agent, no commission). */
+  confirmed_via?: string | null;
   /** EasyOrder's customer rating (high / moderate / low / unknown), null until it arrives. */
   easyorder_rate?: string | null;
   City: string;
@@ -1765,6 +1767,47 @@ export const saveWhatsAppSettings = (data: WhatsAppSettingsInput) =>
 export const checkWhatsApp        = () => api.post<{ ok: true; settings: WhatsAppSettings }>('/api/whatsapp/check');
 export const sendWhatsAppTest     = (phone: string) =>
   api.post<{ ok: true; message: WhatsAppMessage }>('/api/whatsapp/test', { phone });
+
+/* ── WhatsApp order confirmation — the automation switch + the flow diary ── */
+export type WhatsAppAutoMode = 'off' | 'test' | 'on';
+export interface WhatsAppFlowRow {
+  order_id:         number;
+  phone:            string;
+  state:            'pending' | 'sending' | 'waiting' | 'released' | 'done';
+  variant:          string;
+  is_test:          boolean;
+  send_at:          string;
+  sent_at:          string | null;
+  hold_until:       string | null;
+  reminders_done:   number;
+  messages_sent:    number;
+  customer_replied: boolean;
+  released_at:      string | null;
+  release_reason:   string | null;
+  tag:              string | null;
+  customer_text:    string | null;
+  outcome:          string | null;
+  last_error:       string | null;
+  created_at:       string;
+  order_status:     string | null;
+  product:          string | null;
+  holder:           string | null;
+  confirmed_via:    string | null;
+}
+export interface WhatsAppAutoResponse {
+  auto_mode:      WhatsAppAutoMode;
+  test_phones:    string[];      // "2010…"
+  split_test:     boolean;
+  configured:     boolean;
+  live_mode_open: boolean;
+  rules: { hold_status: string; send_delay_min: number; send_delay_b_min: number; hold_min: number;
+           reminder1_min: number; reminder2_min: number; quiet_until_hour: number };
+  tags:  Record<string, string>;
+  flows: WhatsAppFlowRow[];
+}
+export const getWhatsAppAuto  = () => api.get<WhatsAppAutoResponse>('/api/whatsapp/auto');
+export const saveWhatsAppAuto = (data: { auto_mode: WhatsAppAutoMode; test_phones: string[]; split_test: boolean }) =>
+  api.put<WhatsAppAutoResponse>('/api/whatsapp/auto', data);
 
 /** One of our message templates + what Meta says about it (null = not submitted yet). */
 export interface WhatsAppTemplate {

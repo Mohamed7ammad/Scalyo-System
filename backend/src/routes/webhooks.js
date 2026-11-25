@@ -4,6 +4,7 @@ const pool    = require('../config/db');
 const { recordSafqaOrder, updateSafqaStatusByPhone, adoptOrphanByPhoneProduct } = require('../services/externalAffiliate');
 const { extractReferralCode, resolveMarketerCode } = require('../utils/referral');
 const attribution = require('../services/attribution');
+const whatsappEngine = require('../services/whatsapp/engine');
 
 /* Tenant's known media-buyer referral codes (users.referral_code). Used to
    resolve an EasyOrder utm_campaign → a canonical marketer at ingest. Returns
@@ -425,19 +426,25 @@ async function ingestEasyOrder(body, businessId, planType = 'ecommerce') {
   ).trim();
   const externalId = realId || buildFallbackKey(body);
 
+  /* WhatsApp confirmation (services/whatsapp/engine.js): when it is switched on
+     for this customer's number, the order starts as «بانتظار واتساب» with no
+     agent, and reaches the agents when the hold ends. null (switched off, not a
+     mobile, any error) → exactly the old path. */
+  const waPlan = await whatsappEngine.planForNewOrder(businessId, f.Phone);
+
   const result = await pool.query(
     `INSERT INTO orders
        ("FullName", "Phone", "DeliveryRate", "City", "Address", "Note", "Status",
         "ProductName", "ProductPrice", "sku", "quantity", external_order_id,
         referral_code, order_source, business_id)
-     VALUES ($1, $2, 'بدون', $3, $4, $5, 'جديد',
+     VALUES ($1, $2, 'بدون', $3, $4, $5, $13,
              $6, $7, $8, $9, $10, $11, 'easyorder', $12)
      ON CONFLICT (external_order_id, business_id) WHERE external_order_id IS NOT NULL
      DO NOTHING
      RETURNING *`,
     [f.FullName, f.Phone, f.City || null, f.Address || null, f.Note || null,
      f.ProductName, f.ProductPrice, f.sku || null, Math.max(1, parseInt(f.quantity, 10) || 1),
-     externalId, f.referral_code || null, businessId]
+     externalId, f.referral_code || null, businessId, waPlan ? waPlan.holdStatus : 'جديد']
   );
 
   if (result.rows.length === 0) {
@@ -452,6 +459,17 @@ async function ingestEasyOrder(body, businessId, planType = 'ecommerce') {
      /api/v1). Fire-and-forget with its own catch: never delays or breaks the order. */
   attribution.recordEasyOrder(newOrder.id, businessId, body)
     .catch((err) => console.warn(`[attribution] order #${newOrder.id}:`, err.message));
+
+  /* Held for WhatsApp: no agent yet — the flow assigns it when the hold ends. If
+     it could not be enrolled, it is released right here so it is never stranded. */
+  if (waPlan) {
+    if (await whatsappEngine.enrollNewOrder(newOrder, waPlan)) {
+      return { ok: true, status: 201, payload: { success: true, order: newOrder } };
+    }
+    await whatsappEngine.releaseOrder(businessId, newOrder.id, 'enroll_failed');
+    const { rows: [fresh] } = await pool.query('SELECT * FROM orders WHERE id = $1 AND business_id = $2', [newOrder.id, businessId]);
+    return { ok: true, status: 201, payload: { success: true, order: fresh || newOrder } };
+  }
 
   /* Auto-assign: weighted round-robin by the admin's saved percentages, falling
      back to least-loaded. Done before responding so the returned order carries
@@ -657,3 +675,4 @@ router.post('/safqa/:businessId', async (req, res) => {
 module.exports = router;
 /* Exposed for unit tests / reuse (does not affect the router mount). */
 module.exports.calcExactCommission = calcExactCommission;
+module.exports.autoAssignOrder = autoAssignOrder;   // the WhatsApp flow assigns a held order when it is released

@@ -18,7 +18,9 @@ const EASY_RESULTS = ['high', 'moderate', 'low', 'unknown'];
 /* The only orders whose customer is looked up — from EITHER source (owner,
    2026-11-20): new orders and no-answer ones (مراجعة جديدة = a no-answer order
    handed to a review account). A confirmed / closed order is never looked up. */
-const RATE_STATUSES = ['جديد', 'لا يرد', 'مراجعة جديدة'];
+/* «بانتظار واتساب» = held for the customer's WhatsApp answer (services/whatsapp/flow.js):
+   a «ضعيف» rating must be known BEFORE their tap may confirm the order. */
+const RATE_STATUSES = ['جديد', 'لا يرد', 'مراجعة جديدة', 'بانتظار واتساب'];
 
 /* EasyOrder rating object from an order (or null if it isn't there yet). */
 function easyOrderRateOf(order) {

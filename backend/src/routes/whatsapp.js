@@ -13,6 +13,9 @@ const store            = require('../services/whatsapp/db');
 const cloud            = require('../services/whatsapp/cloudApi');
 const { whatsappNumber } = require('../utils/phone');
 const templates        = require('../services/whatsapp/templates');
+const flows            = require('../services/whatsapp/flowStore');
+const flowRules        = require('../services/whatsapp/flow');
+const { whatsappNumbers } = require('../utils/phone');
 const pool             = require('../config/db');
 
 const router = express.Router();
@@ -216,6 +219,72 @@ router.post('/account-link', authenticate, requireAdmin, async (req, res) => {
     if (r.error) return res.status(400).json({ error: r.error, ...r });
     res.json(r);
   } catch (err) { fail(res, err, 'تعذّر ربط حساب الواتساب بالتطبيق'); }
+});
+
+/* ── the automation switch (step 6): off | test | on ─────────────────────────
+   test = only orders whose customer number is in the owner's test list enter
+   the flow; every other order is untouched. */
+const LIVE_MODE_OPEN = false;   // part C of the roadmap opens it
+
+async function autoView(businessId) {
+  const auto = await flows.getAuto(businessId);
+  return {
+    auto_mode:   auto.auto_mode,
+    test_phones: auto.test_phones,
+    split_test:  auto.split_test,
+    configured:  auto.configured,
+    live_mode_open: LIVE_MODE_OPEN,
+    rules: {
+      hold_status:      flowRules.HOLD_STATUS,
+      send_delay_min:   flowRules.DEFAULTS.send_delay_min,
+      send_delay_b_min: flowRules.DEFAULTS.send_delay_b_min,
+      hold_min:         flowRules.DEFAULTS.hold_min,
+      reminder1_min:    flowRules.DEFAULTS.reminder1_min,
+      reminder2_min:    flowRules.DEFAULTS.reminder2_min,
+      quiet_until_hour: flowRules.DEFAULTS.quiet_until_hour,
+    },
+    tags:  flowRules.TAGS,
+    flows: await flows.recentFlows(businessId, 30),
+  };
+}
+
+router.get('/auto', authenticate, requireAdmin, async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json(await autoView(req.user.business_id));
+  } catch (err) { fail(res, err, 'تعذّر تحميل إعدادات التشغيل'); }
+});
+
+router.put('/auto', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  try {
+    const mode = String(req.body?.auto_mode || '');
+    if (mode === 'on' && !LIVE_MODE_OPEN) {
+      return res.status(400).json({ error: 'التشغيل على كل العملاء بيتفتح بعد أسبوع التجربة' });
+    }
+    /* phones as the owner types them (010…), stored as WhatsApp numbers (2010…) */
+    const raw = Array.isArray(req.body?.test_phones) ? req.body.test_phones : [];
+    const phones = [];
+    for (const p of raw) {
+      const found = whatsappNumbers(p);
+      if (!found.length && String(p).trim()) return res.status(400).json({ error: `«${String(p).slice(0, 20)}» مش رقم موبايل مصري صحيح` });
+      phones.push(...found);
+    }
+    if (mode !== 'off') {
+      /* never switch on before Meta approved both messages */
+      const settings = await store.getSettings(businessId);
+      const list = await templateList(businessId, settings);
+      if (list.error) return res.status(400).json({ error: list.error });
+      const pending = list.templates.filter((t) => t.meta?.status !== 'APPROVED');
+      if (pending.length) {
+        return res.status(400).json({ error: `ميتا لسه موافقتش على: ${pending.map((t) => t.title).join('، ')} — استنى الموافقة الأول` });
+      }
+    }
+    const saved = await flows.saveAuto(businessId, { auto_mode: mode, test_phones: phones, split_test: req.body?.split_test === true }, actor(req.user));
+    console.log(`[whatsapp] automation set to "${saved.auto_mode}" by ${actor(req.user)} (${saved.test_phones.length} test number(s), split=${saved.split_test})`);
+    res.set('Cache-Control', 'no-store');
+    res.json(await autoView(businessId));
+  } catch (err) { fail(res, err, 'تعذّر حفظ إعدادات التشغيل'); }
 });
 
 module.exports = router;

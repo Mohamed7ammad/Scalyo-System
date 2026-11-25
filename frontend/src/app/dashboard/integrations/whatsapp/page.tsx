@@ -15,6 +15,11 @@ import {
   getWhatsAppAccountLink,
   linkWhatsAppAccount,
   getWhatsAppTemplates,
+  getWhatsAppAuto,
+  saveWhatsAppAuto,
+  type WhatsAppAutoMode,
+  type WhatsAppAutoResponse,
+  type WhatsAppFlowRow,
   submitWhatsAppTemplate,
   type WhatsAppTemplate,
   type WhatsAppTemplatesResponse,
@@ -189,6 +194,66 @@ function TemplateCard({ t, busy, canSubmit, onSubmit }: {
   );
 }
 
+/* What happened to one order in the WhatsApp flow, in the owner's words. */
+const RELEASE_REASON: Record<string, string> = {
+  timeout:      'مردّش في نص ساعة — نزل للبنات',
+  no_whatsapp:  'الرقم مالوش واتساب — نزل للبنات',
+  undelivered:  'الرسالة موصلتش — نزل للبنات',
+  send_failed:  'الرسالة متبعتتش — نزل للبنات',
+  deposit:      'أكد، بس محتاج عربون — نزل للبنات',
+  cancel:       'عايز يلغي — نزل للبنات',
+  support:      'طلب الدعم — نزل للبنات',
+  late:         'الإرسال اتأخر — نزل للبنات من غير رسالة',
+  switched_off: 'التشغيل اتقفل — نزل للبنات',
+  moved:        'اتغيّرت حالته قبل الإرسال',
+  no_amount:    'مفيش مبلغ في الأوردر — نزل للبنات',
+  no_product:   'مفيش منتج في الأوردر — نزل للبنات',
+  stuck:        'الإرسال وقف — نزل للبنات',
+  watchdog:     'اتأخر في الحجز — نزل للبنات',
+  enroll_failed: 'متسجّلش — نزل للبنات',
+};
+const fmtClock = (iso: string | null) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : d.toLocaleTimeString('ar-EG-u-nu-latn', { hour: 'numeric', minute: '2-digit', timeZone: 'Africa/Cairo' });
+};
+function flowLabel(f: WhatsAppFlowRow): { text: string; cls: string } {
+  const grey  = 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+  const amber = 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300';
+  const green = 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300';
+  if (f.outcome === 'confirmed') return { text: 'العميل أكد على واتساب ✓', cls: green };
+  if (f.state === 'pending') return { text: `الرسالة هتتبعت ${fmtClock(f.send_at)}`, cls: grey };
+  if (f.state === 'sending') return { text: 'بتتبعت…', cls: grey };
+  if (f.state === 'waiting') return { text: `اتبعتت — محجوز لحد ${fmtClock(f.hold_until)}`, cls: 'bg-lime-100 text-lime-800 dark:bg-lime-900/40 dark:text-lime-300' };
+  return { text: RELEASE_REASON[f.release_reason ?? ''] ?? 'نزل للبنات', cls: amber };
+}
+
+function FlowRow({ f, tags }: { f: WhatsAppFlowRow; tags: Record<string, string> }) {
+  const st = flowLabel(f);
+  return (
+    <li className="py-3 space-y-1.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="text-sm font-bold text-slate-900 dark:text-white">أوردر #{f.order_id}</span>
+        <bdi dir="ltr" className="font-mono text-xs text-slate-500 dark:text-slate-400">{localPhone(f.phone)}</bdi>
+        {f.is_test && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">تجربة</span>}
+        <span className="text-[11px] text-slate-400 mr-auto">{fmtAgo(f.created_at)}</span>
+      </div>
+      {f.product && <p className="text-xs text-slate-500 dark:text-slate-400 break-words">{f.product}</p>}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${st.cls}`}>{st.text}</span>
+        {f.tag && tags[f.tag] && (
+          <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">{tags[f.tag]}</span>
+        )}
+        {f.order_status && <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">الحالة دلوقتي: {f.order_status}</span>}
+        {f.holder && <span className="text-[11px] text-violet-600 dark:text-violet-400">مع {f.holder.split('@')[0]}</span>}
+        {f.messages_sent > 1 && <span className="text-[11px] text-slate-400">{f.messages_sent} رسايل</span>}
+      </div>
+      {f.customer_text && <p className="text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words">العميل كتب: «{f.customer_text}»</p>}
+      {f.last_error && <p className="text-xs text-red-600 dark:text-red-400 break-words" dir="ltr">{f.last_error}</p>}
+    </li>
+  );
+}
+
 function MessageRow({ m }: { m: WhatsAppMessage }) {
   const st = STATUS[m.status] ?? STATUS.sent;
   const out = m.direction === 'out';
@@ -243,6 +308,11 @@ export default function WhatsAppPage() {
   const [linking, setLinking]   = useState(false);
   const [tpl, setTpl]           = useState<WhatsAppTemplatesResponse | null>(null);
   const [tplBusy, setTplBusy]   = useState<string | null>(null);
+  const [auto, setAuto]         = useState<WhatsAppAutoResponse | null>(null);
+  const [autoMode, setAutoMode] = useState<WhatsAppAutoMode>('off');
+  const [autoPhones, setAutoPhones] = useState('');
+  const [autoSaving, setAutoSaving] = useState(false);
+  const [autoError, setAutoErr] = useState('');
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type });
@@ -338,6 +408,43 @@ export default function WhatsAppPage() {
       .catch(() => { /* the button below still works */ });
     return () => { off = true; };
   }, [canAskLink, data?.settings.updated_at]);
+
+  /* the automation switch + what happened to each order in the flow */
+  const applyAuto = useCallback((d: WhatsAppAutoResponse, withForm: boolean) => {
+    setAuto(d);
+    if (withForm) {
+      setAutoMode(d.auto_mode);
+      setAutoPhones(d.test_phones.map((x) => (/^201[0125]\d{8}$/.test(x) ? `0${x.slice(2)}` : x)).join('\n'));
+    }
+  }, []);
+  const loadAuto = useCallback(async (withForm: boolean) => {
+    try {
+      const { data: d } = await getWhatsAppAuto();
+      applyAuto(d, withForm);
+    } catch { /* the section shows its own state */ }
+  }, [applyAuto]);
+  useEffect(() => { loadAuto(true); }, [loadAuto]);
+  useEffect(() => {                       // the diary moves by itself while the page is open
+    const t = setInterval(() => { if (!document.hidden) loadAuto(false); }, 20000);
+    return () => clearInterval(t);
+  }, [loadAuto]);
+
+  const handleSaveAuto = async () => {
+    setAutoErr('');
+    const phones = autoPhones.split(/[\n,،]+/).map((x) => x.trim()).filter(Boolean);
+    const going = autoMode !== 'off' && auto?.auto_mode === 'off';
+    if (going && !window.confirm(`نشغّل وضع التجربة على ${phones.length} رقم؟\n\nأي أوردر جديد من الأرقام دي بس هيتحجز ويتبعتله رسالة واتساب. باقي العملاء مش هيتأثروا.`)) return;
+    setAutoSaving(true);
+    try {
+      const { data: d } = await saveWhatsAppAuto({ auto_mode: autoMode, test_phones: phones, split_test: false });
+      applyAuto(d, true);
+      showToast(d.auto_mode === 'off' ? 'التشغيل اتقفل' : 'وضع التجربة شغال ✓', 'success');
+    } catch (e) {
+      setAutoErr(errMsg(e, 'تعذّر الحفظ'));
+    } finally {
+      setAutoSaving(false);
+    }
+  };
 
   /* our message templates + what Meta says about each */
   const loadTemplates = useCallback(async () => {
@@ -629,6 +736,76 @@ export default function WhatsAppPage() {
                 onSubmit={() => handleSubmitTemplate(t)} />
             ))}
           </div>
+        )}
+      </div>
+
+      {/* 5 — automation (test mode) */}
+      <div className={card}>
+        <StepTitle n={5} title="التشغيل" done={auto?.auto_mode !== undefined && auto.auto_mode !== 'off'} />
+        {!auto ? (
+          <p className="text-sm text-slate-400 py-4 text-center">بيحمّل…</p>
+        ) : (
+          <>
+            <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+              لما التشغيل يتفتح، الأوردر الجديد بيتحجز بحالة «{auto.rules.hold_status}» ومبيظهرش للبنات،
+              ويتبعتله رسالة التأكيد. لو العميل أكد بيبقى «تم التأكيد» باسم «واتساب»، ولو مردّش بينزل للبنات لوحده.
+            </p>
+            <ul className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed list-disc pr-5 space-y-0.5">
+              <li>الرسالة بتتبعت بعد {auto.rules.send_delay_min} دقايق من الأوردر، في أي وقت.</li>
+              <li>الأوردر محجوز {auto.rules.hold_min} دقيقة من وقت الإرسال، وبعدها ينزل للبنات ويتوزّع زي أي أوردر.</li>
+              <li>بينزل فورًا لو الرقم مالوش واتساب، أو العميل داس «إلغاء الطلب» أو «طلب الدعم» أو كتب رسالة.</li>
+              <li>تذكير بعد ساعتين وتذكير تاني يوم، للأوردر المفتوح بس، ومفيش رسايل من 12 بالليل لـ {auto.rules.quiet_until_hour} الصبح.</li>
+            </ul>
+            <div className="space-y-2">
+              {([
+                ['off', 'متوقف', 'مفيش أي أوردر بيتحجز ولا رسالة بتتبعت لوحدها.'],
+                ['test', 'تجربة على أرقام محددة', 'الأوردرات اللي جاية من الأرقام اللي تحت بس. باقي العملاء زي ما هم بالظبط.'],
+              ] as [WhatsAppAutoMode, string, string][]).map(([m, title, desc]) => (
+                <label key={m} className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors
+                  ${autoMode === m ? 'border-emerald-300 bg-emerald-50/60 dark:border-emerald-700 dark:bg-emerald-950/30'
+                    : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}>
+                  <input type="radio" name="wa-auto-mode" checked={autoMode === m} onChange={() => setAutoMode(m)} className="mt-1 w-4 h-4 accent-emerald-600 shrink-0" />
+                  <span>
+                    <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">{title}</span>
+                    <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">{desc}</span>
+                  </span>
+                </label>
+              ))}
+              <div className="flex items-start gap-3 p-3 rounded-xl border border-dashed border-slate-200 dark:border-slate-700 opacity-60">
+                <input type="radio" disabled className="mt-1 w-4 h-4 shrink-0" />
+                <span>
+                  <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">شغال على كل العملاء</span>
+                  <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5">بيتفتح بعد أسبوع التجربة.</span>
+                </span>
+              </div>
+            </div>
+            {autoMode === 'test' && (
+              <Field label="أرقام التجربة" help="رقم في كل سطر (010…). اعمل أوردر من المتجر بواحد من الأرقام دي عشان تجرّب.">
+                <textarea value={autoPhones} onChange={(e) => setAutoPhones(e.target.value)} dir="ltr" rows={3}
+                  placeholder={'01xxxxxxxxx\n01xxxxxxxxx'} className={`${inputCls} font-mono`} />
+              </Field>
+            )}
+            {autoError && <p className="text-sm text-red-600 dark:text-red-400 leading-relaxed">{autoError}</p>}
+            <button type="button" onClick={handleSaveAuto} disabled={autoSaving || !s.configured} className={`w-full sm:w-auto ${primaryBtn}`}>
+              {autoSaving ? 'بيتحفظ…' : 'حفظ التشغيل'}
+            </button>
+
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">الأوردرات اللي دخلت الواتساب</h3>
+                <button type="button" onClick={() => loadAuto(false)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700
+                    text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">تحديث</button>
+              </div>
+              {!auto.flows.length ? (
+                <p className="text-sm text-slate-400 py-5 text-center">لسه مفيش</p>
+              ) : (
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {auto.flows.map((f) => <FlowRow key={f.order_id} f={f} tags={auto.tags} />)}
+                </ul>
+              )}
+            </div>
+          </>
         )}
       </div>
 

@@ -15,6 +15,7 @@ const { syncEarnedCommission, recordAssignmentLog } = orderStatus;
 /* «مغلق» — orders the owner closed (services/closedStatuses.js). */
 const closed = require('../services/closedStatuses');
 const CLOSED_SQL = closed.sqlList(closed.CLOSED_STATUSES);
+const WA_HOLD_STATUS = require('../services/whatsapp/flow').HOLD_STATUS;
 
 /* Product-filter pills list only products with an order in the last N days. */
 const ACTIVE_PRODUCT_DAYS = 7;
@@ -1811,6 +1812,20 @@ router.patch('/:id', authenticate, canonicalizeStatusKey, filterAgentFields, asy
       nextStatus: Object.prototype.hasOwnProperty.call(updates, 'Status') ? updates.Status : undefined,
     });
     if (blocked) return res.status(403).json({ error: blocked });
+  }
+
+  /* ── «بانتظار واتساب» — the WhatsApp flow's own status (services/whatsapp) ────
+     The order is held for the customer's answer; the flow sets it and lifts it.
+     Nobody sets it by hand, and only an admin may pull a held order out early. */
+  if (Object.prototype.hasOwnProperty.call(updates, 'Status')) {
+    const nextS = String(updates.Status ?? '').trim();
+    const curS  = String(currentStatus ?? '').trim();
+    if (nextS !== curS && nextS === WA_HOLD_STATUS) {
+      return res.status(400).json({ error: `«${WA_HOLD_STATUS}» بيحطها السيستم لوحده` });
+    }
+    if (nextS !== curS && curS === WA_HOLD_STATUS && !hasRole(req.user, 'admin')) {
+      return res.status(403).json({ error: 'الأوردر مستني رد العميل على واتساب — هينزل لوحده' });
+    }
   }
 
   /* ── «مغلق» — closing / reopening is the owner's call (admin only) ────────────

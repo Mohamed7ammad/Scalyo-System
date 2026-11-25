@@ -127,6 +127,18 @@ async function sendTemplate(settings, { to, name, language, components }) {
   };
 }
 
+/** A plain text message — only allowed within 24 h of the customer's last message. */
+async function sendText(settings, { to, body }) {
+  const data = await graph(settings, 'POST', `${encodeURIComponent(settings.phone_number_id)}/messages`, {
+    messaging_product: 'whatsapp',
+    recipient_type:    'individual',
+    to:                withPlus(to),
+    type:              'text',
+    text:              { preview_url: false, body: String(body).slice(0, 4096) },
+  });
+  return { message_id: data?.messages?.[0]?.id ?? null };
+}
+
 /* Meta only delivers a WhatsApp account's real events (delivery reports, customer
    messages) to apps that account is SUBSCRIBED to — the dashboard's webhook
    fields alone are not enough. These two read and create that link. */
@@ -166,4 +178,4 @@ async function subscribeApp(settings) {
 }
 
 module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, sendTemplate,
-  listSubscribedApps, subscribeApp, ownApp, listTemplates, createTemplate, friendlyForCode, _setFetchForTests };
+  listSubscribedApps, subscribeApp, ownApp, listTemplates, createTemplate, friendlyForCode, sendText, _setFetchForTests };

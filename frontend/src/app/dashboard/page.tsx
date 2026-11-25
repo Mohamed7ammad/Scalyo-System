@@ -31,6 +31,10 @@ import { getShortName, countsByShortName, activeByShortName, visibleProductPills
    dedicated queue instead of hiding under 'الكل'. */
 const STATUS_OPTIONS = ['جديد', 'مراجعة جديدة', 'تم التأكيد', 'تم الرفض', 'مؤجل', 'لا يرد', 'معلق حتي الدفع', 'تم الشحن', 'جاري الإعادة', 'تم الإرجاع', 'ملغي - عدم رد نهائي'];
 
+/* Orders waiting for the customer's WhatsApp answer (no agent yet) — the flow
+   sets and lifts this status; the pill is for the owner and team leaders. */
+const WA_HOLD_STATUS = 'بانتظار واتساب';
+
 /* Every status that means the order successfully PASSED confirmation — used for
    a cumulative confirmation rate so the % doesn't collapse as orders move on to
    shipped/delivered. Mirrors the backend analytics `status_confirmed` set. */
@@ -3275,7 +3279,7 @@ export default function DashboardPage() {
 
         {/* ── Status filter tabs ────────────────────────────────────── */}
         <div className="flex flex-wrap items-center gap-2 m-scroll-row">
-          {['الكل', ...STATUS_OPTIONS].map((f) => (
+          {['الكل', ...STATUS_OPTIONS, ...(isAdmin || isSupervisor ? [WA_HOLD_STATUS] : [])].map((f) => (
             <button key={f} onClick={() => setActiveFilter(f)}
               className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all duration-150
                 ${activeFilter === f

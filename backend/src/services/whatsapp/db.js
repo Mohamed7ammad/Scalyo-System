@@ -283,6 +283,15 @@ async function recordInbound(businessId, ev) {
   return inserted;
 }
 
+/* One of OUR messages by Meta's id — the flow asks which order a failed delivery belonged to. */
+async function messageByWamid(businessId, waMessageId) {
+  await ensureSchema();
+  const { rows: [r] } = await pool.query(
+    `SELECT id, order_id, kind, status, error_code, error_text FROM whatsapp_messages
+      WHERE business_id = $1 AND wa_message_id = $2 AND direction = 'out'`, [businessId, waMessageId]);
+  return r || null;
+}
+
 async function recentMessages(businessId, limit = 30) {
   await ensureSchema();
   const n = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 100);
@@ -308,5 +317,5 @@ module.exports = {
   DDL, ensureSchema, _markSchemaReadyForTests,
   cleanSettingsInput, publicSettings, statusMovesForward, STATUS_RANK,
   getSettings, saveSettings, saveCheckResult, webhookCandidates, verifyTokenExists, touchWebhook,
-  logOutbound, applyStatus, recordInbound, recentMessages, countRecentTests,
+  logOutbound, applyStatus, recordInbound, recentMessages, countRecentTests, messageByWamid,
 };

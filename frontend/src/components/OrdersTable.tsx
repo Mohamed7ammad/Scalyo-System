@@ -167,7 +167,13 @@ const inlineStatusOptions = (s?: string | null) => {
   return cur === NO_ANSWER_CLOSED || cur === REVIEW_NEW ? [cur, ...MANUAL_STATUS_OPTIONS] : MANUAL_STATUS_OPTIONS;
 };
 
+/* Set and lifted by the WhatsApp flow only (backend services/whatsapp/flow.js):
+   the order waits for the customer's answer and has no agent yet. It is never
+   in a dropdown, so it always renders as a locked badge. */
+const WA_HOLD_STATUS = 'بانتظار واتساب';
+
 const STATUS_STYLES: Record<string, string> = {
+  [WA_HOLD_STATUS]: 'bg-lime-100 text-lime-800 dark:bg-lime-900/40 dark:text-lime-300',
   'جديد':       'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
   // A Team Leader hand-off waiting in a review account ("still to call")
   'مراجعة جديدة': 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300',
@@ -2033,7 +2039,16 @@ const OrderRow = memo(function OrderRow({
     />
   ) : null;
 
-  const assigneeEl = !canReassign ? null : agents.length > 0 ? (
+  /* The customer confirmed on WhatsApp themselves — no agent holds the order. */
+  const viaWhatsApp = order.confirmed_via === 'whatsapp' && !order.AssignedTo;
+  const assigneeEl = !canReassign ? null : viaWhatsApp ? (
+    <span title="العميل أكد الأوردر بنفسه على واتساب — من غير عمولة"
+      className="inline-flex items-center px-2 py-1 rounded-lg text-xs font-semibold whitespace-nowrap
+        text-emerald-700 bg-emerald-50 border border-emerald-200
+        dark:text-emerald-300 dark:bg-emerald-900/30 dark:border-emerald-700/50">
+      واتساب
+    </span>
+  ) : agents.length > 0 ? (
     <select
       value={order.AssignedTo ?? ''}
       onChange={(e) => onAssignedToChange(order.id, e.target.value)}
@@ -2289,7 +2304,9 @@ const OrderRow = memo(function OrderRow({
         <span
           title={isClosedStatus(order.Status)
             ? 'اتقفل بقرار الإدارة — مش هيتشحن (عمولة الموظفة محفوظة)'
-            : 'هذه الحالة تُضبط تلقائياً عبر شركة الشحن'}
+            : normStatus(order.Status) === WA_HOLD_STATUS
+              ? 'مستني رد العميل على واتساب — هينزل للبنات لوحده'
+              : 'هذه الحالة تُضبط تلقائياً عبر شركة الشحن'}
           className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold select-none
             ${STATUS_STYLES[order.Status] ?? 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-400'}`}
         >
