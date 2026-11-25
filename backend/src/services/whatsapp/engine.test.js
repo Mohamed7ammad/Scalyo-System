@@ -20,7 +20,7 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
   const w = {
     now: new Date('2026-11-25T12:00:00Z'),                      // 14:00 Cairo
     orders: new Map(), flows: new Map(), sentTemplates: [], sentTexts: [], logged: [], assigned: [], changes: [],
-    metaFails: null, messages: new Map(), mode,
+    metaFails: null, messages: new Map(), mode, shown: [], tagFails: false,
   };
   const HOLD = flow.HOLD_STATUS;
   w.addOrder = (id, over = {}) => {
@@ -55,6 +55,9 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
       if (r.textReplied) f.text_replied = true; return f; },
     strandedHeldOrders: async () => [],
     ensureOrdersColumn: async () => true,
+    showOnOrder: async (b, id, v) => { const o = w.orders.get(id); if (w.tagFails) throw new Error('orders is locked');
+      w.shown.push({ id, ...v, statusThen: o.Status, holderThen: o.AssignedTo });
+      if (v.tag) o.wa_tag = v.tag; if (v.note) o.wa_note = v.note; return true; },
   };
   const cloud = {
     GraphError,
@@ -230,6 +233,7 @@ test('a «ضعيف» customer taps «تأكيد» → NOT confirmed: straight to
   assert.equal(w.orders.get(22).AssignedTo, 'agent@test');
   assert.equal(w.orders.get(22).confirmed_via, undefined);
   assert.equal(w.flows.get(22).tag, 'deposit');
+  assert.equal(w.orders.get(22).wa_tag, 'deposit', 'the agent sees it on the order');
   assert.match(w.sentTexts[0].body, /استلمنا تأكيدك/);
 });
 
@@ -241,6 +245,8 @@ test('«إلغاء الطلب» never cancels — the order goes to an agent now
   assert.equal(w.orders.get(23).Status, 'جديد');
   assert.equal(w.orders.get(23).AssignedTo, 'agent@test');
   assert.equal(flow.TAGS[w.flows.get(23).tag], 'عايز يلغي');
+  assert.equal(w.orders.get(23).wa_tag, 'cancel');
+  assert.deepEqual([w.shown[0].statusThen, w.shown[0].holderThen], ['بانتظار واتساب', null], 'tagged before any agent holds it');
   assert.match(w.sentTexts[0].body, /وصلنا طلب الإلغاء/);
   await w.tap('cancel', 23);
   assert.equal(w.sentTexts.length, 1, 'tapping again gets no second answer');
@@ -255,6 +261,25 @@ test('«طلب الدعم» on an order already with an agent only tags it', asy
   assert.equal((await w.tap('support', 24)).type, 'support_requested');
   assert.equal(w.changes.length, before, 'no status change');
   assert.equal(w.flows.get(24).tag, 'support');
+  assert.equal(w.orders.get(24).wa_tag, 'support');
+  assert.equal(w.orders.get(24).AssignedTo, 'agent@test', 'still hers');
+});
+
+test('a customer who confirms gets no tag; a failing tag write never stops the order', async () => {
+  const w = world();
+  await w.hold(40);
+  await w.sendNow();
+  await w.tap('confirm', 40);
+  assert.equal(w.orders.get(40).wa_tag, undefined);
+  assert.equal(w.shown.length, 0);
+
+  await w.hold(41);
+  w.advance(5); await engine.tick();
+  w.tagFails = true;
+  assert.equal((await w.tap('cancel', 41)).type, 'cancel_requested');
+  assert.equal(w.orders.get(41).Status, 'جديد', 'released to an agent all the same');
+  assert.equal(w.orders.get(41).AssignedTo, 'agent@test');
+  assert.equal(w.flows.get(41).tag, 'cancel', 'and the diary still knows');
 });
 
 test('an agent confirms in the same second as the tap → compare-and-set keeps hers', async () => {
@@ -280,6 +305,7 @@ test('a tap on an order an agent rejected changes nothing — it only tells the 
   assert.equal(w.orders.get(26).Status, 'تم الرفض');
   assert.equal(w.changes.length, before);
   assert.equal(flow.TAGS[w.flows.get(26).tag], 'داس «تأكيد» بعد ما الأوردر اتقفل');
+  assert.equal(w.orders.get(26).wa_tag, 'confirm_after_close');
 });
 
 test('a payload for somebody else\'s order, or an unknown one, is ignored', async () => {
@@ -301,6 +327,8 @@ test('the customer writes instead of tapping → «طلب الدعم», text kep
   assert.equal(w.orders.get(28).AssignedTo, 'agent@test');
   assert.equal(w.flows.get(28).tag, 'support');
   assert.equal(w.flows.get(28).customer_text, 'عايز أغيّر العنوان\nشارع 9');
+  assert.equal(w.orders.get(28).wa_tag, 'support');
+  assert.equal(w.orders.get(28).wa_note, 'عايز أغيّر العنوان\nشارع 9', 'her words are on the order for the agent');
   assert.equal(w.sentTexts.length, 1);
   assert.deepEqual(await engine.handleInbound(1, { kind: 'text', from: '201999999999', reply: 'hi' }), { handled: false, why: 'no_flow' });
 });

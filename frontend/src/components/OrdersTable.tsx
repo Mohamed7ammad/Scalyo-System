@@ -1896,6 +1896,69 @@ function ResendBadge({ order }: { order: Order }) {
   );
 }
 
+/* What the customer did on WhatsApp, for whoever handles the order now. The tag
+   shows only while it still matters: «عايز يلغي» disappears once the order is
+   confirmed or rejected; «داس إلغاء بعد التأكيد» shows only until it ships. */
+const WA_OPEN = ['جديد', 'لا يرد', 'مراجعة جديدة', 'مؤجل', WA_HOLD_STATUS];
+const WA_TAGS: Record<string, { label: string; hint: string; tone: string; when: (st: string) => boolean }> = {
+  deposit: {
+    label: 'أكد على واتساب، محتاج عربون',
+    hint: 'العميل داس «تأكيد الطلب» على واتساب، بس تقييمه ضعيف — كلميه وخدي العربون',
+    tone: 'bg-amber-500 text-white',
+    when: (st) => WA_OPEN.includes(st),
+  },
+  cancel: {
+    label: 'عايز يلغي',
+    hint: 'العميل داس «إلغاء الطلب» على واتساب — كلميه وحاولي تعرفي السبب',
+    tone: 'bg-red-600 text-white',
+    when: (st) => WA_OPEN.includes(st),
+  },
+  support: {
+    label: 'طلب الدعم',
+    hint: 'العميل طلب حد يكلمه على واتساب',
+    tone: 'bg-sky-600 text-white',
+    when: (st) => WA_OPEN.includes(st) || st === 'تم التأكيد' || st === 'تم الرفض',
+  },
+  confirm_after_close: {
+    label: 'رجع داس «تأكيد»',
+    hint: 'العميل داس «تأكيد الطلب» على واتساب بعد ما الأوردر اتقفل — ممكن يكون غيّر رأيه',
+    tone: 'bg-emerald-600 text-white',
+    when: (st) => st === 'تم الرفض' || st === 'مؤجل' || st.startsWith('ملغي'),
+  },
+  cancel_after_confirm: {
+    label: 'داس «إلغاء» بعد التأكيد',
+    hint: 'العميل داس «إلغاء الطلب» على واتساب بعد ما الأوردر اتأكد — راجعيه قبل الشحن',
+    tone: 'bg-red-600 text-white',
+    when: (st) => st === 'تم التأكيد',
+  },
+};
+
+function WhatsAppTagBadge({ order }: { order: Order }) {
+  const st = normStatus(order.Status);
+  const tag = order.wa_tag ? WA_TAGS[order.wa_tag] : undefined;
+  const showTag = !!tag && tag.when(st);
+  const note = (order.wa_note ?? '').trim();
+  const showNote = note !== '' && (showTag || WA_TAGS.support.when(st));
+  if (!showTag && !showNote) return null;
+  return (
+    <div className="mt-1 max-w-[240px]">
+      {showTag && tag && (
+        <span title={tag.hint}
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold shadow-sm ${tag.tone}`}>
+          واتساب: {tag.label}
+        </span>
+      )}
+      {showNote && (
+        <p className="mt-1 px-2 py-1 rounded-md text-xs leading-relaxed whitespace-pre-wrap break-words
+          bg-emerald-50 border border-emerald-200 text-emerald-900
+          dark:bg-emerald-900/20 dark:border-emerald-800/50 dark:text-emerald-200">
+          <span className="font-bold">العميل كتب على واتساب: </span>{note}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    OrderRow — one table row, strictly memoised.
    ═══════════════════════════════════════════════════════════════════════════
@@ -2087,6 +2150,9 @@ const OrderRow = memo(function OrderRow({
 
       {/* Sent back by the returns team — badge + their note (see component) */}
       <ResendBadge order={order} />
+
+      {/* What the customer asked for on WhatsApp (see component) */}
+      <WhatsAppTagBadge order={order} />
 
       {/* Product badge */}
       {order.ProductName && (

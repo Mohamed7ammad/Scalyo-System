@@ -50,28 +50,45 @@ const FLOW_DDL = `
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_phone_idx ON whatsapp_order_flow (business_id, phone, created_at DESC);
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_recent_idx ON whatsapp_order_flow (business_id, created_at DESC);
 `;
-/* «واتساب» as the one who confirmed — survives later status changes (shipping, delivery). */
-const ORDERS_DDL = `ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_via VARCHAR(16)`;
+/* On the order itself, so the orders list reads them with no join:
+     confirmed_via — «واتساب» as the one who confirmed; survives shipping / delivery;
+     wa_tag        — what the customer asked for on WhatsApp (a key of flow.TAGS);
+     wa_note       — what the customer wrote. */
+const ORDERS_COLUMNS = ['confirmed_via', 'wa_tag', 'wa_note'];
+const ORDERS_DDL = `ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_via VARCHAR(16),
+                                       ADD COLUMN IF NOT EXISTS wa_tag VARCHAR(32),
+                                       ADD COLUMN IF NOT EXISTS wa_note TEXT`;
 
-/* orders is the busiest table: the column is added ONCE, only if it is missing,
+/* Read-only: are the columns there? The orders list asks (ordersColumnsReady)
+   before it names them, so it never breaks on a database that lacks them. */
+let ordersColumnsOk = false;
+const ordersColumnsReady = () => ordersColumnsOk;
+async function ordersColumnsExist() {
+  if (ordersColumnsOk) return true;
+  const { rows: [r] } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'orders' AND column_name = ANY($1::text[])`, [ORDERS_COLUMNS]);
+  if (r.n === ORDERS_COLUMNS.length) ordersColumnsOk = true;
+  return ordersColumnsOk;
+}
+
+/* orders is the busiest table: the columns are added ONCE, only if missing,
    on its own connection with a 4-second lock timeout — so it can never queue the
    whole system behind a long query. A failure is retried later; until then a
-   WhatsApp confirmation still works, just without the «واتساب» label. */
+   WhatsApp confirmation still works, just without the «واتساب» label / the tag. */
 let ordersColumnP = null;
 function ensureOrdersColumn() {
   if (!ordersColumnP) {
     ordersColumnP = (async () => {
-      const { rows } = await pool.query(
-        `SELECT 1 FROM information_schema.columns
-          WHERE table_schema = 'public' AND table_name = 'orders' AND column_name = 'confirmed_via'`);
-      if (rows.length) return true;
+      if (await ordersColumnsExist()) return true;
       const c = await pool.connect();
       try {
         await c.query('BEGIN');
         await c.query(`SET LOCAL lock_timeout = '4s'`);
         await c.query(ORDERS_DDL);
         await c.query('COMMIT');
-        console.log('✅  WhatsApp flow: orders.confirmed_via ready');
+        ordersColumnsOk = true;
+        console.log('✅  WhatsApp flow: orders columns ready (confirmed_via, wa_tag, wa_note)');
         return true;
       } catch (e) {
         await c.query('ROLLBACK').catch(() => {});
@@ -81,7 +98,7 @@ function ensureOrdersColumn() {
       }
     })().catch((e) => {
       ordersColumnP = null;
-      console.warn('⚠️   WhatsApp flow: orders.confirmed_via not added yet —', e.message);
+      console.warn('⚠️   WhatsApp flow: orders columns not added yet —', e.message);
       return false;
     });
   }
@@ -98,6 +115,7 @@ function ensureSchema() {
   }
   return schemaP;
 }
+/* ordersColumnsOk is NOT set here: only a real look at the database may tell the orders list the columns exist. */
 function _markSchemaReadyForTests() { schemaP = Promise.resolve(true); ordersColumnP = Promise.resolve(true); }
 
 const MODES = ['off', 'test', 'on'];
@@ -245,6 +263,19 @@ async function markReply(orderId, { outcome = null, tag = null, text = null, don
   return r || null;
 }
 
+/* What the agent sees on the order row: the tag and what the customer wrote.
+   Two display-only columns — status, holder, money and "updatedAt" are not
+   touched, so no report or queue moves because of it. */
+async function showOnOrder(businessId, orderId, { tag = null, note = null }) {
+  if (!tag && !note) return false;
+  if (!(await ensureOrdersColumn())) return false;
+  const { rowCount } = await pool.query(
+    `UPDATE orders SET wa_tag = COALESCE($3, wa_tag), wa_note = COALESCE($4, wa_note)
+      WHERE id = $1 AND business_id = $2`,
+    [orderId, businessId, tag ? String(tag).slice(0, 32) : null, note ? String(note).slice(0, 1000) : null]);
+  return rowCount > 0;
+}
+
 /* Safety net: orders still «بانتظار واتساب» long after any hold could last.
    Only the newest 3,000 orders are looked at (a primary-key range, ~1 ms). */
 async function strandedHeldOrders(holdStatus, minutes = 90, limit = 50) {
@@ -277,7 +308,8 @@ async function recentFlows(businessId, limit = 30) {
 }
 
 module.exports = {
-  FLOW_DDL, ORDERS_DDL, MODES, ensureSchema, ensureOrdersColumn, _markSchemaReadyForTests,
+  FLOW_DDL, ORDERS_DDL, ORDERS_COLUMNS, MODES, ensureSchema, ensureOrdersColumn, ordersColumnsExist, ordersColumnsReady,
+  _markSchemaReadyForTests, showOnOrder,
   getAuto, saveAuto, enroll, getByOrder, latestByPhone,
   claimDueSends, markSent, markReleased, dueReleases, dueReminders, markReminder, markReply,
   strandedHeldOrders, recentFlows,

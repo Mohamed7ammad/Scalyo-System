@@ -16,6 +16,8 @@ const { syncEarnedCommission, recordAssignmentLog } = orderStatus;
 const closed = require('../services/closedStatuses');
 const CLOSED_SQL = closed.sqlList(closed.CLOSED_STATUSES);
 const WA_HOLD_STATUS = require('../services/whatsapp/flow').HOLD_STATUS;
+const waFlows = require('../services/whatsapp/flowStore');
+waFlows.ordersColumnsExist().catch(() => {});   // one read at boot: may the list name the WhatsApp columns?
 
 /* Product-filter pills list only products with an order in the last N days. */
 const ACTIVE_PRODUCT_DAYS = 7;
@@ -522,7 +524,11 @@ router.get('/', authenticate, async (req, res) => {
       /* «مغلق»: the status to restore on reopen (jsonb — safe before the startup migration) */
       (to_jsonb(o) ->> 'closed_from_status') AS closed_from_status,
       (to_jsonb(o) ->> 'closed_at')          AS closed_at,
-      (to_jsonb(o) ->> 'easyorder_rate')     AS easyorder_rate`;
+      (to_jsonb(o) ->> 'easyorder_rate')     AS easyorder_rate,
+      /* WhatsApp: who confirmed + what the customer asked for (services/whatsapp/flowStore) */
+      ${waFlows.ordersColumnsReady()
+        ? 'o.confirmed_via, o.wa_tag, o.wa_note'
+        : 'NULL::text AS confirmed_via, NULL::text AS wa_tag, NULL::text AS wa_note'}`;
 
     let cursorClause = '';
     if (typeof req.query.cursor === 'string' && req.query.cursor.includes('|')) {

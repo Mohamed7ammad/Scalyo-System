@@ -20,6 +20,10 @@ export interface Order {
   DeliveryRate: string;
   /** 'whatsapp' when the customer confirmed the order themselves on WhatsApp (no agent, no commission). */
   confirmed_via?: string | null;
+  /** What the customer asked for on WhatsApp: deposit | cancel | support | confirm_after_close | cancel_after_confirm. */
+  wa_tag?: string | null;
+  /** What the customer wrote on WhatsApp. */
+  wa_note?: string | null;
   /** EasyOrder's customer rating (high / moderate / low / unknown), null until it arrives. */
   easyorder_rate?: string | null;
   City: string;

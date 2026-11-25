@@ -194,6 +194,7 @@ async function tick() {
       }
     }
     ticks += 1;
+    if (ticks % 5 === 1) await guard('orders columns', () => flows.ensureOrdersColumn());   // retried here if adding them was blocked at boot
     const stranded = ticks % 5 === 1 ? await guard('watchdog', () => flows.strandedHeldOrders(flow.HOLD_STATUS)) : [];
     for (const o of stranded || []) {
       await guard(`rescue #${o.order_id}`, () => releaseOrder(o.business_id, o.order_id, 'watchdog'));
@@ -218,6 +219,16 @@ async function reply(f, key) {
   } catch (e) {
     if (!(e instanceof GraphError)) throw e;
     await logOut(f, 'reply', null, null, e);
+  }
+}
+
+/* The agent's view: the tag and the customer's words go on the order row itself. Best effort. */
+async function showOnOrder(f, { tag = null, note = null }) {
+  if (!tag && !note) return;
+  try {
+    await deps.flows().showOnOrder(f.business_id, f.order_id, { tag, note });
+  } catch (e) {
+    warn(`tag on order #${f.order_id}:`, e.message);
   }
 }
 
@@ -248,6 +259,7 @@ async function handleTap(f, action) {
       return { handled: true, type: d.type };
     }
 
+    await showOnOrder(f, { tag: d.tag });                        // on the row BEFORE an agent gets the order
     if (d.release && String(cur.status).trim() === flow.HOLD_STATUS) {
       await releaseOrder(f.business_id, f.order_id, d.tag);     // → «جديد» + an agent, now
     }
@@ -267,11 +279,14 @@ async function handleText(f, ev) {
   const status = String(cur?.status ?? '').trim();
   const open = flow.TAP_DECIDES.includes(status);
   const firstText = !f.text_replied;                            // read before the diary row is updated
+  const tag = open && !f.tag ? 'support' : null;
+  await showOnOrder(f, { tag });
   if (status === flow.HOLD_STATUS) await releaseOrder(f.business_id, f.order_id, 'support');
-  await flows.markReply(f.order_id, {
-    tag: open && !f.tag ? 'support' : null, text: ev.reply || null,
+  const r = await flows.markReply(f.order_id, {
+    tag, text: ev.reply || null,
     outcome: open && !f.outcome ? 'support_requested' : null, textReplied: true,
   });
+  await showOnOrder(f, { note: r?.customer_text || ev.reply || null });
   if (firstText) await reply(f, 'text');                        // one acknowledgement, not one per message
   return { handled: true, type: 'text' };
 }
