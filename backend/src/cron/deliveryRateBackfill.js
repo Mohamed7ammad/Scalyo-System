@@ -144,7 +144,11 @@ async function pickOne() {
            ON c.business_id = o.business_id AND c.phone = ${NORM_PHONE_SQL}
     WHERE  o."DeliveryRate" = 'بدون'
       AND  o."Phone" IS NOT NULL AND o."Phone" <> ''
-      AND  btrim(o."Status") = ANY($4::text[])
+      /* …plus an order the customer confirmed on WhatsApp within minutes: its
+         rating was never seen, and «ضعيف» must reach an agent before it ships.
+         Same queue, no priority — the agents' orders keep their share of the budget. */
+      AND  (btrim(o."Status") = ANY($4::text[])
+            OR (btrim(o."Status") = 'تم التأكيد' AND to_jsonb(o) ->> 'confirmed_via' = 'whatsapp'))
       AND  o."createdAt" > NOW() - ($1 || ' days')::interval
       AND  o."createdAt" < NOW() - INTERVAL '5 minutes'
       AND  o."createdAt" >= $3::timestamptz          -- backlog cutoff: pre-pause orders never hit Bosta

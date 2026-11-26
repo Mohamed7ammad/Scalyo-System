@@ -25,7 +25,10 @@ const FLOW_DDL = `
   ALTER TABLE whatsapp_settings
     ADD COLUMN IF NOT EXISTS auto_mode   VARCHAR(8) NOT NULL DEFAULT 'off',
     ADD COLUMN IF NOT EXISTS test_phones TEXT[]     NOT NULL DEFAULT '{}',
-    ADD COLUMN IF NOT EXISTS split_test  BOOLEAN    NOT NULL DEFAULT false;
+    ADD COLUMN IF NOT EXISTS split_test  BOOLEAN    NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS control_half BOOLEAN   NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS live_since  TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS live_until  TIMESTAMPTZ;
   CREATE TABLE IF NOT EXISTS whatsapp_order_flow (
     order_id         INTEGER      PRIMARY KEY,
     business_id      INTEGER      NOT NULL,
@@ -53,6 +56,7 @@ const FLOW_DDL = `
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
   );
   ALTER TABLE whatsapp_order_flow ADD COLUMN IF NOT EXISTS kind VARCHAR(12) NOT NULL DEFAULT 'new';
+  CREATE INDEX IF NOT EXISTS whatsapp_order_flow_confirmed_idx ON whatsapp_order_flow (outcome_at) WHERE outcome = 'confirmed';
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_due_idx ON whatsapp_order_flow (state, send_at) WHERE state IN ('pending', 'sending', 'waiting');
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_phone_idx ON whatsapp_order_flow (business_id, phone, created_at DESC);
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_recent_idx ON whatsapp_order_flow (business_id, created_at DESC);
@@ -133,15 +137,19 @@ const badRequest = (message) => Object.assign(new Error(message), { status: 400 
 async function getAuto(businessId) {
   await ensureSchema();
   const { rows: [r] } = await pool.query(
-    `SELECT auto_mode, test_phones, split_test,
+    `SELECT auto_mode, test_phones, split_test, control_half, live_since, live_until,
             (phone_number_id IS NOT NULL AND access_token IS NOT NULL AND waba_id IS NOT NULL) AS configured
        FROM whatsapp_settings WHERE business_id = $1`, [businessId]);
-  if (!r) return { auto_mode: 'off', test_phones: [], split_test: false, configured: false };
+  if (!r) return { auto_mode: 'off', test_phones: [], split_test: false, control_half: false, live_since: null, live_until: null, configured: false };
   return { auto_mode: MODES.includes(r.auto_mode) ? r.auto_mode : 'off', test_phones: r.test_phones || [],
-    split_test: r.split_test === true, configured: r.configured === true };
+    split_test: r.split_test === true, control_half: r.control_half === true,
+    live_since: r.live_since || null, live_until: r.live_until || null, configured: r.configured === true };
 }
 
-async function saveAuto(businessId, { auto_mode, test_phones, split_test }, actor) {
+/* live_since / live_until bracket the live run (the trial report reads them):
+   set on the way INTO «on», closed on the way out. Every SET expression reads
+   the row as it was BEFORE this update. */
+async function saveAuto(businessId, { auto_mode, test_phones, split_test, control_half }, actor) {
   await ensureSchema();
   if (!MODES.includes(auto_mode)) throw badRequest('وضع التشغيل مش معروف');
   const phones = [...new Set((test_phones || []).map(String))].filter((p) => /^201[0125]\d{8}$/.test(p));
@@ -149,10 +157,13 @@ async function saveAuto(businessId, { auto_mode, test_phones, split_test }, acto
   if (auto_mode === 'test' && !phones.length) throw badRequest('اكتب رقم واحد على الأقل للتجربة');
   const { rows: [r] } = await pool.query(
     `UPDATE whatsapp_settings
-        SET auto_mode = $2, test_phones = $3::text[], split_test = $4, updated_by = $5, updated_at = updated_at
+        SET live_since = CASE WHEN $2 = 'on' AND auto_mode <> 'on' THEN NOW() ELSE live_since END,
+            live_until = CASE WHEN $2 = 'on' THEN NULL WHEN auto_mode = 'on' THEN NOW() ELSE live_until END,
+            auto_mode = $2, test_phones = $3::text[], split_test = $4, control_half = $6,
+            updated_by = $5, updated_at = updated_at
       WHERE business_id = $1 AND phone_number_id IS NOT NULL AND access_token IS NOT NULL
-      RETURNING auto_mode, test_phones, split_test`,
-    [businessId, auto_mode, phones, split_test === true, actor]);
+      RETURNING auto_mode, test_phones, split_test, control_half, live_since, live_until`,
+    [businessId, auto_mode, phones, split_test === true, actor, control_half === true]);
   if (!r) throw badRequest('احفظ مفاتيح ميتا الأول');
   return r;
 }
@@ -347,6 +358,24 @@ async function recontactResults(businessId) {
   return r;
 }
 
+/* WhatsApp confirmed the order, then the customer rating arrived and it is a
+   weak one (the SQL mirrors flow.isWeak — the engine checks again with the real
+   function before it moves anything). Only while the order has not shipped. */
+async function confirmedNowWeak(limit = 20) {
+  await ensureSchema();
+  if (!(await ordersColumnsExist())) return [];
+  const { rows } = await pool.query(
+    `SELECT f.* FROM whatsapp_order_flow f
+       JOIN orders o ON o.id = f.order_id AND o.business_id = f.business_id
+      WHERE f.outcome = 'confirmed' AND f.outcome_at > NOW() - INTERVAL '10 days'
+        AND btrim(o."Status") = 'تم التأكيد' AND o.confirmed_via = 'whatsapp'
+        AND (btrim(COALESCE(o."DeliveryRate", '')) = 'ضعيف'
+             OR (btrim(COALESCE(o."DeliveryRate", '')) IN ('', 'بدون', 'جديد')
+                 AND lower(btrim(COALESCE(to_jsonb(o) ->> 'easyorder_rate', ''))) = 'low'))
+      ORDER BY f.outcome_at LIMIT $1`, [limit]);
+  return rows;
+}
+
 /* To read BEFORE shipping: orders WhatsApp itself confirmed (no agent ever spoke
    to the customer) whose customer also WROTE something — a new address, a
    question, a change of mind. Only while they are still «تم التأكيد». */
@@ -382,5 +411,5 @@ module.exports = {
   _markSchemaReadyForTests, showOnOrder,
   getAuto, saveAuto, enroll, getByOrder, latestByPhone,
   claimDueSends, markSent, markRecontactSent, markReleased, dueReleases, dueReminders, markReminder, markReply,
-  strandedHeldOrders, recentFlows, customersMessaged24h, recontactResults, confirmedWithText,
+  strandedHeldOrders, recentFlows, customersMessaged24h, recontactResults, confirmedWithText, confirmedNowWeak,
 };

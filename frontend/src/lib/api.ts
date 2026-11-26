@@ -1803,8 +1803,13 @@ export interface WhatsAppAutoResponse {
   auto_mode:      WhatsAppAutoMode;
   test_phones:    string[];      // "2010…"
   split_test:     boolean;
+  control_half?:  boolean;       // live on HALF the customers (the trial)
+  live_since?:    string | null;
+  live_until?:    string | null;
   configured:     boolean;
   live_mode_open: boolean;
+  live_all_open?: boolean;
+  daily_limit?:   { meta: number; new_orders: number; used: number };
   rules: { hold_status: string; send_delay_min: number; send_delay_b_min: number; hold_min: number;
            reminder1_min: number; reminder2_min: number; quiet_until_hour: number };
   tags:  Record<string, string>;
@@ -1813,8 +1818,19 @@ export interface WhatsAppAutoResponse {
   to_review?: { order_id: number; customer_text: string; tag: string | null; outcome_at: string | null; updated_at: string; product: string | null }[];
 }
 export const getWhatsAppAuto  = () => api.get<WhatsAppAutoResponse>('/api/whatsapp/auto');
-export const saveWhatsAppAuto = (data: { auto_mode: WhatsAppAutoMode; test_phones: string[]; split_test: boolean }) =>
+export const saveWhatsAppAuto = (data: { auto_mode: WhatsAppAutoMode; test_phones: string[]; split_test: boolean; control_half?: boolean }) =>
   api.put<WhatsAppAutoResponse>('/api/whatsapp/auto', data);
+
+/* The half-and-half trial: the WhatsApp half against the agents-only half, since the flow went live. */
+export interface WhatsAppTrialGroup {
+  orders: number; confirmed: number; wa_confirmed: number; rejected: number; no_answer: number; open: number;
+  shipped: number; in_transit: number; delivered: number; returned: number;
+}
+export interface WhatsAppTrialReport {
+  started: boolean; live?: boolean; control_half?: boolean; since?: string; until?: string | null;
+  wa?: WhatsAppTrialGroup; control?: WhatsAppTrialGroup; no_mobile?: number;
+}
+export const getWhatsAppTrial = () => api.get<WhatsAppTrialReport>('/api/whatsapp/trial');
 
 /* One message to OLD no-answer orders: count first (GET), then the owner's own click queues them (POST). */
 export interface WhatsAppRecontactResults {
@@ -1831,7 +1847,7 @@ export interface WhatsAppRecontactPreview {
   eligible?:     number;                       // customers we may message
   weak?:         number;
   by_day?:       { day: string; n: number }[];
-  skipped?:      { bad_number: number; already_messaged: number; other_order: number; same_customer: number; no_amount: number };
+  skipped?:      { bad_number: number; already_messaged: number; other_order: number; same_customer: number; no_amount: number; control_group?: number };
   cap?:          { limit: number; safe: number; used: number; room: number };
   max_batch?:    number;
   can_send?:     number;

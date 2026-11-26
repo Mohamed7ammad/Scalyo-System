@@ -16,11 +16,11 @@ const flow   = require('./flow');
 class GraphError extends Error { constructor(code, msg) { super(msg); this.code = code; this.metaMessage = msg; } }
 
 /* A tiny world: orders, the flow diary, Meta, the agents. */
-function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false } = {}) {
+function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false, half = false } = {}) {
   const w = {
     now: new Date('2026-11-25T12:00:00Z'),                      // 14:00 Cairo
     orders: new Map(), flows: new Map(), sentTemplates: [], sentTexts: [], logged: [], assigned: [], changes: [],
-    metaFails: null, messages: new Map(), mode, shown: [], tagFails: false, tracks: {},
+    metaFails: null, messages: new Map(), mode, shown: [], tagFails: false, tracks: {}, messaged24h: 0,
   };
   const HOLD = flow.HOLD_STATUS;
   w.addOrder = (id, over = {}) => {
@@ -30,7 +30,12 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
     return o;
   };
   const flows = {
-    getAuto: async () => ({ auto_mode: w.mode, test_phones: testPhones, split_test: split, configured: true }),
+    getAuto: async () => ({ auto_mode: w.mode, test_phones: testPhones, split_test: split, control_half: half, configured: true }),
+    customersMessaged24h: async () => w.messaged24h,
+    confirmedNowWeak: async () => [...w.flows.values()].filter((f) => {
+      const o = w.orders.get(f.order_id);
+      return f.outcome === 'confirmed' && o && o.Status === 'تم التأكيد' && o.confirmed_via === 'whatsapp' && flow.isWeak(o);
+    }),
     enroll: async ({ orderId, businessId, phone, variant, sendAt, isTest, kind = 'new' }) => {
       if (w.flows.has(orderId)) return null;
       const f = { order_id: orderId, business_id: businessId, phone, variant, is_test: isTest, kind, state: 'pending', send_at: sendAt,
@@ -54,7 +59,7 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
     markReminder: async (id, n, sent) => { const f = w.flows.get(id); if (f.reminders_done !== n - 1) return false;
       f.reminders_done = n; if (sent) f.messages_sent += 1; return true; },
     markReply: async (id, r) => { const f = w.flows.get(id); f.customer_replied = true; if (r.done) f.state = 'done';
-      if (r.outcome) f.outcome = r.outcome; if (r.tag) f.tag = r.tag; if (r.text) f.customer_text = [f.customer_text, r.text].filter(Boolean).join('\n');
+      if (r.outcome) { f.outcome = r.outcome; f.outcome_at = w.now; } if (r.tag) f.tag = r.tag; if (r.text) f.customer_text = [f.customer_text, r.text].filter(Boolean).join('\n');
       if (r.textReplied) f.text_replied = true; return f; },
     strandedHeldOrders: async () => [],
     ensureOrdersColumn: async () => true,
@@ -562,4 +567,68 @@ test('«متوقف» stops the queued old orders too; a queue the worker missed 
   assert.equal(w2.flows.get(67).state, 'released');
   assert.equal(w2.orders.get(67).Status, 'لا يرد');
   assert.equal(w2.changes.length, 0);
+});
+
+/* ── going live: Meta's daily limit, the half-and-half trial, late ratings ─── */
+
+test('past the daily limit a new order is not held — it goes to the agents as always', async () => {
+  const w = world();
+  w.messaged24h = 239;
+  assert.ok(await engine.planForNewOrder(1, '01001488462'), 'one below the limit: still held');
+  w.messaged24h = 240;
+  assert.equal(await engine.planForNewOrder(1, '01001488462'), null);
+  w.messaged24h = 400;
+  assert.equal(await engine.planForNewOrder(1, '01001488462'), null);
+});
+
+test('live on half the customers: a number ending in an even digit gets WhatsApp, an odd one stays with the agents', async () => {
+  const w = world({ half: true });
+  assert.ok(await engine.planForNewOrder(1, '01001488462'));
+  assert.ok(await engine.planForNewOrder(1, '+20 100 148 8460'));
+  assert.equal(await engine.planForNewOrder(1, '01001488461'), null);
+  assert.equal(await engine.planForNewOrder(1, '٠١٠٠١٤٨٨٤٦٣'), null, 'the same customer however the number is typed');
+  const all = world();                                            // not a trial → everybody
+  assert.ok(await engine.planForNewOrder(1, '01001488461'));
+  void w; void all;
+});
+
+test('EasyOrder says «low» and Bosta has no opinion → «تأكيد» does NOT confirm: to an agent for the deposit', async () => {
+  const w = world();
+  await w.hold(80, { DeliveryRate: 'بدون', easyorder_rate: 'low' });
+  await w.hold(81, { DeliveryRate: 'ممتاز', easyorder_rate: 'low' });   // Bosta knows this customer → Bosta wins
+  await w.sendNow();
+  assert.equal((await w.tap('confirm', 80)).type, 'deposit_needed');
+  assert.equal(w.orders.get(80).Status, 'جديد');
+  assert.equal(w.orders.get(80).wa_tag, 'deposit');
+  assert.equal((await w.tap('confirm', 81)).type, 'confirm');
+  assert.equal(w.orders.get(81).Status, 'تم التأكيد');
+});
+
+test('the rating arrives AFTER the WhatsApp confirmation and it is weak → back to an agent for the deposit, before it ships', async () => {
+  const w = world();
+  await w.hold(82);
+  await w.hold(83);
+  await w.hold(84);
+  await w.sendNow();
+  for (const id of [82, 83, 84]) await w.tap('confirm', id);
+  await engine.tick();
+  assert.equal(w.orders.get(82).Status, 'تم التأكيد', 'no rating yet → stays confirmed');
+  w.orders.get(82).DeliveryRate = 'ضعيف';                          // Bosta answered
+  w.orders.get(83).easyorder_rate = 'low';                        // EasyOrder answered, Bosta silent
+  Object.assign(w.orders.get(84), { DeliveryRate: 'ضعيف', Status: 'تم الشحن' });   // already shipped
+  const texts = w.sentTexts.length;
+  await engine.tick();
+  for (const id of [82, 83]) {
+    const o = w.orders.get(id);
+    assert.equal(o.Status, 'جديد');
+    assert.equal(o.AssignedTo, 'agent@test');
+    assert.equal(o.wa_tag, 'deposit');
+    assert.equal(o.confirmed_via, null);
+    assert.equal(w.flows.get(id).outcome, 'deposit_needed');
+  }
+  assert.equal(w.orders.get(84).Status, 'تم الشحن', 'a shipped order is never pulled back');
+  assert.equal(w.sentTexts.length, texts + 2, 'each customer is told somebody will call');
+  const changes = w.changes.length;
+  await engine.tick();
+  assert.equal(w.changes.length, changes, 'done once');
 });

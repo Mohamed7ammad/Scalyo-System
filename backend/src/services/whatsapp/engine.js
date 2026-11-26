@@ -62,6 +62,7 @@ const warn = (...a) => console.warn('[whatsapp flow]', ...a);
 
 /* ── a new order arrives ──────────────────────────────────────────────────── */
 
+let lastCapWarnAt = 0;
 /** Should this new order wait for WhatsApp? null = no (the order goes to the agents as always). */
 async function planForNewOrder(businessId, rawPhone) {
   try {
@@ -70,6 +71,17 @@ async function planForNewOrder(businessId, rawPhone) {
     const phone = whatsappNumber(rawPhone);
     if (!phone) return null;                                   // not an Egyptian mobile → agents call
     if (auto.auto_mode === 'test' && !auto.test_phones.includes(phone)) return null;
+    /* live on half the customers: the other half stays with the agents alone (the trial's control) */
+    if (auto.auto_mode === 'on' && auto.control_half && flow.trialGroup(phone) === 'control') return null;
+    /* Meta's limit on customers per 24 hours: past it the order simply goes to the agents */
+    const used = await deps.flows().customersMessaged24h(businessId);
+    if (used >= flow.DEFAULTS.daily_new_orders) {
+      if (Date.now() - lastCapWarnAt > 10 * 60000) {
+        lastCapWarnAt = Date.now();
+        warn(`daily limit reached (${used} customers in 24 h) — new orders go to the agents until it frees up`);
+      }
+      return null;
+    }
     return { phone, isTest: auto.auto_mode === 'test', split: auto.split_test, holdStatus: flow.HOLD_STATUS };
   } catch (e) {
     warn('plan failed — order goes to the agents:', e.message);
@@ -161,6 +173,23 @@ async function reopenForAgent(f) {
     warn(`reopen of order #${f.order_id} failed:`, e.message);
     return false;
   }
+}
+
+/* WhatsApp confirmed the order within minutes; the customer rating arrived
+   later and it is a weak one. Before it ships it goes to an agent for the
+   deposit, exactly as if the rating had been known at the tap. Never throws
+   past the worker's guard. */
+async function depositAfterConfirm(f) {
+  const cur = await deps.orderStatus().loadOrder(f.business_id, f.order_id);
+  if (!cur || String(cur.status).trim() !== flow.CONFIRMED_STATUS
+      || String(cur.row.confirmed_via ?? '') !== 'whatsapp' || !flow.isWeak(cur.row)) return false;
+  await showOnOrder(f, { tag: 'deposit' });
+  if (!(await reopenForAgent(f))) return false;
+  await deps.flows().markReply(f.order_id, { outcome: 'deposit_needed', tag: 'deposit' });
+  log(`order #${f.order_id}: rated weak after its WhatsApp confirmation → to an agent for the deposit`);
+  /* free text is only allowed inside the 24 hours their tap opened */
+  if (f.outcome_at && deps.now() - new Date(f.outcome_at) < 23 * 3600000) await reply(f, 'deposit');
+  return true;
 }
 
 /* ── the worker ───────────────────────────────────────────────────────────── */
@@ -273,6 +302,9 @@ async function tick() {
       for (const f of (await guard(`due reminders ${n}`, () => flows.dueReminders(now, n))) || []) {
         if ((await guard(`reminder #${f.order_id}`, () => sendReminder(f, n))) === 'sent') out.reminders += 1;
       }
+    }
+    for (const f of (await guard('late ratings', () => flows.confirmedNowWeak())) || []) {
+      await guard(`deposit #${f.order_id}`, () => depositAfterConfirm(f));
     }
     ticks += 1;
     if (ticks % 5 === 1) await guard('orders columns', () => flows.ensureOrdersColumn());   // retried here if adding them was blocked at boot
@@ -413,5 +445,5 @@ async function handleFailedStatus(businessId, waMessageId) {
 
 module.exports = {
   TEMPLATE, RECONTACT_STATUS, planForNewOrder, enrollNewOrder, releaseOrder, sendConfirmation, sendReminder, tick,
-  handleInbound, handleFailedStatus, liftNoAnswer, _setDepsForTests,
+  handleInbound, handleFailedStatus, liftNoAnswer, depositAfterConfirm, _setDepsForTests,
 };

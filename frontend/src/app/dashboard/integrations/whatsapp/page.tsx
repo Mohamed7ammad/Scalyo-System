@@ -19,6 +19,9 @@ import {
   saveWhatsAppAuto,
   getWhatsAppRecontact,
   sendWhatsAppRecontact,
+  getWhatsAppTrial,
+  type WhatsAppTrialReport,
+  type WhatsAppTrialGroup,
   type WhatsAppRecontactPreview,
   type WhatsAppAutoMode,
   type WhatsAppAutoResponse,
@@ -273,6 +276,68 @@ function FlowRow({ f, tags }: { f: WhatsAppFlowRow; tags: Record<string, string>
   );
 }
 
+/* ── the half-and-half trial: WhatsApp half vs agents-only half ─────────────── */
+const pct = (a: number, b: number) => (b > 0 ? `${((100 * a) / b).toFixed(1)}%` : '—');
+
+function TrialCard({ trial, onRefresh, busy }: { trial: WhatsAppTrialReport; onRefresh: () => void; busy: boolean }) {
+  const wa = trial.wa as WhatsAppTrialGroup;
+  const ag = trial.control as WhatsAppTrialGroup;
+  const rows: [string, (g: WhatsAppTrialGroup) => string, string?][] = [
+    ['الأوردرات', (g) => String(g.orders)],
+    ['اتأكد', (g) => `${g.confirmed} (${pct(g.confirmed, g.orders)})`],
+    ['منهم بالواتساب من غير مكالمة', (g) => String(g.wa_confirmed)],
+    ['اترفض', (g) => `${g.rejected} (${pct(g.rejected, g.orders)})`],
+    ['لا يرد', (g) => `${g.no_answer} (${pct(g.no_answer, g.orders)})`],
+    ['لسه مفتوح', (g) => String(g.open)],
+    ['اتشحن', (g) => String(g.shipped)],
+    ['في الطريق', (g) => String(g.in_transit)],
+    ['اتسلّم', (g) => String(g.delivered)],
+    ['رجع', (g) => String(g.returned)],
+    ['التسليم من اللي خلص (اتسلّم ÷ اتسلّم + رجع)', (g) => pct(g.delivered, g.delivered + g.returned), 'font-bold'],
+    ['اتسلّم من كل الأوردرات', (g) => pct(g.delivered, g.orders), 'font-bold'],
+  ];
+  return (
+    <div className={card}>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-base font-bold text-slate-900 dark:text-white">مقارنة التجربة: واتساب قصاد البنات</h2>
+        <button type="button" onClick={onRefresh} disabled={busy}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700
+            text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50">
+          {busy ? '…' : 'تحديث'}
+        </button>
+      </div>
+      <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+        أوردرات المتجر من {fmtDate(trial.since ?? null)}{trial.until ? ` لحد ${fmtDate(trial.until)}` : ' لحد دلوقتي'}.
+        العميل اللي آخر رقم في موبايله زوجي في نص الواتساب، والفردي مع البنات زي ما هو.
+        الحكم على آخر سطرين، ومبيبقاش نهائي غير لما الشحنات توصل (4–5 أيام).
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs text-slate-500 dark:text-slate-400">
+              <th className="text-start font-medium py-1.5"></th>
+              <th className="text-start font-semibold py-1.5 text-emerald-700 dark:text-emerald-300">نص الواتساب</th>
+              <th className="text-start font-semibold py-1.5">نص البنات</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            {rows.map(([label, f, cls]) => (
+              <tr key={label}>
+                <td className="py-1.5 pe-2 text-slate-600 dark:text-slate-300">{label}</td>
+                <td className={`py-1.5 tabular-nums text-slate-900 dark:text-white ${cls ?? ''}`}>{f(wa)}</td>
+                <td className={`py-1.5 tabular-nums text-slate-900 dark:text-white ${cls ?? ''}`}>{f(ag)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!!trial.no_mobile && (
+        <p className="text-xs text-slate-500 dark:text-slate-400">{trial.no_mobile} أوردر رقمهم مش موبايل مصري واضح — مش محسوبين في أي نص.</p>
+      )}
+    </div>
+  );
+}
+
 /* ── 6: one message to the OLD «لا يرد» orders ───────────────────────────────
    Count first, then the owner's own click sends. The order never moves: it
    stays «لا يرد» with its agent until the customer taps. */
@@ -289,6 +354,7 @@ const SKIPPED: [keyof NonNullable<WhatsAppRecontactPreview['skipped']>, string][
   ['already_messaged', 'اتبعتلهم واتساب مننا قبل كده'],
   ['bad_number',       'الرقم مش موبايل مصري واضح'],
   ['no_amount',        'الأوردر مفيهوش مبلغ أو منتج'],
+  ['control_group',    'من نص «البنات بس» في تجربة النص والنص — رسالة ليهم تبوّظ المقارنة'],
 ];
 
 function RecontactCard({ ready, stopped, onQueued, showToast }: {
@@ -406,9 +472,9 @@ function RecontactCard({ ready, stopped, onQueued, showToast }: {
                   ))}
                 </div>
               )}
-              {info.skipped && SKIPPED.some(([k]) => info.skipped![k] > 0) && (
+              {info.skipped && SKIPPED.some(([k]) => (info.skipped![k] ?? 0) > 0) && (
                 <ul className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed list-disc pr-5 space-y-0.5">
-                  {SKIPPED.filter(([k]) => info.skipped![k] > 0).map(([k, label]) => (
+                  {SKIPPED.filter(([k]) => (info.skipped![k] ?? 0) > 0).map(([k, label]) => (
                     <li key={k}><b className="tabular-nums">{info.skipped![k]}</b> مش هيتبعتلهم: {label}</li>
                   ))}
                 </ul>
@@ -525,6 +591,8 @@ export default function WhatsAppPage() {
   const [auto, setAuto]         = useState<WhatsAppAutoResponse | null>(null);
   const [autoMode, setAutoMode] = useState<WhatsAppAutoMode>('off');
   const [autoPhones, setAutoPhones] = useState('');
+  const [trial, setTrial]           = useState<WhatsAppTrialReport | null>(null);
+  const [trialBusy, setTrialBusy]   = useState(false);
   const [autoSaving, setAutoSaving] = useState(false);
   const [autoError, setAutoErr] = useState('');
 
@@ -638,6 +706,13 @@ export default function WhatsAppPage() {
     } catch { /* the section shows its own state */ }
   }, [applyAuto]);
   useEffect(() => { loadAuto(true); }, [loadAuto]);
+  /* the trial comparison — asked once the flow has ever been live, and on demand (not on the 20 s poll) */
+  const loadTrial = useCallback(async () => {
+    setTrialBusy(true);
+    try { const { data: d } = await getWhatsAppTrial(); setTrial(d); } catch { /* the card just stays as it was */ } finally { setTrialBusy(false); }
+  }, []);
+  const everLive = !!auto?.live_since;
+  useEffect(() => { if (everLive) loadTrial(); }, [everLive, auto?.auto_mode, loadTrial]);
   useEffect(() => {                       // the diary moves by itself while the page is open
     const t = setInterval(() => { if (!document.hidden) loadAuto(false); }, 20000);
     return () => clearInterval(t);
@@ -646,13 +721,20 @@ export default function WhatsAppPage() {
   const handleSaveAuto = async () => {
     setAutoErr('');
     const phones = autoPhones.split(/[\n,،]+/).map((x) => x.trim()).filter(Boolean);
-    const going = autoMode !== 'off' && auto?.auto_mode === 'off';
+    const going = autoMode === 'test' && auto?.auto_mode === 'off';
     if (going && !window.confirm(`نشغّل وضع التجربة على ${phones.length} رقم؟\n\nأي أوردر جديد من الأرقام دي بس هيتحجز ويتبعتله رسالة واتساب. باقي العملاء مش هيتأثروا.`)) return;
+    const goingLive = autoMode === 'on' && auto?.auto_mode !== 'on';
+    if (goingLive && !window.confirm(
+      'نشغّل الواتساب على نص الأوردرات الجديدة؟\n\n'
+      + '• العميل اللي آخر رقم في موبايله زوجي: أوردره يتحجز ويتبعتله رسالة واتساب.\n'
+      + '• العميل اللي آخر رقم فردي: يروح للبنات زي ما هو، من غير أي رسالة.\n'
+      + '• الرسايل دي لعملاء حقيقيين من دلوقتي.\n'
+      + '• للإيقاف في أي وقت: اختار «متوقف» واحفظ.')) return;
     setAutoSaving(true);
     try {
-      const { data: d } = await saveWhatsAppAuto({ auto_mode: autoMode, test_phones: phones, split_test: false });
+      const { data: d } = await saveWhatsAppAuto({ auto_mode: autoMode, test_phones: phones, split_test: false, control_half: autoMode === 'on' });
       applyAuto(d, true);
-      showToast(d.auto_mode === 'off' ? 'التشغيل اتقفل' : 'وضع التجربة شغال ✓', 'success');
+      showToast(d.auto_mode === 'off' ? 'التشغيل اتقفل' : d.auto_mode === 'on' ? 'الواتساب شغال على نص الأوردرات ✓' : 'وضع التجربة شغال ✓', 'success');
     } catch (e) {
       setAutoErr(errMsg(e, 'تعذّر الحفظ'));
     } finally {
@@ -969,6 +1051,7 @@ export default function WhatsAppPage() {
               <li>الأوردر محجوز {auto.rules.hold_min} دقيقة من وقت الإرسال، وبعدها ينزل للبنات ويتوزّع زي أي أوردر.</li>
               <li>بينزل فورًا لو الرقم مالوش واتساب، أو العميل داس «إلغاء الطلب» أو «طلب الدعم» أو كتب رسالة.</li>
               <li>تذكير بعد ساعتين وتذكير تاني يوم، للأوردر المفتوح بس، ومفيش رسايل من 12 بالليل لـ {auto.rules.quiet_until_hour} الصبح.</li>
+              <li>العميل اللي تقييمه «ضعيف» في بوسطة (أو «low» في إيزي أوردر وبوسطة معندهاش تقييم ليه) مبيتأكدش بالدوسة: بيروح لموظفة عشان العربون، حتى لو التقييم وصل بعد التأكيد.</li>
             </ul>
             <div className="space-y-2">
               {([
@@ -985,13 +1068,32 @@ export default function WhatsAppPage() {
                   </span>
                 </label>
               ))}
+              {auto.live_mode_open && (
+                <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors
+                  ${autoMode === 'on' ? 'border-emerald-300 bg-emerald-50/60 dark:border-emerald-700 dark:bg-emerald-950/30'
+                    : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}>
+                  <input type="radio" name="wa-auto-mode" checked={autoMode === 'on'} onChange={() => setAutoMode('on')} className="mt-1 w-4 h-4 accent-emerald-600 shrink-0" />
+                  <span>
+                    <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">شغال على نص الأوردرات (تجربة أسبوع)</span>
+                    <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
+                      العميل اللي آخر رقم في موبايله زوجي بيدخل الواتساب، والفردي بيروح للبنات زي ما هو — عشان نقارن الاتنين على التسليم.
+                    </span>
+                  </span>
+                </label>
+              )}
               <div className="flex items-start gap-3 p-3 rounded-xl border border-dashed border-slate-200 dark:border-slate-700 opacity-60">
                 <input type="radio" disabled className="mt-1 w-4 h-4 shrink-0" />
                 <span>
                   <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">شغال على كل العملاء</span>
-                  <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5">بيتفتح بعد أسبوع التجربة.</span>
+                  <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5">بيتفتح بعد أسبوع التجربة وبعد ما ميتا ترفع الحد اليومي.</span>
                 </span>
               </div>
+              {auto.daily_limit && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  حد ميتا {auto.daily_limit.meta} عميل كل 24 ساعة. اتبعت لـ <b className="tabular-nums">{auto.daily_limit.used}</b> في آخر 24 ساعة،
+                  ولما نوصل {auto.daily_limit.new_orders} الأوردر الجديد بيروح للبنات عادي من غير رسالة.
+                </p>
+              )}
             </div>
             {autoMode === 'test' && (
               <Field label="أرقام التجربة" help="رقم في كل سطر (010…). اعمل أوردر من المتجر بواحد من الأرقام دي عشان تجرّب.">
@@ -1045,6 +1147,8 @@ export default function WhatsAppPage() {
           </>
         )}
       </div>
+
+      {trial?.started && trial.wa && trial.control && <TrialCard trial={trial} onRefresh={loadTrial} busy={trialBusy} />}
 
       {/* 6 — one message to the old «لا يرد» orders */}
       <RecontactCard ready={!!s.configured && !!auto} stopped={auto?.auto_mode === 'off'}

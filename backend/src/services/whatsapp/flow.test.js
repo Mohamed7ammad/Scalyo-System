@@ -162,3 +162,18 @@ test('reminders: only an open order, a silent customer, and at most 3 messages',
   assert.equal(flow.canRemind({ ...ok, flow: { customer_replied: true, messages_sent: 1 } }), false);
   assert.equal(flow.canRemind({ ...ok, flow: { customer_replied: false, messages_sent: 3 } }), false);
 });
+
+test('who needs a deposit: Bosta «ضعيف» always; EasyOrder «low» only when Bosta has no opinion', () => {
+  assert.equal(flow.isWeak({ DeliveryRate: 'ضعيف', easyorder_rate: 'high' }), true);
+  for (const bosta of ['بدون', 'جديد', '', null, undefined]) assert.equal(flow.isWeak({ DeliveryRate: bosta, easyorder_rate: 'low' }), true, String(bosta));
+  assert.equal(flow.isWeak({ DeliveryRate: 'بدون', easyorder_rate: ' LOW ' }), true);
+  for (const bosta of ['ممتاز', 'متوسط']) assert.equal(flow.isWeak({ DeliveryRate: bosta, easyorder_rate: 'low' }), false, bosta);
+  for (const eo of ['high', 'moderate', 'unknown', null, undefined, '']) assert.equal(flow.isWeak({ DeliveryRate: 'بدون', easyorder_rate: eo }), false, String(eo));
+});
+
+test('the trial half is the customer\u2019s own number: even last digit → WhatsApp, odd → the agents', () => {
+  assert.equal(flow.trialGroup('201001488462'), 'wa');
+  assert.equal(flow.trialGroup('201001488460'), 'wa');
+  assert.equal(flow.trialGroup('201001488461'), 'control');
+  assert.equal(flow.trialGroup('201001488469'), 'control');
+});

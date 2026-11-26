@@ -60,7 +60,11 @@ async function runSweep() {
        WHERE o.order_source = 'easyorder'
          AND o.easyorder_rate IS NULL
          AND o.easyorder_rate_attempts < $1
-         AND btrim(o."Status") = ANY($3::text[])          -- new / no-answer only, never a confirmed order
+         /* new / no-answer only — plus an order the customer confirmed on WhatsApp
+            within minutes: nobody saw its rating yet, and a «low» one must reach
+            an agent before it ships (services/whatsapp/engine.depositAfterConfirm) */
+         AND (btrim(o."Status") = ANY($3::text[])
+              OR (btrim(o."Status") = 'تم التأكيد' AND to_jsonb(o) ->> 'confirmed_via' = 'whatsapp'))
          AND o.external_order_id ~ '^[0-9a-f-]{36}$'
          AND COALESCE(bp.easyorder_api_token, '') <> ''
          AND o."createdAt" > NOW() - INTERVAL '3 days'

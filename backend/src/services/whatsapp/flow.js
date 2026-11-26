@@ -39,6 +39,14 @@ const DEFAULTS = Object.freeze({
   quiet_from_hour:    0,      // Cairo
   quiet_until_hour:   10,
   max_messages:       3,
+  /* Meta counts the CUSTOMERS we open a conversation with in any 24 hours (250
+     for a new account). New orders stop a little short of it; the owner's
+     batches to old «لا يرد» orders stop earlier, and earlier still while the
+     flow is live, so the day's new orders always have room. */
+  daily_limit:          250,
+  daily_new_orders:     240,
+  daily_recontact:      230,
+  daily_recontact_live: 150,
 });
 
 const bt = (s) => String(s ?? '').replace(/^ +| +$/g, '');
@@ -146,7 +154,26 @@ function scheduleAfterSend(sentAt, cfg = DEFAULTS) {
 
 /* ── what a tap does ────────────────────────────────────────────────────────── */
 
-const isWeak = (order) => bt(order.DeliveryRate) === 'ضعيف';
+/* Who needs a deposit before WhatsApp may confirm them.
+   Bosta's «ضعيف» always. But Bosta rates only ~30% of new orders in their first
+   day (about 15 lookups per 4 hours), while EasyOrder rates ~100% within
+   minutes — so when Bosta has NO opinion («بدون» / «جديد» / empty), EasyOrder's
+   «low» counts too (measured 2026-11-26: 58% of EasyOrder-«low» customers are
+   Bosta-«ضعيف»). A Bosta «ممتاز» / «متوسط» is never overruled. */
+const BOSTA_NO_OPINION = ['', 'بدون', 'جديد'];
+const WEAK_FROM_EASYORDER = true;
+const isWeak = (order) => {
+  const bosta = bt(order.DeliveryRate);
+  if (bosta === 'ضعيف') return true;
+  return WEAK_FROM_EASYORDER && BOSTA_NO_OPINION.includes(bosta)
+    && bt(order.easyorder_rate).toLowerCase() === 'low';
+};
+
+/* The first live week runs on HALF the customers: the other half is handled by
+   the agents exactly as before, so the two halves can be compared on delivery.
+   The split is by the customer number itself (last digit even = WhatsApp), so
+   one customer is always in the same half, whatever they order. */
+const trialGroup = (waPhone) => (Number(String(waPhone ?? '').slice(-1)) % 2 === 0 ? 'wa' : 'control');
 
 /**
  * The customer tapped a button (or wrote). Returns what to do:
@@ -230,5 +257,5 @@ function canRemind({ order, flow, cfg = DEFAULTS }) {
 module.exports = {
   HOLD_STATUS, NEW_STATUS, CONFIRMED_STATUS, TAP_DECIDES, REMINDABLE, COMMITTED, DEFAULTS, TAGS,
   cleanParam, formatAmount, amountDue, messageParams, buttonPayload, parsePayload, templateComponents,
-  outsideQuietHours, addMin, variantOf, sendAt, scheduleAfterSend, isWeak, decideTap, replyText, canRemind,
+  outsideQuietHours, addMin, variantOf, sendAt, scheduleAfterSend, isWeak, trialGroup, decideTap, replyText, canRemind,
 };

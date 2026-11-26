@@ -16,6 +16,7 @@ const templates        = require('../services/whatsapp/templates');
 const flows            = require('../services/whatsapp/flowStore');
 const flowRules        = require('../services/whatsapp/flow');
 const recontact        = require('../services/whatsapp/recontact');
+const trial            = require('../services/whatsapp/trial');
 const { whatsappNumbers } = require('../utils/phone');
 const pool             = require('../config/db');
 
@@ -225,7 +226,8 @@ router.post('/account-link', authenticate, requireAdmin, async (req, res) => {
 /* ── the automation switch (step 6): off | test | on ─────────────────────────
    test = only orders whose customer number is in the owner's test list enter
    the flow; every other order is untouched. */
-const LIVE_MODE_OPEN = false;   // part C of the roadmap opens it
+const LIVE_MODE_OPEN = true;    // live on HALF the customers (the trial week)
+const LIVE_ALL_OPEN  = false;   // every customer: after the trial, and after Meta raises the daily limit
 
 async function autoView(businessId) {
   const auto = await flows.getAuto(businessId);
@@ -233,8 +235,14 @@ async function autoView(businessId) {
     auto_mode:   auto.auto_mode,
     test_phones: auto.test_phones,
     split_test:  auto.split_test,
+    control_half: auto.control_half,
+    live_since:  auto.live_since,
+    live_until:  auto.live_until,
     configured:  auto.configured,
     live_mode_open: LIVE_MODE_OPEN,
+    live_all_open:  LIVE_ALL_OPEN,
+    daily_limit: { meta: flowRules.DEFAULTS.daily_limit, new_orders: flowRules.DEFAULTS.daily_new_orders,
+                   used: auto.configured ? await flows.customersMessaged24h(businessId) : 0 },
     rules: {
       hold_status:      flowRules.HOLD_STATUS,
       send_delay_min:   flowRules.DEFAULTS.send_delay_min,
@@ -262,7 +270,8 @@ router.put('/auto', authenticate, requireAdmin, async (req, res) => {
   const businessId = req.user.business_id;
   try {
     const mode = String(req.body?.auto_mode || '');
-    if (mode === 'on' && !LIVE_MODE_OPEN) {
+    const controlHalf = mode === 'on' && req.body?.control_half === true;
+    if (mode === 'on' && (!LIVE_MODE_OPEN || (!controlHalf && !LIVE_ALL_OPEN))) {
       return res.status(400).json({ error: 'التشغيل على كل العملاء بيتفتح بعد أسبوع التجربة' });
     }
     /* phones as the owner types them (010…), stored as WhatsApp numbers (2010…) */
@@ -283,11 +292,21 @@ router.put('/auto', authenticate, requireAdmin, async (req, res) => {
         return res.status(400).json({ error: `ميتا لسه موافقتش على: ${pending.map((t) => t.title).join('، ')} — استنى الموافقة الأول` });
       }
     }
-    const saved = await flows.saveAuto(businessId, { auto_mode: mode, test_phones: phones, split_test: req.body?.split_test === true }, actor(req.user));
-    console.log(`[whatsapp] automation set to "${saved.auto_mode}" by ${actor(req.user)} (${saved.test_phones.length} test number(s), split=${saved.split_test})`);
+    const saved = await flows.saveAuto(businessId,
+      { auto_mode: mode, test_phones: phones, split_test: req.body?.split_test === true, control_half: controlHalf }, actor(req.user));
+    console.log(`[whatsapp] automation set to "${saved.auto_mode}" by ${actor(req.user)} (${saved.test_phones.length} test number(s), half=${saved.control_half}, split=${saved.split_test})`);
     res.set('Cache-Control', 'no-store');
     res.json(await autoView(businessId));
   } catch (err) { fail(res, err, 'تعذّر حفظ إعدادات التشغيل'); }
+});
+
+/* The half-and-half trial: the WhatsApp half against the agents-only half,
+   on what finally matters — delivered orders. Read-only. */
+router.get('/trial', authenticate, requireAdmin, async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json(await trial.report(req.user.business_id));
+  } catch (err) { fail(res, err, 'تعذّر تحميل مقارنة التجربة'); }
 });
 
 /* ── one message to OLD «لا يرد» orders (services/whatsapp/recontact.js) ──────

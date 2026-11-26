@@ -15,10 +15,13 @@
                         somebody already reached (confirmed, shipped, rejected,
                         postponed …) — a second message would only annoy them;
      same_customer    — two «لا يرد» orders from one number: only the newest;
-     no_amount        — the order has no product / amount to put in the message.
+     no_amount        — the order has no product / amount to put in the message;
+     control_group    — placed during the half-and-half trial by a customer in
+                        the agents-only half: a message would spoil the comparison.
 
-   Meta's limit is on customers per 24 hours (250 for a new account). We stop at
-   SAFE_LIMIT so the new orders of the day always have room. */
+   Meta's limit is on customers per 24 hours (250 for a new account). We stop
+   short of it (flow.DEFAULTS) — earlier still while the flow is live — so the
+   new orders of the day always have room. */
 'use strict';
 
 const pool  = require('../../config/db');
@@ -27,8 +30,9 @@ const flows = require('./flowStore');
 const { whatsappNumber, whatsappNumbers } = require('../../utils/phone');
 
 const STATUS        = 'لا يرد';
-const DAILY_LIMIT   = 250;      // Meta, new business portfolio — customers in any 24 hours
-const SAFE_LIMIT    = 230;
+const DAILY_LIMIT   = flow.DEFAULTS.daily_limit;        // Meta, new business portfolio — customers in any 24 hours
+const SAFE_LIMIT    = flow.DEFAULTS.daily_recontact;
+const safeLimit = (auto) => (auto?.auto_mode === 'on' ? flow.DEFAULTS.daily_recontact_live : SAFE_LIMIT);
 const MAX_DAYS_BACK = 14;
 const MAX_BATCH     = 150;
 const PER_MINUTE    = 10;       // gentle: the worker also has the day's new orders to send
@@ -51,13 +55,14 @@ function checkRange(from, to, now = new Date()) {
 }
 
 /** Pure: which of these «لا يرد» orders (newest first) get a message. */
-function pick({ orders, messaged, busy }) {
+function pick({ orders, messaged, busy, isControl = () => false }) {
   const chosen = [];
-  const skipped = { bad_number: 0, already_messaged: 0, other_order: 0, same_customer: 0, no_amount: 0 };
+  const skipped = { bad_number: 0, already_messaged: 0, other_order: 0, same_customer: 0, no_amount: 0, control_group: 0 };
   const seen = new Set();
   for (const o of orders) {
     const phone = whatsappNumber(o.Phone);
     if (!phone)              { skipped.bad_number += 1; continue; }
+    if (isControl(o, phone)) { skipped.control_group += 1; continue; }
     if (messaged.has(phone)) { skipped.already_messaged += 1; continue; }
     if (busy.has(phone))     { skipped.other_order += 1; continue; }
     if (seen.has(phone))     { skipped.same_customer += 1; continue; }
@@ -68,12 +73,24 @@ function pick({ orders, messaged, busy }) {
   return { chosen, skipped };
 }
 
+/** Was this order placed inside the half-and-half trial by an agents-only customer? */
+function controlCheck(auto) {
+  if (!auto?.control_half || !auto.live_since) return () => false;
+  const since = new Date(auto.live_since).getTime();
+  const until = auto.live_until ? new Date(auto.live_until).getTime() : Infinity;
+  return (o, phone) => {
+    const at = new Date(o.created_at).getTime();
+    return at >= since && at <= until && flow.trialGroup(phone) === 'control';
+  };
+}
+
 /* Three reads, one after the other (the production pooler is small). */
-async function gather(businessId, { from, to }) {
+async function gather(businessId, { from, to }, auto) {
   await flows.ensureSchema();
   const { rows: orders } = await pool.query(
     `SELECT o.id, o.business_id, o."FullName", o."Phone", o."ProductName", o.quantity, o."ProductPrice",
             o."City", o."Address", o."Status", o."DeliveryRate", o."depositAmount",
+            (o."createdAt" AT TIME ZONE 'UTC') AS created_at,
             to_char((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD') AS day
        FROM orders o
       WHERE o.business_id = $1 AND btrim(o."Status") = $2
@@ -98,21 +115,23 @@ async function gather(businessId, { from, to }) {
   const messaged = new Set(sent.map((r) => String(r.phone)));
   const busy = new Set();
   for (const r of others) for (const n of whatsappNumbers(r.Phone)) busy.add(n);
-  return { total: orders.length, ...pick({ orders, messaged, busy }) };
+  return { total: orders.length, ...pick({ orders, messaged, busy, isControl: controlCheck(auto) }) };
 }
 
-async function room(businessId) {
+async function room(businessId, auto) {
   const used = await flows.customersMessaged24h(businessId);
-  return { limit: DAILY_LIMIT, safe: SAFE_LIMIT, used, room: Math.max(0, SAFE_LIMIT - used) };
+  const safe = safeLimit(auto);
+  return { limit: DAILY_LIMIT, safe, used, room: Math.max(0, safe - used) };
 }
 
 /** What the owner sees before sending: how many, from which days, who is left out, how much room today. */
 async function preview(businessId, range, now = new Date()) {
   const r = checkRange(range.from, range.to, now);
-  const g = await gather(businessId, r);
+  const auto = await flows.getAuto(businessId);
+  const g = await gather(businessId, r, auto);
   const byDay = new Map();
   for (const c of g.chosen) byDay.set(c.order.day, (byDay.get(c.order.day) || 0) + 1);
-  const cap = await room(businessId);
+  const cap = await room(businessId, auto);
   return {
     ...r,
     found:    g.total,
@@ -136,8 +155,9 @@ async function queue(businessId, { from, to, count }, now = new Date()) {
   if (busyQueueing) throw badRequest('فيه دفعة بتتجهز دلوقتي — استنى ثواني');
   busyQueueing = true;
   try {
-    const g = await gather(businessId, r);
-    const cap = await room(businessId);
+    const auto = await flows.getAuto(businessId);
+    const g = await gather(businessId, r, auto);
+    const cap = await room(businessId, auto);
     if (!g.chosen.length) throw badRequest('مفيش أوردرات «لا يرد» ينفع نبعتلها في الأيام دي');
     if (cap.room < 1) throw badRequest(`وصلنا حد اليوم (${cap.used} عميل في آخر 24 ساعة) — كمّل بكرة`);
     const take = g.chosen.slice(0, Math.min(n, cap.room));
@@ -156,4 +176,4 @@ async function queue(businessId, { from, to, count }, now = new Date()) {
   }
 }
 
-module.exports = { STATUS, DAILY_LIMIT, SAFE_LIMIT, MAX_DAYS_BACK, MAX_BATCH, PER_MINUTE, checkRange, pick, preview, queue, cairoDay };
+module.exports = { STATUS, DAILY_LIMIT, SAFE_LIMIT, MAX_DAYS_BACK, MAX_BATCH, PER_MINUTE, checkRange, pick, controlCheck, preview, queue, cairoDay };
