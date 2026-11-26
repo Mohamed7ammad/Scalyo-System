@@ -7,7 +7,11 @@
        services/orderStatus.js (compare-and-set), so it can never race an agent;
      • an OLD «لا يرد» order the owner chose to message (kind 'recontact') gets
        the same confirmation once — it is never held, released or reminded, and
-       a failure leaves the order exactly where it was, with its agent.
+       a failure leaves the order exactly where it was, with its agent;
+     • a customer who answers while the order is «لا يرد» (asks for support,
+       wants to cancel, confirms but needs a deposit, or writes) is alive NOW:
+       the order goes back to the top of its own agent's work — «جديد», or
+       «مراجعة جديدة» for a review account — so she calls without being told.
 
    Safety, in order of importance:
      1. An order is never lost: every failure path RELEASES it to the agents
@@ -28,6 +32,8 @@ const NO_COMMISSION = Object.freeze({ commission: false });
 const LATE_SEND_MIN = 45;        // a confirmation this late is not sent — the order goes to the agents
 const LATE_REMINDER_MIN = 6 * 60;
 const RECONTACT_STATUS = 'لا يرد';   // the only status an old order may be messaged in
+const NO_ANSWER        = 'لا يرد';
+const REVIEW_NEW       = 'مراجعة جديدة';   // a review account's "still to call" (same no-answer cycle as «لا يرد»)
 const isRecontact = (f) => f.kind === 'recontact';
 
 /* Loaded lazily: routes/webhooks.js requires this module, and orderStatus pulls half the app. */
@@ -37,6 +43,12 @@ let deps = {
   cloud:       () => require('./cloudApi'),
   orderStatus: () => require('../orderStatus'),
   assign:      (orderId, businessId) => require('../../routes/webhooks').autoAssignOrder(orderId, businessId),
+  /* the holder's users.agent_track: 'confirmation' | 'review' | 'both' (null = unknown) */
+  trackOf:     async (businessId, email) => {
+    const { rows: [u] } = await pool.query(
+      'SELECT agent_track FROM users WHERE business_id = $1 AND lower(email) = lower($2) LIMIT 1', [businessId, email]);
+    return u?.agent_track || null;
+  },
   brandOf:     async (businessId) => {
     const { rows: [bp] } = await pool.query('SELECT brand_name FROM business_profile WHERE id = $1', [businessId]);
     return bp?.brand_name || '';
@@ -100,6 +112,55 @@ async function releaseOrder(businessId, orderId, reason, error = null) {
   }
   await deps.flows().markReleased(orderId, reason, error).catch((e) => warn('markReleased:', e.message));
   return released;
+}
+
+/* The customer answered while the order sat in «لا يرد»: put it back in front
+   of whoever holds it. Same agent, no commission, compare-and-set — if she moved
+   it this very second, hers stands. A review account works «مراجعة جديدة», so
+   her order returns there (and stays inside its no-answer cycle); with no
+   holder at all it is assigned like a fresh order. Never throws. */
+async function liftNoAnswer(f, cur) {
+  try {
+    const holder = String(cur.row.AssignedTo ?? '').trim() || null;
+    let to = flow.NEW_STATUS;
+    if (holder && (await deps.trackOf(f.business_id, holder).catch(() => null)) === 'review') to = REVIEW_NEW;
+    const r = await deps.orderStatus().changeStatus({
+      businessId: f.business_id, orderId: f.order_id, from: NO_ANSWER, to, actor: ACTOR, effects: NO_COMMISSION });
+    if (!r.ok) {
+      if (r.code !== 'STATUS_CONFLICT') warn(`lift of order #${f.order_id} did not apply: ${r.code}`);
+      return false;
+    }
+    const assigned = holder ? null : await deps.assign(f.order_id, f.business_id);
+    log(`order #${f.order_id}: customer answered a «${NO_ANSWER}» order → «${to}» with ${holder || assigned?.AssignedTo || 'no present agent — unassigned'}`);
+    return true;
+  } catch (e) {
+    warn(`lift of order #${f.order_id} failed:`, e.message);
+    return false;
+  }
+}
+
+/* The customer tapped «إلغاء» / «طلب الدعم» on an order WhatsApp itself had
+   confirmed and that has not shipped. Nobody holds it, so it would ship against
+   their word: it goes back to «جديد» and to an agent (stock returns through
+   orderStatus, like any un-confirm). No commission was ever paid on it; the
+   agent who confirms it after the call is the one who earns. Never throws. */
+async function reopenForAgent(f) {
+  try {
+    const labelled = await deps.flows().ensureOrdersColumn();
+    const r = await deps.orderStatus().changeStatus({
+      businessId: f.business_id, orderId: f.order_id, from: flow.CONFIRMED_STATUS, to: flow.NEW_STATUS,
+      fields: labelled ? { confirmed_via: null } : {}, actor: ACTOR, effects: NO_COMMISSION });
+    if (!r.ok) {
+      if (r.code !== 'STATUS_CONFLICT') warn(`reopen of order #${f.order_id} did not apply: ${r.code}`);
+      return false;                                              // shipped / moved this very second → the tag still tells the team
+    }
+    const assigned = await deps.assign(f.order_id, f.business_id);
+    log(`order #${f.order_id}: customer went back on a WhatsApp confirmation → «${flow.NEW_STATUS}» with ${assigned?.AssignedTo || 'no present agent — unassigned'}`);
+    return true;
+  } catch (e) {
+    warn(`reopen of order #${f.order_id} failed:`, e.message);
+    return false;
+  }
 }
 
 /* ── the worker ───────────────────────────────────────────────────────────── */
@@ -282,9 +343,13 @@ async function handleTap(f, action) {
     await showOnOrder(f, { tag: d.tag });                        // on the row BEFORE an agent gets the order
     if (d.release && String(cur.status).trim() === flow.HOLD_STATUS) {
       await releaseOrder(f.business_id, f.order_id, d.tag);     // → «جديد» + an agent, now
+    } else if (d.release && String(cur.status).trim() === NO_ANSWER) {
+      await liftNoAnswer(f, cur);                               // → back on top of her work, now
+    } else if (d.reopen) {
+      await reopenForAgent(f);                                  // → it must not ship before somebody calls
     }
     const repeat = d.tag ? f.tag === d.tag : f.outcome === 'confirmed' && d.type === 'already_confirmed';
-    await flows.markReply(f.order_id, { outcome: d.release ? d.type : null, tag: d.tag || null });
+    await flows.markReply(f.order_id, { outcome: d.reopen ? d.outcome : (d.release ? d.type : null), tag: d.tag || null });
     log(`order #${f.order_id}: customer tapped «${action}» → ${d.type}`);
     if (!repeat) await reply(f, d.reply);                       // tapping the same button again gets no second answer
     return { handled: true, type: d.type };
@@ -302,6 +367,7 @@ async function handleText(f, ev) {
   const tag = open && !f.tag ? 'support' : null;
   await showOnOrder(f, { tag });
   if (status === flow.HOLD_STATUS) await releaseOrder(f.business_id, f.order_id, 'support');
+  else if (status === NO_ANSWER) await liftNoAnswer(f, cur);
   const r = await flows.markReply(f.order_id, {
     tag, text: ev.reply || null,
     outcome: open && !f.outcome ? 'support_requested' : null, textReplied: true,
@@ -347,5 +413,5 @@ async function handleFailedStatus(businessId, waMessageId) {
 
 module.exports = {
   TEMPLATE, RECONTACT_STATUS, planForNewOrder, enrollNewOrder, releaseOrder, sendConfirmation, sendReminder, tick,
-  handleInbound, handleFailedStatus, _setDepsForTests,
+  handleInbound, handleFailedStatus, liftNoAnswer, _setDepsForTests,
 };

@@ -1004,6 +1004,29 @@ export default function WhatsAppPage() {
               {autoSaving ? 'بيتحفظ…' : 'حفظ التشغيل'}
             </button>
 
+            {!!auto.to_review?.length && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700/60 dark:bg-amber-950/30 p-3 space-y-2">
+                <h3 className="text-sm font-bold text-amber-900 dark:text-amber-200">
+                  راجعهم قبل الشحن ({auto.to_review.length})
+                </h3>
+                <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                  أوردرات العميل أكدها بنفسه على واتساب ومفيش موظفة كلمته، وكتب رسالة. اقرا الرسالة قبل ما الأوردر يتشحن.
+                </p>
+                <ul className="divide-y divide-amber-200 dark:divide-amber-800/60">
+                  {auto.to_review.map((x) => (
+                    <li key={x.order_id} className="py-2 space-y-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-sm font-bold text-slate-900 dark:text-white">أوردر #{x.order_id}</span>
+                        {x.product && <span className="text-xs text-slate-600 dark:text-slate-300 break-words">{x.product}</span>}
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400 mr-auto">{fmtAgo(x.updated_at)}</span>
+                      </div>
+                      <p className="text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap break-words">«{x.customer_text}»</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-sm font-bold text-slate-900 dark:text-white">الأوردرات اللي دخلت الواتساب</h3>

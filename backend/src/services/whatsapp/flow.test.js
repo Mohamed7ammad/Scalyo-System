@@ -123,6 +123,12 @@ test('once an agent settled the order, a tap changes nothing — it only tells a
   assert.deepEqual(tap('confirm', { Status: 'تم التأكيد' }), { type: 'already_confirmed', release: false, reply: 'already_confirmed' });
   assert.equal(tap('confirm', { Status: 'تم الشحن' }).type, 'already_confirmed');
   assert.deepEqual(tap('cancel', { Status: 'تم التأكيد' }), { type: 'closed_interest', tag: 'cancel_after_confirm', release: false, reply: 'support' });
+  /* …but when WhatsApp itself confirmed it (nobody holds it) and it has not shipped, it goes back to an agent */
+  assert.deepEqual(tap('cancel', { Status: 'تم التأكيد', confirmed_via: 'whatsapp' }),
+    { type: 'reopened', outcome: 'cancel_requested', tag: 'cancel', release: false, reopen: true, reply: 'cancel' });
+  assert.equal(tap('support', { Status: 'تم التأكيد', confirmed_via: 'whatsapp' }).reopen, true);
+  assert.equal(tap('confirm', { Status: 'تم التأكيد', confirmed_via: 'whatsapp' }).type, 'already_confirmed');
+  assert.equal(tap('cancel', { Status: 'تم الشحن', confirmed_via: 'whatsapp' }).type, 'closed_interest', 'already shipped → only the tag');
   for (const Status of ['تم الرفض', 'مؤجل', 'معلق حتي الدفع', 'ملغي - عدم رد نهائي', 'تم الإرجاع']) {
     const r = tap('confirm', { Status });
     assert.equal(r.type, 'closed_interest', Status);

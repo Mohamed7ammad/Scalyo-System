@@ -347,6 +347,21 @@ async function recontactResults(businessId) {
   return r;
 }
 
+/* To read BEFORE shipping: orders WhatsApp itself confirmed (no agent ever spoke
+   to the customer) whose customer also WROTE something — a new address, a
+   question, a change of mind. Only while they are still «تم التأكيد». */
+async function confirmedWithText(businessId, limit = 50) {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT f.order_id, f.customer_text, f.tag, f.outcome_at, f.updated_at, o."ProductName" AS product
+       FROM whatsapp_order_flow f
+       JOIN orders o ON o.id = f.order_id AND o.business_id = f.business_id
+      WHERE f.business_id = $1 AND f.customer_text IS NOT NULL AND f.created_at > NOW() - INTERVAL '30 days'
+        AND btrim(o."Status") = 'تم التأكيد' AND to_jsonb(o) ->> 'confirmed_via' = 'whatsapp'
+      ORDER BY f.updated_at DESC LIMIT $2`, [businessId, limit]);
+  return rows;
+}
+
 /* For the owner's page: the latest orders that went through the flow. */
 async function recentFlows(businessId, limit = 30) {
   await ensureSchema();
@@ -367,5 +382,5 @@ module.exports = {
   _markSchemaReadyForTests, showOnOrder,
   getAuto, saveAuto, enroll, getByOrder, latestByPhone,
   claimDueSends, markSent, markRecontactSent, markReleased, dueReleases, dueReminders, markReminder, markReply,
-  strandedHeldOrders, recentFlows, customersMessaged24h, recontactResults,
+  strandedHeldOrders, recentFlows, customersMessaged24h, recontactResults, confirmedWithText,
 };

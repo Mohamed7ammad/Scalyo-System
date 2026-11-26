@@ -1900,6 +1900,8 @@ function ResendBadge({ order }: { order: Order }) {
    shows only while it still matters: «عايز يلغي» disappears once the order is
    confirmed or rejected; «داس إلغاء بعد التأكيد» shows only until it ships. */
 const WA_OPEN = ['جديد', 'لا يرد', 'مراجعة جديدة', 'مؤجل', WA_HOLD_STATUS];
+/* statuses in which «واتساب» stands in for the holder (the confirmation still stands) */
+const WA_CONFIRMED_HOLDS = ['تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'مغلق - لن يشحن'];
 const WA_TAGS: Record<string, { label: string; hint: string; tone: string; when: (st: string) => boolean }> = {
   deposit: {
     label: 'أكد على واتساب، محتاج عربون',
@@ -2102,8 +2104,11 @@ const OrderRow = memo(function OrderRow({
     />
   ) : null;
 
-  /* The customer confirmed on WhatsApp themselves — no agent holds the order. */
-  const viaWhatsApp = order.confirmed_via === 'whatsapp' && !order.AssignedTo;
+  /* The customer confirmed on WhatsApp themselves — no agent holds the order.
+     Only while that confirmation stands: once the order is back to an open
+     status it needs an agent, so the normal assign control returns. */
+  const viaWhatsApp = order.confirmed_via === 'whatsapp' && !order.AssignedTo
+    && WA_CONFIRMED_HOLDS.includes(normStatus(order.Status));
   const assigneeEl = !canReassign ? null : viaWhatsApp ? (
     <span title="العميل أكد الأوردر بنفسه على واتساب — من غير عمولة"
       className="inline-flex items-center px-2 py-1 rounded-lg text-xs font-semibold whitespace-nowrap

@@ -20,7 +20,7 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
   const w = {
     now: new Date('2026-11-25T12:00:00Z'),                      // 14:00 Cairo
     orders: new Map(), flows: new Map(), sentTemplates: [], sentTexts: [], logged: [], assigned: [], changes: [],
-    metaFails: null, messages: new Map(), mode, shown: [], tagFails: false,
+    metaFails: null, messages: new Map(), mode, shown: [], tagFails: false, tracks: {},
   };
   const HOLD = flow.HOLD_STATUS;
   w.addOrder = (id, over = {}) => {
@@ -88,6 +88,7 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
     flows: () => flows, cloud: () => cloud, store: () => store, orderStatus: () => orderStatus,
     assign: async (orderId) => { const o = w.orders.get(orderId); o.AssignedTo = 'agent@test'; w.assigned.push(orderId); return o; },
     brandOf: async () => 'Product Pulse', now: () => w.now,
+    trackOf: async (b, email) => w.tracks[email] || 'confirmation',
   });
   w.advance = (min) => { w.now = new Date(w.now.getTime() + min * 60000); };
   w.tap = (action, orderId, from = '201001488462') => engine.handleInbound(1, { kind: 'button', payload: `wa1:${action}:${orderId}`, from, reply: action });
@@ -426,20 +427,110 @@ test('the old order: its customer taps «تأكيد» → «تم التأكيد�
   assert.match(w.sentTexts[0].body, /تم تأكيد طلبك/);
 });
 
-test('the old order: «إلغاء», or «تأكيد» from a «ضعيف» customer → tagged for its own agent, status untouched', async () => {
+test('the old order: «إلغاء», «طلب الدعم», or «تأكيد» from a «ضعيف» customer → back to «جديد» with its OWN agent, tagged', async () => {
   const w = world({ mode: 'test' });
   await w.recontact(62);
   await w.recontact(63, { DeliveryRate: 'ضعيف' });
+  await w.recontact(68);
   await engine.tick();
   await w.tap('cancel', 62);
   await w.tap('confirm', 63);
-  for (const [id, tag] of [[62, 'cancel'], [63, 'deposit']]) {
-    assert.equal(w.orders.get(id).Status, 'لا يرد');
-    assert.equal(w.orders.get(id).AssignedTo, 'agent@test');
+  await w.tap('support', 68);
+  for (const [id, tag] of [[62, 'cancel'], [63, 'deposit'], [68, 'support']]) {
+    assert.equal(w.orders.get(id).Status, 'جديد', 'on top of her work again');
+    assert.equal(w.orders.get(id).AssignedTo, 'agent@test', 'same agent');
     assert.equal(w.orders.get(id).wa_tag, tag);
   }
-  assert.equal(w.changes.length, 0);
+  assert.deepEqual(w.changes.map((c) => [c.from, c.to, c.effects.commission]), [['لا يرد', 'جديد', false], ['لا يرد', 'جديد', false], ['لا يرد', 'جديد', false]]);
+  assert.ok(w.shown.every((x) => x.statusThen === 'لا يرد'), 'the tag is on the row before the order moves');
   assert.equal(w.assigned.length, 0, 'no re-assignment: the order already has its agent');
+  await w.tap('support', 68);
+  assert.equal(w.changes.length, 3, 'a second tap moves nothing');
+});
+
+test('a review account\'s «لا يرد» order returns as «مراجعة جديدة»; one with no holder is assigned like a fresh order', async () => {
+  const w = world({ mode: 'test' });
+  w.tracks['review@test'] = 'review';
+  await w.recontact(70, { AssignedTo: 'review@test' });
+  await w.recontact(71, { AssignedTo: null });
+  await engine.tick();
+  await w.tap('support', 70);
+  await w.tap('cancel', 71);
+  assert.equal(w.orders.get(70).Status, 'مراجعة جديدة');
+  assert.equal(w.orders.get(70).AssignedTo, 'review@test');
+  assert.equal(w.orders.get(71).Status, 'جديد');
+  assert.equal(w.orders.get(71).AssignedTo, 'agent@test');
+  assert.deepEqual(w.assigned, [71]);
+});
+
+test('writing instead of tapping lifts a «لا يرد» order too; an agent who moved it first keeps her status', async () => {
+  const w = world({ mode: 'test' });
+  await w.recontact(72);
+  await engine.tick();
+  await engine.handleInbound(1, { kind: 'text', from: '201001488462', reply: 'ممكن تكلموني بعد 6' });
+  assert.equal(w.orders.get(72).Status, 'جديد');
+  assert.equal(w.orders.get(72).wa_note, 'ممكن تكلموني بعد 6');
+  const w2 = world({ mode: 'test' });
+  await w2.recontact(73);
+  await engine.tick();
+  w2.raceOnce = (o) => { o.Status = 'مؤجل'; };                    // she postponed it in the same second
+  await w2.tap('support', 73);
+  assert.equal(w2.orders.get(73).Status, 'مؤجل');
+  assert.equal(w2.orders.get(73).wa_tag, 'support');
+});
+
+test('«تأكيد» then «إلغاء» on WhatsApp: nobody holds the order, so it goes back to «جديد» and to an agent — it must not ship', async () => {
+  const w = world();
+  await w.hold(75);
+  await w.sendNow();
+  await w.tap('confirm', 75);
+  assert.equal(w.orders.get(75).Status, 'تم التأكيد');
+  assert.equal(w.orders.get(75).AssignedTo, null);
+  assert.deepEqual(await w.tap('cancel', 75), { handled: true, type: 'reopened' });
+  const o = w.orders.get(75);
+  assert.equal(o.Status, 'جديد');
+  assert.equal(o.AssignedTo, 'agent@test', 'an agent has it now');
+  assert.equal(o.confirmed_via, null, 'no longer counted as confirmed by WhatsApp');
+  assert.equal(o.wa_tag, 'cancel', 'the tag she sees on an open order');
+  assert.deepEqual([w.changes.at(-1).from, w.changes.at(-1).to, w.changes.at(-1).effects.commission], ['تم التأكيد', 'جديد', false]);
+  assert.equal(w.flows.get(75).outcome, 'cancel_requested');
+  assert.match(w.sentTexts.at(-1).body, /وصلنا طلب الإلغاء/);
+  await w.tap('confirm', 75);                                     // changed their mind again → the normal rule: WhatsApp confirms
+  assert.equal(w.orders.get(75).Status, 'تم التأكيد');
+});
+
+test('«طلب الدعم» after a WhatsApp confirmation reopens it too; one an AGENT confirmed, or one already shipped, is only tagged', async () => {
+  const w = world();
+  for (const id of [76, 77, 78]) await w.hold(id);
+  await w.sendNow();
+  await w.tap('confirm', 76);
+  await w.tap('support', 76);
+  assert.equal(w.orders.get(76).Status, 'جديد');
+  assert.equal(w.orders.get(76).wa_tag, 'support');
+
+  w.advance(30); await engine.tick();                             // 77, 78 reach an agent
+  Object.assign(w.orders.get(77), { Status: 'تم التأكيد' });      // she confirmed it herself
+  await w.tap('cancel', 77);
+  assert.equal(w.orders.get(77).Status, 'تم التأكيد', 'hers stays confirmed');
+  assert.equal(w.orders.get(77).AssignedTo, 'agent@test');
+  assert.equal(w.orders.get(77).wa_tag, 'cancel_after_confirm', 'she holds it, she sees the tag');
+
+  await w.tap('confirm', 78);                                     // WhatsApp confirmed …
+  w.raceOnce = (o) => { o.Status = 'تم الشحن'; };                 // … and it shipped the second the customer tapped «إلغاء»
+  await w.tap('cancel', 78);
+  assert.equal(w.orders.get(78).Status, 'تم الشحن', 'a shipped order is never pulled back');
+});
+
+test('after the 30-minute release: the agent marked «لا يرد», then the customer answers the reminder → back to «جديد» with her', async () => {
+  const w = world();
+  await w.hold(74);
+  await w.sendNow();
+  w.advance(30); await engine.tick();
+  w.orders.get(74).Status = 'لا يرد';                            // she called, no answer
+  await w.tap('support', 74);
+  assert.equal(w.orders.get(74).Status, 'جديد');
+  assert.equal(w.orders.get(74).AssignedTo, 'agent@test');
+  assert.equal(w.orders.get(74).wa_tag, 'support');
 });
 
 test('an agent settled the old order before its turn → no message; Meta refusing it changes nothing on the order', async () => {

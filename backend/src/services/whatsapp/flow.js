@@ -155,15 +155,25 @@ const isWeak = (order) => bt(order.DeliveryRate) === 'ضعيف';
  *   cancel_requested → to an agent, tagged «عايز يلغي»
  *   support_requested→ to an agent, tagged «طلب الدعم» (free text lands here too)
  *   already_confirmed→ nothing changes (the order is confirmed / shipped / delivered)
+ *   reopened         → «إلغاء» / «طلب الدعم» AFTER WhatsApp confirmed it, before it
+ *                      shipped: back to «جديد» with an agent, so it cannot ship first
  *   closed_interest  → nothing changes, but an agent is told the customer came back
  * `release` = the order must leave the hold now; `reply` = which auto-reply to send.
  */
 function decideTap({ action, order }) {
   const status = bt(order.Status);
   if (isOneOf(COMMITTED, status)) {
-    return action === 'confirm'
-      ? { type: 'already_confirmed', release: false, reply: 'already_confirmed' }
-      : { type: 'closed_interest', tag: action === 'cancel' ? 'cancel_after_confirm' : 'support', release: false, reply: 'support' };
+    if (action === 'confirm') return { type: 'already_confirmed', release: false, reply: 'already_confirmed' };
+    /* WhatsApp itself confirmed it and it has not shipped: NOBODY holds the order,
+       so a tag alone would be seen by no one and it would ship against the
+       customer's word. It goes back to an agent first (engine.reopenForAgent). */
+    if (status === CONFIRMED_STATUS && bt(order.confirmed_via) === 'whatsapp') {
+      return action === 'cancel'
+        /* tag «عايز يلغي», not «داس إلغاء بعد التأكيد»: once it is «جديد» again that is what the agent must read */
+        ? { type: 'reopened', outcome: 'cancel_requested', tag: 'cancel', release: false, reopen: true, reply: 'cancel' }
+        : { type: 'reopened', outcome: 'support_requested', tag: 'support', release: false, reopen: true, reply: 'support' };
+    }
+    return { type: 'closed_interest', tag: action === 'cancel' ? 'cancel_after_confirm' : 'support', release: false, reply: 'support' };
   }
   if (!isOneOf(TAP_DECIDES, status)) {
     /* an agent already settled it (rejected, postponed, waiting for payment, cancelled…) */

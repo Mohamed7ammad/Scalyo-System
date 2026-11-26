@@ -246,6 +246,8 @@ async function autoView(businessId) {
     },
     tags:  flowRules.TAGS,
     flows: await flows.recentFlows(businessId, 30),
+    /* confirmed by WhatsApp + the customer wrote something → read before shipping */
+    to_review: await flows.confirmedWithText(businessId),
   };
 }
 

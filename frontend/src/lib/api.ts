@@ -1809,6 +1809,8 @@ export interface WhatsAppAutoResponse {
            reminder1_min: number; reminder2_min: number; quiet_until_hour: number };
   tags:  Record<string, string>;
   flows: WhatsAppFlowRow[];
+  /** confirmed by WhatsApp and the customer wrote something — to read before shipping */
+  to_review?: { order_id: number; customer_text: string; tag: string | null; outcome_at: string | null; updated_at: string; product: string | null }[];
 }
 export const getWhatsAppAuto  = () => api.get<WhatsAppAutoResponse>('/api/whatsapp/auto');
 export const saveWhatsAppAuto = (data: { auto_mode: WhatsAppAutoMode; test_phones: string[]; split_test: boolean }) =>

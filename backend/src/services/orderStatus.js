@@ -286,6 +286,18 @@ async function applyUpdate({ businessId, orderId, current, updates, expectedStat
     }
   }
 
+  /* ── Step 1d: the «واتساب» label belongs to a confirmation that still stands.
+     An order the customer confirmed on WhatsApp and that is pulled back BEFORE it
+     ships (→ جديد, لا يرد, تم الرفض …) is no longer "confirmed by WhatsApp": the
+     admin must be able to hand it to an agent, and whoever confirms it next owns
+     it. Once shipped the label stays for good (delivered-vs-returned needs it).
+     Only a row that carries the label is touched — one extra SET on that row. */
+  if (statusChanging && !has('confirmed_via') && current.row?.confirmed_via
+      && normState(current.status) === normState('تم التأكيد')
+      && ![...COMMITTED_STATES, normState('مغلق - لن يشحن')].includes(normState(updates.Status))) {
+    updates.confirmed_via = null;
+  }
+
   /* ── Step 2: Execute the main order update (compare-and-set) ─────────
      SET clause is built only from the caller's whitelisted fields. With a
      Status in the payload the row must still hold the expected status — a
