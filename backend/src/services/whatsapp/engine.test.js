@@ -31,9 +31,9 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
   };
   const flows = {
     getAuto: async () => ({ auto_mode: w.mode, test_phones: testPhones, split_test: split, configured: true }),
-    enroll: async ({ orderId, businessId, phone, variant, sendAt, isTest }) => {
+    enroll: async ({ orderId, businessId, phone, variant, sendAt, isTest, kind = 'new' }) => {
       if (w.flows.has(orderId)) return null;
-      const f = { order_id: orderId, business_id: businessId, phone, variant, is_test: isTest, state: 'pending', send_at: sendAt,
+      const f = { order_id: orderId, business_id: businessId, phone, variant, is_test: isTest, kind, state: 'pending', send_at: sendAt,
         reminders_done: 0, messages_sent: 0, customer_replied: false, text_replied: false, tag: null, outcome: null, customer_text: null };
       w.flows.set(orderId, f);
       return f;
@@ -43,9 +43,12 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
     claimDueSends: async (now) => [...w.flows.values()].filter((f) => f.state === 'pending' && f.send_at <= now).map((f) => { f.state = 'sending'; return f; }),
     markSent: async (id, s) => Object.assign(w.flows.get(id), { state: 'waiting', sent_at: s.sentAt, hold_until: s.holdUntil,
       reminder1_at: s.reminder1At, reminder2_at: s.reminder2At, messages_sent: w.flows.get(id).messages_sent + 1 }),
+    markRecontactSent: async (id, sentAt) => Object.assign(w.flows.get(id), { state: 'released', sent_at: sentAt, released_at: sentAt,
+      release_reason: 'recontact', messages_sent: w.flows.get(id).messages_sent + 1 }),
     markReleased: async (id, reason, error) => { const f = w.flows.get(id); if (!f) return null;
       if (f.state !== 'done') f.state = 'released'; f.release_reason = f.release_reason || reason; f.last_error = error || f.last_error; return f; },
-    dueReleases: async (now) => [...w.flows.values()].filter((f) => f.state === 'waiting' && f.hold_until <= now),
+    dueReleases: async (now) => [...w.flows.values()].filter((f) => (f.state === 'waiting' && f.hold_until <= now)
+      || (f.state === 'pending' && f.send_at <= new Date(now.getTime() - 60 * 60000))),
     dueReminders: async (now, n) => [...w.flows.values()].filter((f) => f.reminders_done === n - 1 && f.sent_at
       && ['waiting', 'released'].includes(f.state) && !f.customer_replied && (n === 1 ? f.reminder1_at : f.reminder2_at) <= now),
     markReminder: async (id, n, sent) => { const f = w.flows.get(id); if (f.reminders_done !== n - 1) return false;
@@ -90,6 +93,12 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false 
   w.tap = (action, orderId, from = '201001488462') => engine.handleInbound(1, { kind: 'button', payload: `wa1:${action}:${orderId}`, from, reply: action });
   w.hold = async (id, over) => { const o = w.addOrder(id, over); await engine.enrollNewOrder(o, { phone: '201001488462', isTest: false, split }); return o; };
   w.sendNow = async () => { w.advance(5); return engine.tick(); };
+  /* an OLD «لا يرد» order with its agent, queued by the owner for one message */
+  w.recontact = async (id, over) => {
+    const o = w.addOrder(id, { Status: 'لا يرد', AssignedTo: 'agent@test', ...over });
+    await flows.enroll({ orderId: id, businessId: 1, phone: '201001488462', variant: 'A', sendAt: w.now, isTest: false, kind: 'recontact' });
+    return o;
+  };
   return w;
 }
 
@@ -379,4 +388,87 @@ test('a reminder that falls at night waits for 10:00; the 2nd stops if the numbe
   w.now = new Date('2026-11-26T20:40:00Z');                       // next day, 2nd reminder due
   assert.equal((await engine.tick()).reminders, 0, 'quality is not high → no second reminder');
   assert.equal(w.flows.get(33).reminders_done, 2);
+});
+
+/* ── old «لا يرد» orders the owner chose to message (kind 'recontact') ─────── */
+
+test('an old «لا يرد» order gets the confirmation once — it is never held, moved, released or reminded', async () => {
+  const w = world({ mode: 'test' });
+  await w.recontact(60);
+  assert.equal((await engine.tick()).sent, 1);
+  assert.equal(w.sentTemplates[0].name, 'order_confirm_v1');
+  assert.equal(w.sentTemplates[0].components.at(-1).parameters[0].payload, 'wa1:support:60');
+  assert.equal(w.orders.get(60).Status, 'لا يرد', 'the order did not move');
+  assert.equal(w.orders.get(60).AssignedTo, 'agent@test', 'still with its agent');
+  assert.equal(w.flows.get(60).state, 'released');
+  assert.equal(w.flows.get(60).release_reason, 'recontact');
+  w.advance(31);
+  assert.deepEqual(await engine.tick(), { sent: 0, released: 0, reminders: 0, rescued: 0 }, 'no release after 30 minutes');
+  w.advance(24 * 60);
+  assert.deepEqual(await engine.tick(), { sent: 0, released: 0, reminders: 0, rescued: 0 }, 'no reminder, ever');
+  assert.equal(w.sentTemplates.length, 1);
+  assert.equal(w.changes.length, 0, 'nothing wrote to the order');
+  assert.equal(w.assigned.length, 0, 'nobody was assigned');
+});
+
+test('the old order: its customer taps «تأكيد» → «تم التأكيد» by «واتساب», no commission, order leaves the agent', async () => {
+  const w = world({ mode: 'test' });
+  await w.recontact(61);
+  await engine.tick();
+  await w.tap('confirm', 61);
+  const o = w.orders.get(61);
+  assert.equal(o.Status, 'تم التأكيد');
+  assert.equal(o.AssignedTo, null);
+  assert.equal(o.confirmed_via, 'whatsapp');
+  assert.deepEqual(w.changes.at(-1).effects, { commission: false });
+  assert.equal(w.changes.at(-1).from, 'لا يرد');
+  assert.equal(w.flows.get(61).outcome, 'confirmed');
+  assert.match(w.sentTexts[0].body, /تم تأكيد طلبك/);
+});
+
+test('the old order: «إلغاء», or «تأكيد» from a «ضعيف» customer → tagged for its own agent, status untouched', async () => {
+  const w = world({ mode: 'test' });
+  await w.recontact(62);
+  await w.recontact(63, { DeliveryRate: 'ضعيف' });
+  await engine.tick();
+  await w.tap('cancel', 62);
+  await w.tap('confirm', 63);
+  for (const [id, tag] of [[62, 'cancel'], [63, 'deposit']]) {
+    assert.equal(w.orders.get(id).Status, 'لا يرد');
+    assert.equal(w.orders.get(id).AssignedTo, 'agent@test');
+    assert.equal(w.orders.get(id).wa_tag, tag);
+  }
+  assert.equal(w.changes.length, 0);
+  assert.equal(w.assigned.length, 0, 'no re-assignment: the order already has its agent');
+});
+
+test('an agent settled the old order before its turn → no message; Meta refusing it changes nothing on the order', async () => {
+  const w = world({ mode: 'test' });
+  await w.recontact(64);
+  await w.recontact(65);
+  w.orders.get(64).Status = 'تم التأكيد';                         // she reached the customer meanwhile
+  w.metaFails = new GraphError(131026, 'Message undeliverable');
+  assert.equal((await engine.tick()).sent, 0);
+  assert.equal(w.sentTemplates.length, 0);
+  assert.equal(w.flows.get(64).release_reason, 'moved');
+  assert.equal(w.flows.get(65).release_reason, 'send_failed');
+  assert.equal(w.orders.get(65).Status, 'لا يرد');
+  assert.equal(w.orders.get(65).AssignedTo, 'agent@test');
+  assert.equal(w.changes.length, 0);
+});
+
+test('«متوقف» stops the queued old orders too; a queue the worker missed for an hour is dropped, not sent late', async () => {
+  const w = world({ mode: 'off' });
+  await w.recontact(66);
+  await engine.tick();
+  assert.equal(w.flows.get(66).release_reason, 'switched_off');
+  assert.equal(w.sentTemplates.length, 0);
+  const w2 = world({ mode: 'test' });
+  await w2.recontact(67);
+  w2.advance(61);
+  assert.equal((await engine.tick()).sent, 0);
+  assert.equal(w2.sentTemplates.length, 0);
+  assert.equal(w2.flows.get(67).state, 'released');
+  assert.equal(w2.orders.get(67).Status, 'لا يرد');
+  assert.equal(w2.changes.length, 0);
 });

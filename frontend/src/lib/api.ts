@@ -1780,6 +1780,7 @@ export interface WhatsAppFlowRow {
   state:            'pending' | 'sending' | 'waiting' | 'released' | 'done';
   variant:          string;
   is_test:          boolean;
+  kind?:            'new' | 'recontact';
   send_at:          string;
   sent_at:          string | null;
   hold_until:       string | null;
@@ -1812,6 +1813,35 @@ export interface WhatsAppAutoResponse {
 export const getWhatsAppAuto  = () => api.get<WhatsAppAutoResponse>('/api/whatsapp/auto');
 export const saveWhatsAppAuto = (data: { auto_mode: WhatsAppAutoMode; test_phones: string[]; split_test: boolean }) =>
   api.put<WhatsAppAutoResponse>('/api/whatsapp/auto', data);
+
+/* One message to OLD no-answer orders: count first (GET), then the owner's own click queues them (POST). */
+export interface WhatsAppRecontactResults {
+  total: number; queued: number; sent: number; delivered: number; read: number; failed: number; not_sent: number;
+  confirmed: number; deposit: number; cancel: number; support: number; last_at: string | null;
+}
+export interface WhatsAppRecontactPreview {
+  results:       WhatsAppRecontactResults;
+  max_days_back: number;
+  today:         string;                       // YYYY-MM-DD, Cairo
+  from?:         string;
+  to?:           string;
+  found?:        number;                       // no-answer orders in the range
+  eligible?:     number;                       // customers we may message
+  weak?:         number;
+  by_day?:       { day: string; n: number }[];
+  skipped?:      { bad_number: number; already_messaged: number; other_order: number; same_customer: number; no_amount: number };
+  cap?:          { limit: number; safe: number; used: number; room: number };
+  max_batch?:    number;
+  can_send?:     number;
+}
+export interface WhatsAppRecontactQueued {
+  from: string; to: string; queued: number; asked: number; first_at: string; last_at: string;
+  results: WhatsAppRecontactResults;
+}
+export const getWhatsAppRecontact = (range?: { from: string; to: string }) =>
+  api.get<WhatsAppRecontactPreview>('/api/whatsapp/recontact', { params: range });
+export const sendWhatsAppRecontact = (data: { from: string; to: string; count: number }) =>
+  api.post<WhatsAppRecontactQueued>('/api/whatsapp/recontact', data);
 
 /** One of our message templates + what Meta says about it (null = not submitted yet). */
 export interface WhatsAppTemplate {

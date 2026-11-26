@@ -15,6 +15,7 @@ const { whatsappNumber } = require('../utils/phone');
 const templates        = require('../services/whatsapp/templates');
 const flows            = require('../services/whatsapp/flowStore');
 const flowRules        = require('../services/whatsapp/flow');
+const recontact        = require('../services/whatsapp/recontact');
 const { whatsappNumbers } = require('../utils/phone');
 const pool             = require('../config/db');
 
@@ -285,6 +286,43 @@ router.put('/auto', authenticate, requireAdmin, async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json(await autoView(businessId));
   } catch (err) { fail(res, err, 'تعذّر حفظ إعدادات التشغيل'); }
+});
+
+/* ── one message to OLD «لا يرد» orders (services/whatsapp/recontact.js) ──────
+   GET  = count only, nothing is sent.   POST = the owner's own click puts
+   `count` customers in the worker's queue (10 a minute). The order itself is
+   never moved: it stays «لا يرد» with its agent until the customer taps. */
+router.get('/recontact', authenticate, requireAdmin, async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const businessId = req.user.business_id;
+    const results = await flows.recontactResults(businessId);
+    if (!req.query.from && !req.query.to) {
+      return res.json({ results, max_days_back: recontact.MAX_DAYS_BACK, today: recontact.cairoDay(new Date()) });
+    }
+    const p = await recontact.preview(businessId, { from: req.query.from, to: req.query.to });
+    res.json({ ...p, results, max_days_back: recontact.MAX_DAYS_BACK, today: recontact.cairoDay(new Date()) });
+  } catch (err) { fail(res, err, 'تعذّر حساب أوردرات «لا يرد»'); }
+});
+
+router.post('/recontact', authenticate, requireAdmin, async (req, res) => {
+  const businessId = req.user.business_id;
+  try {
+    const auto = await flows.getAuto(businessId);
+    if (!auto.configured) return res.status(400).json({ error: 'احفظ مفاتيح ميتا الأول' });
+    /* «متوقف» is the stop button for everything, this included */
+    if (auto.auto_mode === 'off') return res.status(400).json({ error: 'التشغيل متوقف — اختار «تجربة على أرقام محددة» واحفظ الأول' });
+    const settings = await store.getSettings(businessId);
+    const list = await templateList(businessId, settings);
+    if (list.error) return res.status(400).json({ error: list.error });
+    const confirm = list.templates.find((t) => t.name === 'order_confirm_v1');
+    if (confirm?.meta?.status !== 'APPROVED') return res.status(400).json({ error: 'ميتا لسه موافقتش على رسالة التأكيد' });
+
+    const r = await recontact.queue(businessId, { from: req.body?.from, to: req.body?.to, count: req.body?.count });
+    console.log(`[whatsapp] recontact: ${r.queued} «لا يرد» order(s) queued by ${actor(req.user)} (${r.from} → ${r.to}, asked ${r.asked})`);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ...r, results: await flows.recontactResults(businessId) });
+  } catch (err) { fail(res, err, 'تعذّر تجهيز الدفعة'); }
 });
 
 module.exports = router;

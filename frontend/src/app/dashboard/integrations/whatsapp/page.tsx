@@ -17,6 +17,9 @@ import {
   getWhatsAppTemplates,
   getWhatsAppAuto,
   saveWhatsAppAuto,
+  getWhatsAppRecontact,
+  sendWhatsAppRecontact,
+  type WhatsAppRecontactPreview,
   type WhatsAppAutoMode,
   type WhatsAppAutoResponse,
   type WhatsAppFlowRow,
@@ -212,6 +215,16 @@ const RELEASE_REASON: Record<string, string> = {
   watchdog:     'اتأخر في الحجز — نزل للبنات',
   enroll_failed: 'متسجّلش — نزل للبنات',
 };
+/* the same reasons for an old «لا يرد» order — it stays where it was */
+const RECONTACT_REASON: Record<string, string> = {
+  moved:        'موظفة خلّصته قبل الإرسال — متبعتلوش',
+  send_failed:  'الرسالة متبعتتش',
+  late:         'الإرسال اتأخر — متبعتلوش',
+  stuck:        'الإرسال وقف — متبعتلوش',
+  switched_off: 'التشغيل اتقفل — متبعتلوش',
+  no_amount:    'مفيش مبلغ في الأوردر — متبعتلوش',
+  no_product:   'مفيش منتج في الأوردر — متبعتلوش',
+};
 const fmtClock = (iso: string | null) => {
   if (!iso) return '';
   const d = new Date(iso);
@@ -224,6 +237,11 @@ function flowLabel(f: WhatsAppFlowRow): { text: string; cls: string } {
   if (f.outcome === 'confirmed') return { text: 'العميل أكد على واتساب ✓', cls: green };
   if (f.state === 'pending') return { text: `الرسالة هتتبعت ${fmtClock(f.send_at)}`, cls: grey };
   if (f.state === 'sending') return { text: 'بتتبعت…', cls: grey };
+  /* an old «لا يرد» order: it never left its agent, so nothing "went down to the girls" */
+  if (f.kind === 'recontact') {
+    if (f.release_reason === 'recontact') return { text: f.customer_replied ? 'اتبعتله — العميل رد' : 'اتبعتله — مستنيين رده', cls: f.customer_replied ? amber : grey };
+    return { text: RECONTACT_REASON[f.release_reason ?? ''] ?? 'متبعتلوش', cls: amber };
+  }
   if (f.state === 'waiting') return { text: `اتبعتت — محجوز لحد ${fmtClock(f.hold_until)}`, cls: 'bg-lime-100 text-lime-800 dark:bg-lime-900/40 dark:text-lime-300' };
   return { text: RELEASE_REASON[f.release_reason ?? ''] ?? 'نزل للبنات', cls: amber };
 }
@@ -236,6 +254,7 @@ function FlowRow({ f, tags }: { f: WhatsAppFlowRow; tags: Record<string, string>
         <span className="text-sm font-bold text-slate-900 dark:text-white">أوردر #{f.order_id}</span>
         <bdi dir="ltr" className="font-mono text-xs text-slate-500 dark:text-slate-400">{localPhone(f.phone)}</bdi>
         {f.is_test && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">تجربة</span>}
+        {f.kind === 'recontact' && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">لا يرد قديم</span>}
         <span className="text-[11px] text-slate-400 mr-auto">{fmtAgo(f.created_at)}</span>
       </div>
       {f.product && <p className="text-xs text-slate-500 dark:text-slate-400 break-words">{f.product}</p>}
@@ -251,6 +270,201 @@ function FlowRow({ f, tags }: { f: WhatsAppFlowRow; tags: Record<string, string>
       {f.customer_text && <p className="text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words">العميل كتب: «{f.customer_text}»</p>}
       {f.last_error && <p className="text-xs text-red-600 dark:text-red-400 break-words" dir="ltr">{f.last_error}</p>}
     </li>
+  );
+}
+
+/* ── 6: one message to the OLD «لا يرد» orders ───────────────────────────────
+   Count first, then the owner's own click sends. The order never moves: it
+   stays «لا يرد» with its agent until the customer taps. */
+const shiftDay = (day: string, by: number) => {
+  const d = new Date(`${day}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + by);
+  return d.toISOString().slice(0, 10);
+};
+const fmtDay = (day: string) => new Date(`${day}T12:00:00Z`).toLocaleDateString('ar-EG-u-nu-latn', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+
+const SKIPPED: [keyof NonNullable<WhatsAppRecontactPreview['skipped']>, string][] = [
+  ['other_order',      'ليهم أوردر تاني حد وصلّهم فيه (اتأكد، اترفض، اتأجل…)'],
+  ['same_customer',    'نفس العميل طالب مرتين — هنبعتله مرة واحدة'],
+  ['already_messaged', 'اتبعتلهم واتساب مننا قبل كده'],
+  ['bad_number',       'الرقم مش موبايل مصري واضح'],
+  ['no_amount',        'الأوردر مفيهوش مبلغ أو منتج'],
+];
+
+function RecontactCard({ ready, stopped, onQueued, showToast }: {
+  ready: boolean; stopped: boolean; onQueued: () => void; showToast: (message: string, type: 'success' | 'error') => void;
+}) {
+  const [info, setInfo]     = useState<WhatsAppRecontactPreview | null>(null);
+  const [from, setFrom]     = useState('');
+  const [to, setTo]         = useState('');
+  const [count, setCount]   = useState('');
+  const [busy, setBusy]     = useState<'' | 'count' | 'send'>('');
+  const [error, setError]   = useState('');
+
+  const loadResults = useCallback(async () => {
+    try {
+      const { data: d } = await getWhatsAppRecontact();
+      setInfo((old) => (old?.eligible !== undefined ? { ...old, results: d.results } : d));
+      setFrom((v) => v || shiftDay(d.today, -6));
+      setTo((v) => v || shiftDay(d.today, -1));
+    } catch { /* the card still shows its form */ }
+  }, []);
+  useEffect(() => { if (ready) loadResults(); }, [ready, loadResults]);
+  useEffect(() => {                       // answers arrive by themselves while the page is open
+    if (!ready) return undefined;
+    const t = setInterval(() => { if (!document.hidden) loadResults(); }, 30000);
+    return () => clearInterval(t);
+  }, [ready, loadResults]);
+
+  const handleCount = async () => {
+    setError('');
+    setBusy('count');
+    try {
+      const { data: d } = await getWhatsAppRecontact({ from, to });
+      setInfo(d);
+      setCount(String(Math.min(50, d.can_send ?? 0) || ''));
+    } catch (e) {
+      setError(errMsg(e, 'تعذّر الحساب'));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const n = parseInt(count, 10) || 0;
+  const canSend = info?.can_send ?? 0;
+  const handleSend = async () => {
+    setError('');
+    if (!info?.from || !info?.to || n < 1) return;
+    if (!window.confirm(
+      `نبعت رسالة تأكيد الطلب على الواتساب لـ ${n} عميل؟\n\n`
+      + `• أحدث ${n} أوردر «لا يرد» من ${fmtDay(info.from)} لـ ${fmtDay(info.to)}.\n`
+      + '• رسالة واحدة لكل عميل، من غير تذكير.\n'
+      + '• الأوردر بيفضل «لا يرد» مع الموظفة لحد ما العميل يدوس.\n'
+      + '• الرسايل دي لعملاء حقيقيين ومينفعش تترجع.')) return;
+    setBusy('send');
+    try {
+      const { data: d } = await sendWhatsAppRecontact({ from: info.from, to: info.to, count: n });
+      showToast(`اتجهز ${d.queued} رسالة — بتتبعت 10 في الدقيقة`, 'success');
+      const { data: again } = await getWhatsAppRecontact({ from: info.from, to: info.to });
+      setInfo(again);
+      setCount('');
+      onQueued();
+    } catch (e) {
+      setError(errMsg(e, 'تعذّر الإرسال'));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const r = info?.results;
+  const stat = (label: string, value: number, tone = '') => (
+    <div className="rounded-xl bg-slate-50 dark:bg-slate-800/60 px-3 py-2">
+      <div className={`text-lg font-bold tabular-nums ${tone || 'text-slate-900 dark:text-white'}`}>{value}</div>
+      <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">{label}</div>
+    </div>
+  );
+
+  return (
+    <div className={card}>
+      <StepTitle n={6} title="رسالة لأوردرات «لا يرد» القديمة" done={(r?.sent ?? 0) > 0} />
+      <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+        بنبعت رسالة تأكيد الطلب مرة واحدة للعملاء اللي البنات اتصلوا بيهم ومردّوش. الأوردر بيفضل «لا يرد» مع الموظفة زي ما هو،
+        ولو العميل داس «تأكيد الطلب» بيبقى «تم التأكيد» باسم «واتساب».
+      </p>
+      {!ready ? (
+        <p className="text-sm text-slate-500 dark:text-slate-400">احفظ المفاتيح واستنى موافقة ميتا على الرسالة الأول.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="من يوم">
+              <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} dir="ltr" className={inputCls}
+                min={info ? shiftDay(info.today, -info.max_days_back) : undefined} max={info?.today} />
+            </Field>
+            <Field label="لحد يوم">
+              <input type="date" value={to} onChange={(e) => setTo(e.target.value)} dir="ltr" className={inputCls}
+                min={info ? shiftDay(info.today, -info.max_days_back) : undefined} max={info?.today} />
+            </Field>
+          </div>
+          <button type="button" onClick={handleCount} disabled={!from || !to || busy !== ''}
+            className="w-full sm:w-auto px-5 py-2.5 rounded-xl text-sm font-semibold border border-slate-300 dark:border-slate-700
+              text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50">
+            {busy === 'count' ? 'بيحسب…' : 'احسب العدد (مفيش حاجة هتتبعت)'}
+          </button>
+
+          {info?.eligible !== undefined && info.cap && (
+            <div className="space-y-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+              <p className="text-sm text-slate-800 dark:text-slate-100 leading-relaxed">
+                لقينا <b className="tabular-nums">{info.found}</b> أوردر «لا يرد» في الأيام دي، ينفع نبعت لـ{' '}
+                <b className="tabular-nums text-emerald-700 dark:text-emerald-300">{info.eligible}</b> عميل منهم.
+              </p>
+              {!!info.by_day?.length && (
+                <div className="flex flex-wrap gap-1.5">
+                  {info.by_day.map((d) => (
+                    <span key={d.day} className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                      {fmtDay(d.day)}: <b className="tabular-nums">{d.n}</b>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {info.skipped && SKIPPED.some(([k]) => info.skipped![k] > 0) && (
+                <ul className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed list-disc pr-5 space-y-0.5">
+                  {SKIPPED.filter(([k]) => info.skipped![k] > 0).map(([k, label]) => (
+                    <li key={k}><b className="tabular-nums">{info.skipped![k]}</b> مش هيتبعتلهم: {label}</li>
+                  ))}
+                </ul>
+              )}
+              {!!info.weak && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  منهم <b className="tabular-nums">{info.weak}</b> تقييمهم «ضعيف»: لو أكدوا مش هيتأكدوا لوحدهم، هتظهر للموظفة علامة «محتاج عربون».
+                </p>
+              )}
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                حد ميتا {info.cap.limit} عميل كل 24 ساعة، وإحنا بنقف عند {info.cap.safe}. اتبعت لـ{' '}
+                <b className="tabular-nums">{info.cap.used}</b> في آخر 24 ساعة، فاضل <b className="tabular-nums">{info.cap.room}</b>.
+              </p>
+              {stopped && (
+                <p className="text-sm text-amber-700 dark:text-amber-300 leading-relaxed">التشغيل «متوقف» في الخطوة 5 — اختار «تجربة على أرقام محددة» واحفظ عشان تقدر تبعت.</p>
+              )}
+              {canSend > 0 ? (
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="w-36">
+                    <Field label="هنبعت لكام عميل؟">
+                      <input type="number" inputMode="numeric" min={1} max={canSend} value={count} dir="ltr"
+                        onChange={(e) => setCount(e.target.value)} className={`${inputCls} font-mono`} />
+                    </Field>
+                  </div>
+                  <button type="button" onClick={handleSend} disabled={stopped || busy !== '' || n < 1 || n > canSend} className={primaryBtn}>
+                    {busy === 'send' ? 'بيتجهز…' : `ابعت لـ ${n || '…'} عميل`}
+                  </button>
+                  <p className="basis-full text-xs text-slate-500 dark:text-slate-400">أقصى عدد دلوقتي {canSend}. بنبدأ بالأحدث، وبتتبعت 10 رسايل في الدقيقة.</p>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500 dark:text-slate-400">مفيش حد ينفع نبعتله دلوقتي.</p>
+              )}
+            </div>
+          )}
+          {error && <p className="text-sm text-red-600 dark:text-red-400 leading-relaxed">{error}</p>}
+
+          {r && r.total > 0 && (
+            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">النتيجة لحد دلوقتي</h3>
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                {r.queued > 0 && stat('مستنية تتبعت', r.queued)}
+                {stat('اتبعتت', r.sent)}
+                {stat('وصلت', r.delivered)}
+                {stat('اتقرت', r.read)}
+                {stat('أكدوا', r.confirmed, 'text-emerald-700 dark:text-emerald-300')}
+                {stat('أكد ومحتاج عربون', r.deposit)}
+                {stat('طلب دعم أو كتب', r.support)}
+                {stat('عايز يلغي', r.cancel)}
+                {stat('موصلتش', r.failed + r.not_sent, r.failed + r.not_sent > 0 ? 'text-red-600 dark:text-red-400' : '')}
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">تفاصيل كل أوردر في قايمة «الأوردرات اللي دخلت الواتساب» فوق، وعليها علامة «لا يرد قديم».</p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -808,6 +1022,10 @@ export default function WhatsAppPage() {
           </>
         )}
       </div>
+
+      {/* 6 — one message to the old «لا يرد» orders */}
+      <RecontactCard ready={!!s.configured && !!auto} stopped={auto?.auto_mode === 'off'}
+        onQueued={() => loadAuto(false)} showToast={showToast} />
 
       {/* Log */}
       <div className={card}>

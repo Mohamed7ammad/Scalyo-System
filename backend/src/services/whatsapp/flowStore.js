@@ -9,7 +9,13 @@
            waiting  → sent, order still held until hold_until
            released → the order went to the agents (see release_reason)
            done     → the customer's tap settled it (see outcome)
-   Automation switch lives on whatsapp_settings: auto_mode off | test | on. */
+   Automation switch lives on whatsapp_settings: auto_mode off | test | on.
+
+   kind: 'new'       → a fresh order, held for WhatsApp (everything above);
+         'recontact' → an OLD «لا يرد» order the owner chose to message once
+                       (services/whatsapp/recontact.js). It is never held, never
+                       reminded and never handed to anyone: pending → sending →
+                       released (reason 'recontact') the moment its message goes. */
 'use strict';
 
 const pool = require('../../config/db');
@@ -46,6 +52,7 @@ const FLOW_DDL = `
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
   );
+  ALTER TABLE whatsapp_order_flow ADD COLUMN IF NOT EXISTS kind VARCHAR(12) NOT NULL DEFAULT 'new';
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_due_idx ON whatsapp_order_flow (state, send_at) WHERE state IN ('pending', 'sending', 'waiting');
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_phone_idx ON whatsapp_order_flow (business_id, phone, created_at DESC);
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_recent_idx ON whatsapp_order_flow (business_id, created_at DESC);
@@ -152,13 +159,13 @@ async function saveAuto(businessId, { auto_mode, test_phones, split_test }, acto
 
 /* ── one order's diary ────────────────────────────────────────────────────── */
 
-async function enroll({ orderId, businessId, phone, variant, sendAt, isTest }) {
+async function enroll({ orderId, businessId, phone, variant, sendAt, isTest, kind = 'new' }) {
   await ensureSchema();
   const { rows } = await pool.query(
-    `INSERT INTO whatsapp_order_flow (order_id, business_id, phone, variant, is_test, send_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO whatsapp_order_flow (order_id, business_id, phone, variant, is_test, send_at, kind)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (order_id) DO NOTHING RETURNING *`,
-    [orderId, businessId, phone, variant, isTest === true, sendAt]);
+    [orderId, businessId, phone, variant, isTest === true, sendAt, kind === 'recontact' ? 'recontact' : 'new']);
   return rows[0] || null;
 }
 
@@ -199,6 +206,15 @@ async function markSent(orderId, { sentAt, holdUntil, reminder1At, reminder2At }
         SET state = 'waiting', sent_at = $2, hold_until = $3, reminder1_at = $4, reminder2_at = $5,
             messages_sent = messages_sent + 1, last_error = NULL, updated_at = NOW()
       WHERE order_id = $1`, [orderId, sentAt, holdUntil, reminder1At, reminder2At]);
+}
+
+/* An old «لا يرد» order got its one message: nothing to hold, nothing to remind. */
+async function markRecontactSent(orderId, sentAt) {
+  await pool.query(
+    `UPDATE whatsapp_order_flow
+        SET state = 'released', sent_at = $2, released_at = $2, release_reason = 'recontact',
+            messages_sent = messages_sent + 1, last_error = NULL, updated_at = NOW()
+      WHERE order_id = $1`, [orderId, sentAt]);
 }
 
 /* The order left the hold (or never needed it). Keeps `done` rows done. */
@@ -292,11 +308,50 @@ async function strandedHeldOrders(holdStatus, minutes = 90, limit = 50) {
   return rows;
 }
 
+/* Meta's limit is on CUSTOMERS we open a conversation with in any 24 hours.
+   Counted here: every number that got a template from us in the last 24 hours,
+   plus the ones already queued to get one. */
+async function customersMessaged24h(businessId) {
+  await ensureSchema();
+  const { rows: [r] } = await pool.query(
+    `SELECT COUNT(DISTINCT phone)::int AS n FROM (
+       SELECT phone FROM whatsapp_messages
+        WHERE business_id = $1 AND direction = 'out' AND template IS NOT NULL AND status <> 'failed'
+          AND created_at > NOW() - INTERVAL '24 hours'
+       UNION
+       SELECT phone FROM whatsapp_order_flow WHERE business_id = $1 AND state IN ('pending', 'sending')
+     ) x`, [businessId]);
+  return r?.n || 0;
+}
+
+/* What became of the old «لا يرد» orders the owner messaged. */
+async function recontactResults(businessId) {
+  await ensureSchema();
+  const { rows: [r] } = await pool.query(
+    `SELECT COUNT(*)::int                                                            AS total,
+            COUNT(*) FILTER (WHERE f.state IN ('pending', 'sending'))::int           AS queued,
+            COUNT(*) FILTER (WHERE f.sent_at IS NOT NULL)::int                       AS sent,
+            COUNT(*) FILTER (WHERE m.status IN ('delivered', 'read'))::int           AS delivered,
+            COUNT(*) FILTER (WHERE m.status = 'read')::int                           AS read,
+            COUNT(*) FILTER (WHERE m.status = 'failed')::int                         AS failed,
+            COUNT(*) FILTER (WHERE f.sent_at IS NULL AND f.state = 'released')::int  AS not_sent,
+            COUNT(*) FILTER (WHERE f.outcome = 'confirmed')::int                     AS confirmed,
+            COUNT(*) FILTER (WHERE f.outcome = 'deposit_needed')::int                AS deposit,
+            COUNT(*) FILTER (WHERE f.outcome = 'cancel_requested')::int              AS cancel,
+            COUNT(*) FILTER (WHERE f.outcome = 'support_requested')::int             AS support,
+            MAX(f.created_at)                                                        AS last_at
+       FROM whatsapp_order_flow f
+       LEFT JOIN LATERAL (SELECT status FROM whatsapp_messages m
+                           WHERE m.order_id = f.order_id AND m.kind = 'confirm' ORDER BY m.id DESC LIMIT 1) m ON true
+      WHERE f.business_id = $1 AND f.kind = 'recontact'`, [businessId]);
+  return r;
+}
+
 /* For the owner's page: the latest orders that went through the flow. */
 async function recentFlows(businessId, limit = 30) {
   await ensureSchema();
   const { rows } = await pool.query(
-    `SELECT f.order_id, f.phone, f.state, f.variant, f.is_test, f.send_at, f.sent_at, f.hold_until,
+    `SELECT f.order_id, f.phone, f.state, f.variant, f.is_test, f.kind, f.send_at, f.sent_at, f.hold_until,
             f.reminders_done, f.messages_sent, f.customer_replied, f.released_at, f.release_reason,
             f.tag, f.customer_text, f.outcome, f.outcome_at, f.last_error, f.created_at,
             btrim(o."Status") AS order_status, o."ProductName" AS product, o."AssignedTo" AS holder,
@@ -311,6 +366,6 @@ module.exports = {
   FLOW_DDL, ORDERS_DDL, ORDERS_COLUMNS, MODES, ensureSchema, ensureOrdersColumn, ordersColumnsExist, ordersColumnsReady,
   _markSchemaReadyForTests, showOnOrder,
   getAuto, saveAuto, enroll, getByOrder, latestByPhone,
-  claimDueSends, markSent, markReleased, dueReleases, dueReminders, markReminder, markReply,
-  strandedHeldOrders, recentFlows,
+  claimDueSends, markSent, markRecontactSent, markReleased, dueReleases, dueReminders, markReminder, markReply,
+  strandedHeldOrders, recentFlows, customersMessaged24h, recontactResults,
 };

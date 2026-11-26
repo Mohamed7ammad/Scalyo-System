@@ -4,7 +4,10 @@
      • the per-minute worker sends the confirmation, releases the order to the
        agents when the hold ends, sends the reminders, and rescues anything stuck;
      • a customer's tap / message changes the order — ONLY through
-       services/orderStatus.js (compare-and-set), so it can never race an agent.
+       services/orderStatus.js (compare-and-set), so it can never race an agent;
+     • an OLD «لا يرد» order the owner chose to message (kind 'recontact') gets
+       the same confirmation once — it is never held, released or reminded, and
+       a failure leaves the order exactly where it was, with its agent.
 
    Safety, in order of importance:
      1. An order is never lost: every failure path RELEASES it to the agents
@@ -24,6 +27,8 @@ const ACTOR = Object.freeze({ label: 'whatsapp', source: 'whatsapp' });
 const NO_COMMISSION = Object.freeze({ commission: false });
 const LATE_SEND_MIN = 45;        // a confirmation this late is not sent — the order goes to the agents
 const LATE_REMINDER_MIN = 6 * 60;
+const RECONTACT_STATUS = 'لا يرد';   // the only status an old order may be messaged in
+const isRecontact = (f) => f.kind === 'recontact';
 
 /* Loaded lazily: routes/webhooks.js requires this module, and orderStatus pulls half the app. */
 let deps = {
@@ -108,24 +113,38 @@ async function logOut(f, kind, template, sent, error) {
   }).catch((e) => warn('message log:', e.message));
 }
 
+/* The message will not go (or did not). A held order goes to the agents; an old
+   «لا يرد» order was never taken from its agent, so only the diary is closed. */
+function giveUp(f, reason, error = null) {
+  return isRecontact(f)
+    ? deps.flows().markReleased(f.order_id, reason, error)
+    : releaseOrder(f.business_id, f.order_id, reason, error);
+}
+
 async function sendConfirmation(f) {
   const now = deps.now();
   const { GraphError } = deps.cloud();
+  const recontact = isRecontact(f);
   const cur = await deps.orderStatus().loadOrder(f.business_id, f.order_id);
-  if (!cur || String(cur.status).trim() !== flow.HOLD_STATUS) {
+  if (!cur || String(cur.status).trim() !== (recontact ? RECONTACT_STATUS : flow.HOLD_STATUS)) {
     await deps.flows().markReleased(f.order_id, 'moved');          // someone already handled the order
     return 'moved';
   }
-  if ((now - new Date(f.send_at)) / 60000 > LATE_SEND_MIN) { await releaseOrder(f.business_id, f.order_id, 'late'); return 'late'; }
+  if ((now - new Date(f.send_at)) / 60000 > LATE_SEND_MIN) { await giveUp(f, 'late'); return 'late'; }
   const auto = await deps.flows().getAuto(f.business_id);
-  if (auto.auto_mode === 'off' || !auto.configured) { await releaseOrder(f.business_id, f.order_id, 'switched_off'); return 'switched_off'; }
+  if (auto.auto_mode === 'off' || !auto.configured) { await giveUp(f, 'switched_off'); return 'switched_off'; }
   const built = flow.templateComponents('confirm', cur.row);
-  if (!built.ok) { await releaseOrder(f.business_id, f.order_id, built.reason); return built.reason; }
+  if (!built.ok) { await giveUp(f, built.reason); return built.reason; }
 
   const settings = await deps.store().getSettings(f.business_id);
   try {
     const sent = await deps.cloud().sendTemplate(settings, { to: f.phone, name: TEMPLATE.confirm, language: TEMPLATE.language, components: built.components });
     await logOut(f, 'confirm', TEMPLATE.confirm, sent, null);
+    if (recontact) {
+      await deps.flows().markRecontactSent(f.order_id, now);
+      log(`order #${f.order_id}: confirmation sent to an old «${RECONTACT_STATUS}» order (stays with its agent)`);
+      return 'sent';
+    }
     const s = flow.scheduleAfterSend(now);
     await deps.flows().markSent(f.order_id, { sentAt: now, holdUntil: s.hold_until, reminder1At: s.reminder1_at, reminder2At: s.reminder2_at });
     log(`order #${f.order_id}: confirmation sent — held until ${s.hold_until.toISOString()}`);
@@ -133,7 +152,7 @@ async function sendConfirmation(f) {
   } catch (e) {
     if (!(e instanceof GraphError)) throw e;
     await logOut(f, 'confirm', TEMPLATE.confirm, null, e);
-    await releaseOrder(f.business_id, f.order_id, 'send_failed', `#${e.code} ${e.metaMessage || e.message}`);
+    await giveUp(f, 'send_failed', `#${e.code} ${e.metaMessage || e.message}`);
     return 'send_failed';
   }
 }
@@ -185,6 +204,7 @@ async function tick() {
       if ((await guard(`send #${f.order_id}`, () => sendConfirmation(f))) === 'sent') out.sent += 1;
     }
     for (const f of (await guard('due releases', () => flows.dueReleases(now))) || []) {
+      if (isRecontact(f)) { await guard(`close #${f.order_id}`, () => flows.markReleased(f.order_id, 'stuck')); continue; }   // never held → nothing to release
       await guard(`release #${f.order_id}`, () => releaseOrder(f.business_id, f.order_id, f.state === 'waiting' ? 'timeout' : 'stuck'));
       out.released += 1;
     }
@@ -326,6 +346,6 @@ async function handleFailedStatus(businessId, waMessageId) {
 }
 
 module.exports = {
-  TEMPLATE, planForNewOrder, enrollNewOrder, releaseOrder, sendConfirmation, sendReminder, tick,
+  TEMPLATE, RECONTACT_STATUS, planForNewOrder, enrollNewOrder, releaseOrder, sendConfirmation, sendReminder, tick,
   handleInbound, handleFailedStatus, _setDepsForTests,
 };
