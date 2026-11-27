@@ -103,6 +103,33 @@ async function checkPhoneNumber(settings) {
     `${encodeURIComponent(settings.phone_number_id)}?fields=display_phone_number,verified_name,quality_rating`);
 }
 
+/* A file a customer sent (voice note, picture): Meta gives a short-lived link
+   for the media id, and the link itself wants the same token. The token is only
+   ever sent to Meta's own hosts — a link pointing anywhere else is refused. */
+const MEDIA_HOSTS = /(^|\.)(fbsbx\.com|facebook\.com|fbcdn\.net|whatsapp\.net)$/i;
+async function fetchMedia(settings, mediaId, { maxBytes = 8 * 1024 * 1024 } = {}) {
+  const info = await graph(settings, 'GET', encodeURIComponent(mediaId));
+  if (!info?.url) throw new GraphError({ message: 'ميتا مرجّعتش رابط الملف.', code: 'no_media_url' });
+  let host = '';
+  try { host = new URL(info.url).hostname; } catch { /* refused below */ }
+  if (!MEDIA_HOSTS.test(host)) throw new GraphError({ message: 'رابط الملف مش من ميتا.', code: 'bad_media_host' });
+  if (Number(info.file_size) > maxBytes) throw new GraphError({ message: 'الملف أكبر من المسموح.', code: 'media_too_large' });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetchImpl(info.url, { headers: { Authorization: `Bearer ${settings.access_token}` }, signal: ctl.signal });
+    if (!res.ok) throw new GraphError({ message: `تنزيل الملف فشل (HTTP ${res.status}).`, code: 'media_download', httpStatus: res.status });
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > maxBytes) throw new GraphError({ message: 'الملف أكبر من المسموح.', code: 'media_too_large' });
+    return { mime: info.mime_type || null, size: bytes.length, bytes };
+  } catch (e) {
+    if (e instanceof GraphError) throw e;
+    throw new GraphError({ message: 'تنزيل الملف من ميتا فشل — هنجرّب تاني.', code: e?.name === 'AbortError' ? 'timeout' : 'network' });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The account's daily limit tier ("TIER_250", "TIER_2K" …), or null if Meta does not say. */
 async function messagingLimit(settings) {
   const r = await graph(settings, 'GET',
@@ -184,5 +211,5 @@ async function subscribeApp(settings) {
   return data?.success === true;
 }
 
-module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, messagingLimit, sendTemplate,
+module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, messagingLimit, fetchMedia, sendTemplate,
   listSubscribedApps, subscribeApp, ownApp, listTemplates, createTemplate, friendlyForCode, sendText, _setFetchForTests };

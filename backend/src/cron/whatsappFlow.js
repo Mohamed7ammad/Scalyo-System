@@ -22,6 +22,12 @@ function startWhatsappFlowCron() {
       console.warn('[whatsapp flow] tick failed:', e.message);
     }
   }, { timezone: 'Africa/Cairo' });
+  /* voice notes / pictures customers sent before their files were being kept (idempotent) */
+  setTimeout(() => {
+    require('../services/whatsapp/mediaStore').backfill()
+      .then((n) => { if (n) console.log(`[whatsapp flow] ${n} earlier voice note(s) / picture(s) queued for download`); })
+      .catch((e) => console.warn('[whatsapp flow] media backfill:', e.message));
+  }, 45000);
   /* Meta's view of the number (quality + daily limit tier), twice an hour while the flow is on */
   cron.schedule('7,37 * * * *', () => { engine.refreshHealth().catch(() => {}); }, { timezone: 'Africa/Cairo' });
   setTimeout(() => { engine.refreshHealth().catch(() => {}); }, 30000);

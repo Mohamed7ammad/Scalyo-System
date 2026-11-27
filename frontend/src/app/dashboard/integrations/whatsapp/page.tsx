@@ -35,6 +35,7 @@ import {
   type WhatsAppSettingsResponse,
 } from '@/lib/api';
 import { serverNow } from '@/lib/serverClock';
+import WhatsAppMedia from '@/components/WhatsAppMedia';
 
 type Toast = { message: string; type: 'success' | 'error' } | null;
 
@@ -218,6 +219,10 @@ const RELEASE_REASON: Record<string, string> = {
   stuck:        'الإرسال وقف — نزل للبنات',
   watchdog:     'اتأخر في الحجز — نزل للبنات',
   enroll_failed: 'متسجّلش — نزل للبنات',
+  reconfirm:    'أكد بعد ما طلب دعم أو إلغاء — نزل للبنات',
+  dup:          'أكد، وعنده أوردر تاني — نزل للبنات',
+  address:      'أكد، والعنوان ناقص — نزل للبنات',
+  lost:         'أكد على طلب مفقود — نزل للبنات',
 };
 /* the same reasons for an old «لا يرد» order — it stays where it was */
 const RECONTACT_REASON: Record<string, string> = {
@@ -272,6 +277,7 @@ function FlowRow({ f, tags }: { f: WhatsAppFlowRow; tags: Record<string, string>
         {f.messages_sent > 1 && <span className="text-[11px] text-slate-400">{f.messages_sent} رسايل</span>}
       </div>
       {f.customer_text && <p className="text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words">العميل كتب: «{f.customer_text}»</p>}
+      {f.customer_text && /\[(audio|image|video|document|sticker)\]/.test(f.customer_text) && <WhatsAppMedia orderId={f.order_id} />}
       {f.last_error && <p className="text-xs text-red-600 dark:text-red-400 break-words" dir="ltr">{f.last_error}</p>}
     </li>
   );
@@ -1193,6 +1199,7 @@ export default function WhatsAppPage() {
                         <span className="text-[11px] text-slate-500 dark:text-slate-400 mr-auto">{fmtAgo(x.updated_at)}</span>
                       </div>
                       <p className="text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap break-words">«{x.customer_text}»</p>
+                      {/\[(audio|image|video|document|sticker)\]/.test(x.customer_text) && <WhatsAppMedia orderId={x.order_id} />}
                     </li>
                   ))}
                 </ul>

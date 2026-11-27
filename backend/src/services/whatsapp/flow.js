@@ -203,7 +203,29 @@ const trialGroup = (waPhone) => (CONTROL_DIGITS.includes(String(waPhone ?? '').s
  *   closed_interest  → nothing changes, but an agent is told the customer came back
  * `release` = the order must leave the hold now; `reply` = which auto-reply to send.
  */
-function decideTap({ action, order }) {
+/* «تأكيد الطلب» confirms by itself only when nothing needs a person first
+   (found on the first live day, 2026-11-27 — every one was a real order):
+     reconfirm — the customer had asked for support / to cancel / sent a voice
+                 note, and nobody has spoken to them since;
+     dup       — the customer has ANOTHER order of ours in play (open, confirmed
+                 or on its way): one of the two is probably a duplicate;
+     address   — no governorate, or an address too short to deliver to;
+     lost      — a «طلب مفقود» (an abandoned checkout, orders.is_lost_order): its
+                 total only gets the governorate's shipping when an AGENT
+                 completes it, so the amount in our message may be short. The
+                 owner's batches no longer message these at all (recontact.js);
+                 this covers the 50 that were messaged on 2026-11-26/27.
+   Then the order goes to (or stays with) an agent, tagged with the reason. */
+const MIN_ADDRESS_CHARS = 10;
+function confirmBlocker({ order, flow, otherOrders = 0 }) {
+  if (order.is_lost_order === true) return 'lost';
+  if (['support', 'cancel', 'voice'].includes(bt(flow?.tag))) return 'reconfirm';
+  if (otherOrders > 0) return 'dup';
+  if (!bt(order.City) || bt(order.Address).length < MIN_ADDRESS_CHARS) return 'address';
+  return null;
+}
+
+function decideTap({ action, order, flow = null, otherOrders = 0 }) {
   const status = bt(order.Status);
   if (isOneOf(COMMITTED, status)) {
     if (action === 'confirm') return { type: 'already_confirmed', release: false, reply: 'already_confirmed' };
@@ -224,9 +246,10 @@ function decideTap({ action, order }) {
       reply: action === 'cancel' ? 'cancel' : 'support' };
   }
   if (action === 'confirm') {
-    return isWeak(order)
-      ? { type: 'deposit_needed', tag: 'deposit', release: true, reply: 'deposit' }
-      : { type: 'confirm', release: true, reply: 'confirmed' };
+    if (isWeak(order)) return { type: 'deposit_needed', tag: 'deposit', release: true, reply: 'deposit' };
+    const why = confirmBlocker({ order, flow, otherOrders });
+    if (why) return { type: 'agent_needed', tag: why, release: true, reply: 'deposit' };
+    return { type: 'confirm', release: true, reply: 'confirmed' };
   }
   if (action === 'cancel') return { type: 'cancel_requested', tag: 'cancel', release: true, reply: 'cancel' };
   return { type: 'support_requested', tag: 'support', release: true, reply: 'support' };
@@ -239,7 +262,79 @@ const TAGS = Object.freeze({
   support:              'طلب الدعم',
   confirm_after_close:  'داس «تأكيد» بعد ما الأوردر اتقفل',
   cancel_after_confirm: 'داس «إلغاء» بعد التأكيد',
+  voice:                'بعت رسالة صوتية',
+  reconfirm:            'أكد بعد ما طلب دعم أو إلغاء',
+  dup:                  'أكد، وعنده أوردر تاني',
+  address:              'أكد، والعنوان ناقص',
+  lost:                 'أكد على واتساب — طلب مفقود',
 });
+
+/* ── what the customer WROTE ────────────────────────────────────────────────── */
+
+/* Letters and digits only, the way people actually type: no emoji / punctuation /
+   tashkeel, أ إ آ → ا, ى → ي, ة → ه, one space between words, lower-case Latin. */
+function normText(s) {
+  return String(s ?? '').normalize('NFC').toLowerCase()
+    .replace(/[\u064B-\u0652\u0640]/g, '')
+    .replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+/* The button's own words typed by hand count as the tap — ONLY when they are the
+   whole message. «تأكيد الطلب بس غيّروا العنوان» is a message for an agent. */
+const TYPED = {
+  confirm: ['تاكيد الطلب', 'تاكيد', 'اكد', 'اكد الطلب', 'تم التاكيد', 'confirm'],
+  cancel:  ['الغاء الطلب', 'الغاء', 'الغي', 'الغي الطلب', 'cancel'],
+};
+function typedAction(text) {
+  const t = normText(text);
+  if (!t) return null;
+  if (TYPED.confirm.includes(t)) return 'confirm';
+  if (TYPED.cancel.includes(t)) return 'cancel';
+  return null;
+}
+
+/* A reply that only says "fine / thanks" — nothing an agent has to act on.
+   Every word must be one of these, and there are few of them; an emoji alone
+   counts. Anything else (a question, an address, a colour, a date) is NOT an
+   acknowledgement, and after a WhatsApp confirmation it sends the order to an
+   agent before it ships. Erring towards "needs a human" is the safe side. */
+const ACK_WORDS = new Set([
+  'تمام', 'تمم', 'شكرا', 'جزيلا', 'لك', 'ليك', 'لكم', 'ليكم', 'اوك', 'اوكي', 'اوكيه', 'ok', 'okay', 'okey',
+  'ماشي', 'حاضر', 'تم', 'منتظر', 'منتظرك', 'منتظركم', 'منتظرين', 'في', 'الانتظار', 'انتظاركم', 'انتظارك',
+  'ان', 'شاء', 'انشاء', 'الله', 'باذن', 'يبارك', 'فيك', 'فيكم', 'تسلم', 'تسلموا', 'مرسي', 'thanks', 'thank', 'you',
+  'يا', 'باشا', 'فندم', 'ربنا', 'يخليك', 'يكرمك', 'الف', 'جميل', 'طيب', 'اه', 'ايوه', 'ايوا', 'نعم', 'yes',
+]);
+function isAck(text) {
+  const t = normText(text);
+  if (!t) return true;                                   // an emoji, a sticker caption, punctuation
+  const words = t.split(' ');
+  return words.length <= 6 && words.every((w) => ACK_WORDS.has(w));
+}
+
+/* WhatsApp Business' own greeting / away message, sent by the customer's phone
+   the second our message lands — not the customer speaking. It must not count
+   as an answer: no tag, no release, and the reminders go on. */
+const AUTO_REPLY_MARKS = [
+  'شكرا لك علي تواصلك', 'شكرا لتواصلك', 'شكرا علي تواصلك', 'اخبرنا كيف يمكننا', 'كيف يمكننا خدمتك', 'كيف يمكننا مساعدتك',
+  'شكرا لك علي رسالتك', 'نحن غير متاحين', 'غير متاحين الان', 'سنرد عليك في اقرب وقت',
+  'thank you for contacting', 'thanks for contacting', 'thank you for your message', 'thanks for your message',
+  'how can we help', 'let us know how we can help', 'we re unavailable right now', 'we are unavailable right now', 'will respond as soon as possible',
+];
+function isAutoReply(text) {
+  const t = normText(text);
+  return !!t && AUTO_REPLY_MARKS.some((m) => t.includes(m));
+}
+
+/* A voice note / picture / file in Meta's message object → what to fetch, or null. */
+const MEDIA_KINDS = ['audio', 'image', 'video', 'document', 'sticker'];
+function mediaOf(raw) {
+  const kind = raw && MEDIA_KINDS.includes(raw.type) ? raw.type : null;
+  const m = kind ? raw[kind] : null;
+  if (!m || !m.id) return null;
+  return { kind, id: String(m.id), mime: m.mime_type ? String(m.mime_type) : null };
+}
 
 /* Free-form replies inside the 24 h window the tap opens — free, editable, no Meta review. */
 function replyText(key, { brand = '' } = {}) {
@@ -274,4 +369,5 @@ module.exports = {
   HOLD_STATUS, NEW_STATUS, CONFIRMED_STATUS, TAP_DECIDES, REMINDABLE, COMMITTED, DEFAULTS, TAGS,
   cleanParam, formatAmount, amountDue, messageParams, buttonPayload, parsePayload, templateComponents,
   outsideQuietHours, addMin, variantOf, sendAt, scheduleAfterSend, isWeak, trialGroup, dailyLimits, decideTap, replyText, canRemind,
+  normText, typedAction, isAck, isAutoReply, mediaOf, confirmBlocker, MIN_ADDRESS_CHARS,
 };

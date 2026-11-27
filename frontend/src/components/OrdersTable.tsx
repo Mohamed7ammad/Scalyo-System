@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } from 'react';
 import PhoneCall from '@/components/PhoneCall';
+import WhatsAppMedia from '@/components/WhatsAppMedia';
 import ProductStopDialog from '@/components/ProductStopDialog';
 import AutoGrowTextarea from '@/components/AutoGrowTextarea';
 import { serverNow, onServerClockChange } from '@/lib/serverClock';
@@ -1900,6 +1901,7 @@ function ResendBadge({ order }: { order: Order }) {
    shows only while it still matters: «عايز يلغي» disappears once the order is
    confirmed or rejected; «داس إلغاء بعد التأكيد» shows only until it ships. */
 const WA_OPEN = ['جديد', 'لا يرد', 'مراجعة جديدة', 'مؤجل', WA_HOLD_STATUS];
+const WA_MEDIA_MARK = /\[(audio|image|video|document|sticker)\]/;
 /* statuses in which «واتساب» stands in for the holder (the confirmation still stands) */
 const WA_CONFIRMED_HOLDS = ['تم التأكيد', 'تم الشحن', 'تم التوصيل', 'جاري الإعادة', 'تم الإرجاع', 'مغلق - لن يشحن'];
 const WA_TAGS: Record<string, { label: string; hint: string; tone: string; when: (st: string) => boolean }> = {
@@ -1921,6 +1923,36 @@ const WA_TAGS: Record<string, { label: string; hint: string; tone: string; when:
     tone: 'bg-sky-600 text-white',
     when: (st) => WA_OPEN.includes(st) || st === 'تم التأكيد' || st === 'تم الرفض',
   },
+  voice: {
+    label: 'بعت رسالة صوتية',
+    hint: 'العميل بعت رسالة صوتية على واتساب — اسمعيها قبل ما تتصلي',
+    tone: 'bg-violet-600 text-white',
+    when: (st) => WA_OPEN.includes(st) || st === 'تم التأكيد',
+  },
+  reconfirm: {
+    label: 'أكد بعد ما طلب دعم أو إلغاء',
+    hint: 'العميل طلب حد يكلمه (أو داس إلغاء) وبعدها داس «تأكيد» — كلميه الأول وبعدين أكدي',
+    tone: 'bg-amber-500 text-white',
+    when: (st) => WA_OPEN.includes(st),
+  },
+  dup: {
+    label: 'أكد، وعنده أوردر تاني',
+    hint: 'العميل داس «تأكيد» وعنده أوردر تاني شغال — اتأكدي إنه مش مكرر قبل ما تأكدي',
+    tone: 'bg-amber-500 text-white',
+    when: (st) => WA_OPEN.includes(st),
+  },
+  address: {
+    label: 'أكد، والعنوان ناقص',
+    hint: 'العميل داس «تأكيد» بس المحافظة أو العنوان ناقص — كمّلي العنوان معاه',
+    tone: 'bg-amber-500 text-white',
+    when: (st) => WA_OPEN.includes(st),
+  },
+  lost: {
+    label: 'أكد على واتساب — طلب مفقود',
+    hint: 'العميل داس «تأكيد» على طلب مفقود — كمّلي المحافظة والعنوان والسعر معاه وبعدين أكدي',
+    tone: 'bg-amber-500 text-white',
+    when: (st) => WA_OPEN.includes(st),
+  },
   confirm_after_close: {
     label: 'رجع داس «تأكيد»',
     hint: 'العميل داس «تأكيد الطلب» على واتساب بعد ما الأوردر اتقفل — ممكن يكون غيّر رأيه',
@@ -1939,8 +1971,12 @@ function WhatsAppTagBadge({ order }: { order: Order }) {
   const st = normStatus(order.Status);
   const tag = order.wa_tag ? WA_TAGS[order.wa_tag] : undefined;
   const showTag = !!tag && tag.when(st);
-  const note = (order.wa_note ?? '').trim();
-  const showNote = note !== '' && (showTag || WA_TAGS.support.when(st));
+  const rawNote = (order.wa_note ?? '').trim();
+  const showNote = rawNote !== '' && (showTag || WA_TAGS.support.when(st));
+  /* a voice note / picture leaves a marker in the note → offer to play it (fetched only on demand) */
+  const hasMedia = showNote && WA_MEDIA_MARK.test(rawNote);
+  const note = rawNote.replace(/\[audio\]/g, '🎤 رسالة صوتية').replace(/\[image\]/g, '🖼️ صورة').replace(/\[video\]/g, '🎬 فيديو')
+    .replace(/\[document\]/g, '📎 ملف').replace(/\[sticker\]/g, 'ملصق').replace(/\[location\]/g, '📍 لوكيشن');
   if (!showTag && !showNote) return null;
   return (
     <div className="mt-1 max-w-[240px]">
@@ -1957,6 +1993,7 @@ function WhatsAppTagBadge({ order }: { order: Order }) {
           <span className="font-bold">العميل كتب على واتساب: </span>{note}
         </p>
       )}
+      {hasMedia && <WhatsAppMedia orderId={order.id} />}
     </div>
   );
 }

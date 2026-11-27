@@ -18,6 +18,11 @@
      no_amount        — the order has no product / amount to put in the message;
      control_group    — placed during the half-and-half trial by a customer in
                         the agents-only half: a message would spoil the comparison.
+   And never a «طلب مفقود» (orders.is_lost_order — an abandoned checkout): it is
+   not an order the customer placed, "we received your order" is not true for
+   it, and its total lacks the shipping until an agent completes it. They run
+   their own flow, like everywhere else in the system (2026-11-27: the first
+   batches DID take 50 of them — that was the bug).
 
    Meta's limit is on customers per 24 hours (250 for a new account). We stop
    short of it (flow.DEFAULTS) — earlier still while the flow is live — so the
@@ -107,6 +112,7 @@ async function gather(businessId, { from, to }, auto, which = 'no_answer') {
             to_char((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD') AS day
        FROM orders o
       WHERE o.business_id = $1 AND btrim(o."Status") = $2
+        AND COALESCE(o.is_lost_order, FALSE) = FALSE
         AND o."createdAt" >= $3::date - INTERVAL '1 day' AND o."createdAt" < $4::date + INTERVAL '2 days'
         AND ((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Africa/Cairo')::date BETWEEN $3::date AND $4::date
         AND NOT EXISTS (SELECT 1 FROM whatsapp_order_flow f WHERE f.order_id = o.id)

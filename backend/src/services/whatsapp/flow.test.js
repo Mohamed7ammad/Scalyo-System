@@ -182,3 +182,48 @@ test('daily limits follow the tier Meta reports; an unknown tier is treated as t
   for (const t of [null, undefined, '', 'SOMETHING_NEW']) assert.equal(flow.dailyLimits(t).meta, 250, String(t));
   assert.equal(flow.dailyLimits(' tier_10k ').meta, 10000);
 });
+
+test('the button\u2019s words typed by hand count as the tap only when they are the whole message', () => {
+  for (const t of ['تأكيد الطلب', 'تاكيد الطلب', ' تأكيد  ', 'أكد', 'تأكيد الطلب ✅', 'تَأكِيد الطلب.', 'Confirm']) assert.equal(flow.typedAction(t), 'confirm', t);
+  for (const t of ['إلغاء الطلب', 'الغاء', 'إلغاء!', 'الغي الطلب']) assert.equal(flow.typedAction(t), 'cancel', t);
+  for (const t of ['تأكيد الطلب بس غيروا العنوان', 'مش عايز الغاء', 'تمام', '', null, '👍']) assert.equal(flow.typedAction(t), null, String(t));
+});
+
+test('an acknowledgement asks for nothing; anything else needs a human', () => {
+  for (const t of ['تمام', 'تمام شكرا', 'شكراً جزيلاً', '👍', '🙏❤️', 'Ok 👌', 'تمام منتظر', 'إن شاء الله', 'حاضر يا باشا', 'ايوه تمام']) assert.equal(flow.isAck(t), true, t);
+  for (const t of ['هل بتيجي معاه الكارت الميموري', 'لا انا عايز يوم 20/12', 'عنواني المرج القديمة', 'شكرا أهم حاجة لون أسود',
+    'اهم حاجه يكون اصلي', 'تمام بس عايز المندوب يكلمني', '[audio]', '[location]', 'ممكن صور']) assert.equal(flow.isAck(t), false, t);
+});
+
+test('media in a message: voice notes and pictures have a file to fetch; text and locations do not', () => {
+  assert.deepEqual(flow.mediaOf({ type: 'audio', audio: { id: 77, mime_type: 'audio/ogg; codecs=opus', voice: true } }), { kind: 'audio', id: '77', mime: 'audio/ogg; codecs=opus' });
+  assert.deepEqual(flow.mediaOf({ type: 'image', image: { id: 'abc' } }), { kind: 'image', id: 'abc', mime: null });
+  for (const raw of [{ type: 'text', text: { body: 'x' } }, { type: 'location', location: {} }, { type: 'audio', audio: {} }, null, undefined]) assert.equal(flow.mediaOf(raw), null);
+});
+
+test('what stops «تأكيد» from confirming by itself: an earlier request, a second order, a thin address', () => {
+  const ok = { Status: 'جديد', DeliveryRate: 'بدون', City: 'الجيزة', Address: 'الدقي - شارع التحرير 12' };
+  assert.equal(flow.confirmBlocker({ order: ok, flow: { tag: null }, otherOrders: 0 }), null);
+  for (const tag of ['support', 'cancel', 'voice']) assert.equal(flow.confirmBlocker({ order: ok, flow: { tag }, otherOrders: 0 }), 'reconfirm', tag);
+  assert.equal(flow.confirmBlocker({ order: ok, flow: { tag: 'deposit' }, otherOrders: 0 }), null, 'a deposit tag is decided by the rating, not here');
+  assert.equal(flow.confirmBlocker({ order: ok, flow: null, otherOrders: 1 }), 'dup');
+  assert.equal(flow.confirmBlocker({ order: { ...ok, City: '  ' }, flow: null }), 'address');
+  assert.equal(flow.confirmBlocker({ order: { ...ok, Address: 'المنصورة' }, flow: null }), 'address');
+  assert.equal(flow.confirmBlocker({ order: { ...ok, Address: null }, flow: null }), 'address');
+  assert.deepEqual(flow.decideTap({ action: 'confirm', order: ok, flow: { tag: 'support' } }), { type: 'agent_needed', tag: 'reconfirm', release: true, reply: 'deposit' });
+  assert.equal(flow.decideTap({ action: 'cancel', order: ok, flow: { tag: 'support' }, otherOrders: 3 }).type, 'cancel_requested', 'only «تأكيد» is gated');
+});
+
+test('WhatsApp Business greetings and away messages are recognised; a real sentence is not', () => {
+  for (const t of ['‏شكرا لك على تواصلك مع هاني القصاص قسم نجاره. من فضلك أخبرنا كيف يمكننا خدمتك.', 'شكرًا لك على رسالتك. نحن غير متاحين الآن، ولكننا سنرد عليك في أقرب وقت ممكن.',
+    'Thank you for contacting Acme! Please let us know how we can help you.', "Thank you for your message. We're unavailable right now, but will respond as soon as possible."]) assert.equal(flow.isAutoReply(t), true, t);
+  for (const t of ['شكرا', 'تمام شكرا لك', 'عايز اعرف هيوصل امتى', 'تأكيد الطلب', '', null]) assert.equal(flow.isAutoReply(t), false, String(t));
+});
+
+test('a lost order (abandoned checkout) never confirms by a tap, whatever else is fine', () => {
+  const ok = { Status: 'لا يرد', DeliveryRate: 'بدون', City: 'الجيزة', Address: 'الدقي - شارع التحرير 12', is_lost_order: true };
+  assert.equal(flow.confirmBlocker({ order: ok, flow: { tag: null } }), 'lost');
+  assert.equal(flow.decideTap({ action: 'confirm', order: ok }).type, 'agent_needed');
+  assert.equal(flow.decideTap({ action: 'confirm', order: { ...ok, is_lost_order: false } }).type, 'confirm');
+  assert.equal(flow.TAGS.lost, 'أكد على واتساب — طلب مفقود');
+});

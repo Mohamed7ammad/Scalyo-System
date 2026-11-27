@@ -17,6 +17,8 @@ const flows            = require('../services/whatsapp/flowStore');
 const flowRules        = require('../services/whatsapp/flow');
 const recontact        = require('../services/whatsapp/recontact');
 const trial            = require('../services/whatsapp/trial');
+const media            = require('../services/whatsapp/mediaStore');
+const { hasAnyRole }   = require('../utils/roles');
 const { whatsappNumbers } = require('../utils/phone');
 const pool             = require('../config/db');
 
@@ -311,6 +313,41 @@ router.put('/auto', authenticate, requireAdmin, async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json(await autoView(businessId));
   } catch (err) { fail(res, err, 'تعذّر حفظ إعدادات التشغيل'); }
+});
+
+/* ── what the customer SENT (voice notes, pictures) ──────────────────────────
+   For whoever works the order: the admin, a supervisor, or the agent holding it. */
+async function mayOpenOrder(user, orderId) {
+  if (hasAnyRole(user, 'admin', 'supervisor')) return true;
+  const { rows: [o] } = await pool.query('SELECT "AssignedTo" FROM orders WHERE id = $1 AND business_id = $2', [orderId, user.business_id]);
+  return !!o && !!user.email && String(o.AssignedTo ?? '').trim().toLowerCase() === String(user.email).trim().toLowerCase();
+}
+const SAFE_MIME = /^(audio|image|video)\/[a-z0-9.+-]+(;\s*codecs=[a-z0-9.,-]+)?$|^application\/pdf$/i;
+
+router.get('/media/order/:orderId', authenticate, async (req, res) => {
+  try {
+    const orderId = parseInt(req.params.orderId, 10);
+    if (!Number.isInteger(orderId) || orderId < 1) return res.status(400).json({ error: 'رقم الأوردر غير صحيح' });
+    if (!(await mayOpenOrder(req.user, orderId))) return res.status(403).json({ error: 'الأوردر ده مش معاكي' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await media.listForOrder(req.user.business_id, orderId) });
+  } catch (err) { fail(res, err, 'تعذّر تحميل رسايل العميل'); }
+});
+
+router.get('/media/:id', authenticate, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'رقم غير صحيح' });
+    const f = await media.getFile(req.user.business_id, id);
+    if (!f || f.status !== 'done' || !f.bytes) return res.status(404).json({ error: 'الملف لسه متحمّلش' });
+    if (!f.order_id ? !hasAnyRole(req.user, 'admin', 'supervisor') : !(await mayOpenOrder(req.user, f.order_id))) {
+      return res.status(403).json({ error: 'الأوردر ده مش معاكي' });
+    }
+    const mime = SAFE_MIME.test(String(f.mime || '')) ? f.mime : 'application/octet-stream';
+    res.set({ 'Content-Type': mime, 'Content-Length': String(f.bytes.length), 'Content-Disposition': 'inline',
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600' });
+    res.end(f.bytes);
+  } catch (err) { fail(res, err, 'تعذّر تحميل الملف'); }
 });
 
 /* The half-and-half trial: the WhatsApp half against the agents-only half,

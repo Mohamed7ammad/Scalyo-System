@@ -42,6 +42,7 @@ const isRecontact = (f) => f.kind === 'recontact';
 let deps = {
   store:       () => require('./db'),
   flows:       () => require('./flowStore'),
+  media:       () => require('./mediaStore'),
   cloud:       () => require('./cloudApi'),
   orderStatus: () => require('../orderStatus'),
   assign:      (orderId, businessId) => require('../../routes/webhooks').autoAssignOrder(orderId, businessId),
@@ -50,6 +51,17 @@ let deps = {
     const { rows: [u] } = await pool.query(
       'SELECT agent_track FROM users WHERE business_id = $1 AND lower(email) = lower($2) LIMIT 1', [businessId, email]);
     return u?.agent_track || null;
+  },
+  /* other orders of the same customer still in play (open, confirmed or on their way), last 10 days */
+  otherOrders: async (businessId, orderId, phone) => {
+    if (!String(phone ?? '').trim()) return 0;
+    const { rows: [r] } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM orders p
+        WHERE p.business_id = $1 AND p.id <> $2 AND p."Phone" = $3
+          AND p."createdAt" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '10 days'
+          AND btrim(p."Status") = ANY($4::text[])`,
+      [businessId, orderId, phone, ['جديد', 'لا يرد', 'مراجعة جديدة', 'مؤجل', 'معلق حتي الدفع', flow.HOLD_STATUS, flow.CONFIRMED_STATUS, 'تم الشحن']]);
+    return r?.n || 0;
   },
   brandOf:     async (businessId) => {
     const { rows: [bp] } = await pool.query('SELECT brand_name FROM business_profile WHERE id = $1', [businessId]);
@@ -194,6 +206,25 @@ async function depositAfterConfirm(f) {
   return true;
 }
 
+/* A voice note / picture the customer sent: fetch the file from Meta and keep it,
+   so the agent can listen before she calls. A failure is retried on later ticks. */
+async function fetchOneMedia(m) {
+  const { GraphError } = deps.cloud();
+  const store = deps.media();
+  try {
+    const settings = await deps.store().getSettings(m.business_id);
+    const file = await deps.cloud().fetchMedia(settings, m.media_id);
+    await store.saveBytes(m.id, { mime: file.mime, bytes: file.bytes });
+    log(`order #${m.order_id ?? '?'}: the customer's ${m.kind} is saved (${file.size} bytes)`);
+    return true;
+  } catch (e) {
+    if (!(e instanceof GraphError)) throw e;
+    await store.markFailed(m.id, `${e.code ?? ''} ${e.metaMessage || e.message}`.trim(),
+      { final: ['media_too_large', 'bad_media_host'].includes(e.code) });
+    return false;
+  }
+}
+
 /* ── the worker ───────────────────────────────────────────────────────────── */
 
 async function logOut(f, kind, template, sent, error) {
@@ -306,6 +337,9 @@ async function tick() {
         if ((await guard(`reminder #${f.order_id}`, () => sendReminder(f, n))) === 'sent') out.reminders += 1;
       }
     }
+    for (const m of (await guard('media queue', () => deps.media().claimPending(3))) || []) {
+      await guard(`media #${m.id}`, () => fetchOneMedia(m));
+    }
     for (const f of (await guard('late ratings', () => flows.confirmedNowWeak())) || []) {
       await guard(`deposit #${f.order_id}`, () => depositAfterConfirm(f));
     }
@@ -377,7 +411,10 @@ async function handleTap(f, action) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const cur = await os.loadOrder(f.business_id, f.order_id);
     if (!cur) return { handled: false, why: 'order_gone' };
-    const d = flow.decideTap({ action, order: cur.row });
+    /* only a «تأكيد» that could really confirm is worth the look for a second order */
+    const others = action === 'confirm' && flow.TAP_DECIDES.includes(String(cur.status).trim())
+      ? await deps.otherOrders(f.business_id, f.order_id, cur.row.Phone).catch(() => 0) : 0;
+    const d = flow.decideTap({ action, order: cur.row, flow: f, otherOrders: others });
 
     if (d.type === 'confirm') {
       /* the «واتساب» label needs orders.confirmed_via; without it the confirmation still happens */
@@ -422,13 +459,25 @@ async function handleText(f, ev) {
   const status = String(cur?.status ?? '').trim();
   const open = flow.TAP_DECIDES.includes(status);
   const firstText = !f.text_replied;                            // read before the diary row is updated
-  const tag = open && !f.tag ? 'support' : null;
+  const media = flow.mediaOf(ev.raw);
+  const voice = media?.kind === 'audio';
+  /* WhatsApp itself confirmed this order and nobody holds it. A message that asks
+     for something (an address, a colour, a date, a question, a voice note) must
+     reach an agent BEFORE it ships; «تمام» / «شكرًا» / 👍 changes nothing. */
+  const waConfirmed = status === flow.CONFIRMED_STATUS && String(cur?.row?.confirmed_via ?? '') === 'whatsapp';
+  const needsHuman = ev.kind === 'reaction' ? false : (media ? true : !flow.isAck(ev.reply));
+  const reopen = waConfirmed && needsHuman;
+  /* «بعت رسالة صوتية» tells her to listen first; it never hides a deposit / cancel tag */
+  let tag = null;
+  if (voice) tag = !f.tag || f.tag === 'support' ? 'voice' : null;
+  else if ((open || reopen) && !f.tag) tag = 'support';
   await showOnOrder(f, { tag });
   if (status === flow.HOLD_STATUS) await releaseOrder(f.business_id, f.order_id, 'support');
   else if (status === NO_ANSWER) await liftNoAnswer(f, cur);
+  else if (reopen) await reopenForAgent(f);
   const r = await flows.markReply(f.order_id, {
     tag, text: ev.reply || null,
-    outcome: open && !f.outcome ? 'support_requested' : null, textReplied: true,
+    outcome: reopen || (open && !f.outcome) ? 'support_requested' : null, textReplied: true,
   });
   await showOnOrder(f, { note: r?.customer_text || ev.reply || null });
   if (firstText) await reply(f, 'text');                        // one acknowledgement, not one per message
@@ -445,8 +494,26 @@ async function handleInbound(businessId, ev) {
       if (!f || f.phone !== String(ev.from)) return { handled: false, why: 'not_their_order' };
       return await handleTap(f, parsed.action);
     }
-    const f = await flows.latestByPhone(businessId, String(ev.from));
+    /* which order? the one whose message they replied to, else their latest in the flow */
+    let f = null;
+    if (ev.context_id) {
+      const msg = await deps.store().messageByWamid(businessId, ev.context_id).catch(() => null);
+      if (msg?.order_id) f = await flows.getByOrder(businessId, msg.order_id);
+      if (f && f.phone !== String(ev.from)) f = null;
+    }
+    if (!f) f = await flows.latestByPhone(businessId, String(ev.from));
     if (!f) return { handled: false, why: 'no_flow' };
+    /* the customer's WhatsApp Business greeting / away message is not the customer */
+    if (ev.kind === 'text' && flow.isAutoReply(ev.reply)) return { handled: false, why: 'auto_reply' };
+    /* «تأكيد الطلب» / «إلغاء» typed by hand, alone, is the button */
+    const typed = ev.kind === 'text' ? flow.typedAction(ev.reply) : null;
+    if (typed) return await handleTap(f, typed);
+    const media = flow.mediaOf(ev.raw);
+    if (media) {
+      await deps.media().enqueue({ businessId, orderId: f.order_id, waMessageId: ev.wa_message_id,
+        kind: media.kind, mediaId: media.id, mime: media.mime, at: ev.at || null })
+        .catch((e) => warn(`media of order #${f.order_id} not queued:`, e.message));
+    }
     return await handleText(f, ev);
   } catch (e) {
     warn('inbound failed:', e.message);
@@ -471,5 +538,5 @@ async function handleFailedStatus(businessId, waMessageId) {
 
 module.exports = {
   TEMPLATE, RECONTACT_STATUS, planForNewOrder, enrollNewOrder, releaseOrder, sendConfirmation, sendReminder, tick,
-  handleInbound, handleFailedStatus, liftNoAnswer, depositAfterConfirm, refreshHealth, _setDepsForTests,
+  handleInbound, handleFailedStatus, liftNoAnswer, depositAfterConfirm, refreshHealth, fetchOneMedia, _setDepsForTests,
 };

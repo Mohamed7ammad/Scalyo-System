@@ -1821,6 +1821,16 @@ export const getWhatsAppAuto  = () => api.get<WhatsAppAutoResponse>('/api/whatsa
 export const saveWhatsAppAuto = (data: { auto_mode: WhatsAppAutoMode; test_phones: string[]; split_test: boolean; control_half?: boolean }) =>
   api.put<WhatsAppAutoResponse>('/api/whatsapp/auto', data);
 
+/* What the customer sent besides text (voice notes, pictures) — for whoever works the order. */
+export interface WhatsAppMediaItem {
+  id: number; kind: 'audio' | 'image' | 'video' | 'document' | 'sticker';
+  mime: string | null; size: number | null; status: 'pending' | 'done' | 'failed'; created_at: string;
+}
+export const getWhatsAppOrderMedia = (orderId: number) =>
+  api.get<{ items: WhatsAppMediaItem[] }>(`/api/whatsapp/media/order/${orderId}`);
+export const getWhatsAppMediaBlob = (id: number) =>
+  api.get<Blob>(`/api/whatsapp/media/${id}`, { responseType: 'blob' });
+
 /* The half-and-half trial: the WhatsApp half against the agents-only half, since the flow went live. */
 export interface WhatsAppTrialGroup {
   orders: number; confirmed: number; wa_confirmed: number; rejected: number; no_answer: number; open: number;

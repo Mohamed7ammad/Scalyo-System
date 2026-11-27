@@ -21,11 +21,12 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false,
     now: new Date('2026-11-25T12:00:00Z'),                      // 14:00 Cairo
     orders: new Map(), flows: new Map(), sentTemplates: [], sentTexts: [], logged: [], assigned: [], changes: [],
     metaFails: null, messages: new Map(), mode, shown: [], tagFails: false, tracks: {}, messaged24h: 0,
+    media: [], mediaFails: null,
   };
   const HOLD = flow.HOLD_STATUS;
   w.addOrder = (id, over = {}) => {
     const o = { id, business_id: 1, FullName: 'منى عادل', Phone: '01001488462', ProductName: 'داش كام', quantity: 1,
-      ProductPrice: '1210', City: 'الجيزة', Address: 'الدقي', Status: HOLD, DeliveryRate: 'بدون', AssignedTo: null, ...over };
+      ProductPrice: '1210', City: 'الجيزة', Address: 'الدقي - شارع التحرير 12', Status: HOLD, DeliveryRate: 'بدون', AssignedTo: null, ...over };
     w.orders.set(id, o);
     return o;
   };
@@ -75,6 +76,7 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false,
     sendText: async (settings, m) => { w.sentTexts.push(m); return { message_id: `wamid.X${w.sentTexts.length}` }; },
     checkPhoneNumber: async () => { if (w.metaFails) throw w.metaFails; return { quality_rating: w.metaQuality || 'GREEN' }; },
     messagingLimit: async () => w.metaTier || null,
+    fetchMedia: async (settings, id) => { if (w.mediaFails) throw w.mediaFails; return { mime: 'audio/ogg', size: 4, bytes: Buffer.from(`F${id}`) }; },
   };
   const store = {
     getSettings: async () => ({ phone_number_id: '1', access_token: 't', quality_rating: quality }),
@@ -93,16 +95,28 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false,
       return { ok: true, order: o };
     },
   };
+  const media = {
+    enqueue: async (m) => { if (w.media.some((x) => x.waMessageId === m.waMessageId)) return false;
+      w.media.push({ ...m, id: w.media.length + 1, business_id: m.businessId, order_id: m.orderId, media_id: m.mediaId, status: 'pending', attempts: 0 }); return true; },
+    claimPending: async () => w.media.filter((m) => m.status === 'pending' && m.attempts < 5).map((m) => { m.attempts += 1; return m; }),
+    saveBytes: async (id, f) => Object.assign(w.media.find((m) => m.id === id), { status: 'done', bytes: f.bytes, mime: f.mime }),
+    markFailed: async (id, error, o = {}) => { const m = w.media.find((x) => x.id === id); m.last_error = error; if (o.final || m.attempts >= 5) m.status = 'failed'; },
+  };
   engine._setDepsForTests({
+    media: () => media,
     flows: () => flows, cloud: () => cloud, store: () => store, orderStatus: () => orderStatus,
     assign: async (orderId) => { const o = w.orders.get(orderId); o.AssignedTo = 'agent@test'; w.assigned.push(orderId); return o; },
     brandOf: async () => 'Product Pulse', now: () => w.now,
     trackOf: async (b, email) => w.tracks[email] || 'confirmation',
+    otherOrders: async (b, orderId) => (w.others && w.others[orderId]) || 0,
   });
   w.advance = (min) => { w.now = new Date(w.now.getTime() + min * 60000); };
   w.tap = (action, orderId, from = '201001488462') => engine.handleInbound(1, { kind: 'button', payload: `wa1:${action}:${orderId}`, from, reply: action });
   w.hold = async (id, over) => { const o = w.addOrder(id, over); await engine.enrollNewOrder(o, { phone: '201001488462', isTest: false, split }); return o; };
   w.sendNow = async () => { w.advance(5); return engine.tick(); };
+  w.text = (reply, from = '201001488462', over = {}) => engine.handleInbound(1, { kind: 'text', from, reply, wa_message_id: `wamid.IN${Math.random()}`, ...over });
+  w.voice = (n, from = '201001488462') => engine.handleInbound(1, { kind: 'other', from, reply: '[audio]', wa_message_id: `wamid.V${n}`,
+    raw: { type: 'audio', audio: { id: `media-${n}`, mime_type: 'audio/ogg; codecs=opus', voice: true } } });
   /* an OLD «لا يرد» order with its agent, queued by the owner for one message */
   w.recontact = async (id, over) => {
     const o = w.addOrder(id, { Status: 'لا يرد', AssignedTo: 'agent@test', ...over });
@@ -142,7 +156,7 @@ test('message after 5 minutes, then the order is held 30 minutes and released to
   assert.equal((await engine.tick()).sent, 1);
   assert.equal(w.sentTemplates[0].name, 'order_confirm_v1');
   assert.equal(w.sentTemplates[0].to, '201001488462');
-  assert.deepEqual(w.sentTemplates[0].components[0].parameters.map((p) => p.text), ['منى عادل', 'داش كام', '1', '1,210', 'الجيزة، الدقي']);
+  assert.deepEqual(w.sentTemplates[0].components[0].parameters.map((p) => p.text), ['منى عادل', 'داش كام', '1', '1,210', 'الجيزة، الدقي - شارع التحرير 12']);
   assert.equal(w.orders.get(10).Status, 'بانتظار واتساب');
   w.advance(29);
   assert.equal((await engine.tick()).released, 0, 'still held at 29 minutes');
@@ -504,8 +518,10 @@ test('«تأكيد» then «إلغاء» on WhatsApp: nobody holds the order, so
   assert.deepEqual([w.changes.at(-1).from, w.changes.at(-1).to, w.changes.at(-1).effects.commission], ['تم التأكيد', 'جديد', false]);
   assert.equal(w.flows.get(75).outcome, 'cancel_requested');
   assert.match(w.sentTexts.at(-1).body, /وصلنا طلب الإلغاء/);
-  await w.tap('confirm', 75);                                     // changed their mind again → the normal rule: WhatsApp confirms
-  assert.equal(w.orders.get(75).Status, 'تم التأكيد');
+  await w.tap('confirm', 75);                                     // «تأكيد» again after «إلغاء» → an agent calls first
+  assert.equal(w.orders.get(75).Status, 'جديد');
+  assert.equal(w.orders.get(75).AssignedTo, 'agent@test');
+  assert.equal(w.orders.get(75).wa_tag, 'reconfirm');
 });
 
 test('«طلب الدعم» after a WhatsApp confirmation reopens it too; one an AGENT confirmed, or one already shipped, is only tagged', async () => {
@@ -671,4 +687,218 @@ test('the rating arrives AFTER the WhatsApp confirmation and it is weak → back
   const changes = w.changes.length;
   await engine.tick();
   assert.equal(w.changes.length, changes, 'done once');
+});
+
+/* ── what the customer WRITES or RECORDS ──────────────────────────────────── */
+
+test('«تأكيد الطلب» typed by hand is the button; inside a longer sentence it is a message for an agent', async () => {
+  const w = world();
+  await w.hold(100);
+  await w.hold(101, { Phone: '01001488464' });
+  w.flows.get(101).phone = '201001488464';                        // another customer
+  await w.sendNow();
+  assert.deepEqual(await w.text('تأكيد الطلب ✅'), { handled: true, type: 'confirm' });
+  assert.equal(w.orders.get(100).Status, 'تم التأكيد');
+  assert.equal(w.orders.get(100).confirmed_via, 'whatsapp');
+  assert.equal((await w.text('تأكيد الطلب بس غيّروا العنوان', '201001488464')).type, 'text');
+  assert.equal(w.orders.get(101).Status, 'جديد', 'released to an agent, not confirmed');
+  assert.equal(w.orders.get(101).wa_tag, 'support');
+});
+
+test('«إلغاء» typed by hand works like the button: never cancels, goes to an agent tagged «عايز يلغي»', async () => {
+  const w = world();
+  await w.hold(102);
+  await w.sendNow();
+  assert.equal((await w.text('الغاء')).type, 'cancel_requested');
+  assert.equal(w.orders.get(102).Status, 'جديد');
+  assert.equal(w.orders.get(102).wa_tag, 'cancel');
+});
+
+test('after a WhatsApp confirmation: «تمام» / 👍 change nothing; a question or a request sends the order to an agent before it ships', async () => {
+  const w = world();
+  await w.hold(103);
+  await w.sendNow();
+  await w.tap('confirm', 103);
+  await w.text('تمام شكرا');
+  await w.text('👍');
+  await engine.handleInbound(1, { kind: 'reaction', from: '201001488462', reply: '❤️' });
+  const o = w.orders.get(103);
+  assert.equal(o.Status, 'تم التأكيد', 'acknowledgements leave it confirmed');
+  assert.equal(o.AssignedTo, null);
+  assert.equal(o.wa_note, 'تمام شكرا\n👍\n❤️', 'still written on the order');
+  await w.text('لا انا عايز يوم 20/12');
+  assert.equal(o.Status, 'جديد', 'it must not ship as it is');
+  assert.equal(o.AssignedTo, 'agent@test');
+  assert.equal(o.confirmed_via, null);
+  assert.equal(o.wa_tag, 'support');
+  assert.match(o.wa_note, /عايز يوم 20\/12/);
+  assert.equal(w.flows.get(103).outcome, 'support_requested');
+  assert.deepEqual([w.changes.at(-1).from, w.changes.at(-1).to, w.changes.at(-1).effects.commission], ['تم التأكيد', 'جديد', false]);
+});
+
+test('an order an AGENT confirmed is not pulled from her by a message — the words are just added to it', async () => {
+  const w = world();
+  await w.hold(104);
+  await w.sendNow();
+  w.advance(30); await engine.tick();
+  Object.assign(w.orders.get(104), { Status: 'تم التأكيد' });
+  await w.text('ممكن تغيروا العنوان');
+  assert.equal(w.orders.get(104).Status, 'تم التأكيد');
+  assert.equal(w.orders.get(104).AssignedTo, 'agent@test');
+  assert.equal(w.orders.get(104).wa_note, 'ممكن تغيروا العنوان');
+});
+
+test('a voice note: the file is fetched and kept, the order is tagged «بعت رسالة صوتية» and reaches an agent — even after a WhatsApp confirmation', async () => {
+  const w = world();
+  await w.hold(105);
+  await w.sendNow();
+  await w.tap('confirm', 105);
+  await w.voice(1);
+  await w.voice(2);
+  await w.voice(2);                                               // Meta repeats a delivery → stored once
+  const o = w.orders.get(105);
+  assert.equal(o.Status, 'جديد');
+  assert.equal(o.AssignedTo, 'agent@test');
+  assert.equal(o.wa_tag, 'voice');
+  assert.deepEqual(w.media.map((m) => [m.order_id, m.kind, m.media_id, m.status]), [[105, 'audio', 'media-1', 'pending'], [105, 'audio', 'media-2', 'pending']]);
+  await engine.tick();
+  assert.deepEqual(w.media.map((m) => m.status), ['done', 'done']);
+  assert.equal(w.media[0].bytes.toString(), 'Fmedia-1');
+});
+
+test('a voice note on an order still held → released to an agent now; it never hides a «محتاج عربون» tag', async () => {
+  const w = world();
+  await w.hold(106);
+  await w.hold(107, { Phone: '01001488466', DeliveryRate: 'ضعيف' });
+  w.flows.get(107).phone = '201001488466';
+  await w.sendNow();
+  await w.voice(3);
+  assert.equal(w.orders.get(106).Status, 'جديد');
+  assert.equal(w.orders.get(106).wa_tag, 'voice');
+  await w.tap('confirm', 107, '201001488466');
+  assert.equal(w.orders.get(107).wa_tag, 'deposit');
+  await w.voice(4, '201001488466');
+  assert.equal(w.orders.get(107).wa_tag, 'deposit', 'the deposit tag stays');
+  assert.equal(w.media.length, 2, 'but her voice note is kept all the same');
+});
+
+test('Meta does not hand the file over → tried again on later ticks, then given up; a too-large file is given up at once', async () => {
+  const w = world();
+  await w.hold(108);
+  await w.sendNow();
+  await w.voice(5);
+  w.mediaFails = new GraphError('network', 'download failed');
+  for (let i = 0; i < 4; i++) { await engine.tick(); assert.equal(w.media[0].status, 'pending', `attempt ${i + 1}`); }
+  await engine.tick();
+  assert.equal(w.media[0].status, 'failed');
+  await w.voice(6);
+  w.mediaFails = new GraphError('media_too_large', 'too big');
+  await engine.tick();
+  assert.equal(w.media[1].status, 'failed');
+  assert.equal(w.media[1].attempts, 1);
+});
+
+test('a reply to a specific message is about THAT order, not the customer\u2019s latest one', async () => {
+  const w = world();
+  await w.hold(109);
+  await w.hold(110);                                              // same customer, a second order
+  await w.sendNow();
+  const firstMessage = w.logged.find((m) => m.orderId === 109).waMessageId;
+  await w.text('تأكيد', '201001488462', { context_id: firstMessage });
+  assert.equal(w.orders.get(109).Status, 'تم التأكيد');
+  assert.equal(w.orders.get(110).Status, 'بانتظار واتساب', 'the other order is untouched');
+});
+
+/* ── «تأكيد» does not confirm by itself when something needs a person ─────── */
+
+test('«طلب الدعم» then «تأكيد» 18 seconds later (order 20676): NOT confirmed — it stays with its agent, tagged', async () => {
+  const w = world();
+  await w.hold(120);
+  await w.sendNow();
+  w.advance(30); await engine.tick();                             // nobody answered → an agent has it
+  await w.tap('support', 120);
+  assert.deepEqual(await w.tap('confirm', 120), { handled: true, type: 'agent_needed' });
+  const o = w.orders.get(120);
+  assert.equal(o.Status, 'جديد');
+  assert.equal(o.AssignedTo, 'agent@test', 'still hers');
+  assert.equal(o.wa_tag, 'reconfirm');
+  assert.equal(o.confirmed_via, undefined);
+  assert.match(w.sentTexts.at(-1).body, /هيتواصل معاك حد/);
+});
+
+test('the customer has another order in play → «تأكيد» goes to an agent («عنده أوردر تاني»), while held or with an agent', async () => {
+  const w = world();
+  w.others = { 121: 1, 122: 1 };
+  await w.hold(121);
+  await w.hold(122, { Phone: '01001488464' });
+  w.flows.get(122).phone = '201001488464';
+  await w.sendNow();
+  assert.equal((await w.tap('confirm', 121)).type, 'agent_needed');
+  assert.equal(w.orders.get(121).Status, 'جديد', 'released from the hold to an agent');
+  assert.equal(w.orders.get(121).AssignedTo, 'agent@test');
+  assert.equal(w.orders.get(121).wa_tag, 'dup');
+  assert.equal(w.flows.get(121).release_reason, 'dup');
+  w.advance(30); await engine.tick();
+  w.orders.get(122).Status = 'لا يرد';
+  await w.tap('confirm', 122, '201001488464');
+  assert.equal(w.orders.get(122).Status, 'جديد', 'lifted back to her');
+  assert.equal(w.orders.get(122).wa_tag, 'dup');
+});
+
+test('no governorate, or an address too short to deliver to → «تأكيد» goes to an agent («العنوان ناقص»)', async () => {
+  const w = world();
+  await w.hold(123, { City: '', Address: 'شارع النصر عمارة 5' });
+  await w.hold(124, { Phone: '01001488464', City: 'الدقهلية', Address: 'المنصورة' });
+  await w.hold(125, { Phone: '01001488466', City: 'الدقهلية', Address: 'المنصورة - شارع الجيش' });
+  w.flows.get(124).phone = '201001488464';
+  w.flows.get(125).phone = '201001488466';
+  await w.sendNow();
+  await w.tap('confirm', 123);
+  await w.tap('confirm', 124, '201001488464');
+  await w.tap('confirm', 125, '201001488466');
+  assert.equal(w.orders.get(123).wa_tag, 'address');
+  assert.equal(w.orders.get(123).Status, 'جديد');
+  assert.equal(w.orders.get(124).wa_tag, 'address');
+  assert.equal(w.orders.get(125).Status, 'تم التأكيد', 'a real address confirms as before');
+});
+
+test('a «طلب مفقود» is never confirmed by a tap: its total is not final until an agent completes it', async () => {
+  const w = world({ mode: 'test' });
+  await w.recontact(129, { is_lost_order: true });                // one of the 50 messaged before the fix
+  await engine.tick();
+  assert.equal((await w.tap('confirm', 129)).type, 'agent_needed');
+  const o = w.orders.get(129);
+  assert.equal(o.Status, 'جديد', 'back on top of its agent\u2019s work');
+  assert.equal(o.AssignedTo, 'agent@test');
+  assert.equal(o.wa_tag, 'lost');
+  assert.equal(o.confirmed_via, undefined);
+});
+
+test('a weak customer is still a deposit case first; a clean order still confirms with no extra tag', async () => {
+  const w = world();
+  w.others = { 126: 2 };
+  await w.hold(126, { DeliveryRate: 'ضعيف', City: '' });
+  await w.hold(127, { Phone: '01001488464' });
+  w.flows.get(127).phone = '201001488464';
+  await w.sendNow();
+  assert.equal((await w.tap('confirm', 126)).type, 'deposit_needed');
+  assert.equal(w.orders.get(126).wa_tag, 'deposit');
+  assert.equal((await w.tap('confirm', 127, '201001488464')).type, 'confirm');
+  assert.equal(w.orders.get(127).wa_tag, undefined);
+});
+
+test('the customer\u2019s WhatsApp Business auto-greeting is not an answer: the order stays held and the reminders go on', async () => {
+  const w = world();
+  await w.hold(128);
+  await w.sendNow();
+  assert.deepEqual(await w.text('‏شكرا لك على تواصلك مع ورشة النجارة. من فضلك أخبرنا كيف يمكننا خدمتك.'), { handled: false, why: 'auto_reply' });
+  assert.deepEqual(await w.text('Thank you for contacting us! Please let us know how we can help you.'), { handled: false, why: 'auto_reply' });
+  const o = w.orders.get(128);
+  assert.equal(o.Status, 'بانتظار واتساب');
+  assert.equal(o.wa_tag, undefined);
+  assert.equal(w.flows.get(128).customer_replied, false);
+  assert.equal(w.sentTexts.length, 0, 'we do not answer a machine');
+  w.advance(30); await engine.tick();
+  w.advance(95);
+  assert.equal((await engine.tick()).reminders, 1, 'the reminder still goes');
 });
