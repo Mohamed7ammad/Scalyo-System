@@ -309,16 +309,16 @@ function TrialCard({ trial, onRefresh, busy }: { trial: WhatsAppTrialReport; onR
       </div>
       <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
         أوردرات المتجر من {fmtDate(trial.since ?? null)}{trial.until ? ` لحد ${fmtDate(trial.until)}` : ' لحد دلوقتي'}.
-        العميل اللي آخر رقم في موبايله زوجي في نص الواتساب، والفردي مع البنات زي ما هو.
-        الحكم على آخر سطرين، ومبيبقاش نهائي غير لما الشحنات توصل (4–5 أيام).
+        العميل اللي آخر رقم في موبايله 8 أو 9 مع البنات زي ما هو (حوالي 20%)، والباقي في مجموعة الواتساب.
+        الحكم على آخر سطرين، ومبيبقاش نهائي غير لما الشحنات توصل (4–5 أيام). فرق أقل من 6 نقط ممكن يكون صدفة.
       </p>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-xs text-slate-500 dark:text-slate-400">
               <th className="text-start font-medium py-1.5"></th>
-              <th className="text-start font-semibold py-1.5 text-emerald-700 dark:text-emerald-300">نص الواتساب</th>
-              <th className="text-start font-semibold py-1.5">نص البنات</th>
+              <th className="text-start font-semibold py-1.5 text-emerald-700 dark:text-emerald-300">مجموعة الواتساب (80%)</th>
+              <th className="text-start font-semibold py-1.5">مجموعة البنات (20%)</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -333,7 +333,7 @@ function TrialCard({ trial, onRefresh, busy }: { trial: WhatsAppTrialReport; onR
         </table>
       </div>
       {!!trial.no_mobile && (
-        <p className="text-xs text-slate-500 dark:text-slate-400">{trial.no_mobile} أوردر رقمهم مش موبايل مصري واضح — مش محسوبين في أي نص.</p>
+        <p className="text-xs text-slate-500 dark:text-slate-400">{trial.no_mobile} أوردر رقمهم مش موبايل مصري واضح — مش محسوبين في أي مجموعة.</p>
       )}
     </div>
   );
@@ -355,7 +355,7 @@ const SKIPPED: [keyof NonNullable<WhatsAppRecontactPreview['skipped']>, string][
   ['already_messaged', 'اتبعتلهم واتساب مننا قبل كده'],
   ['bad_number',       'الرقم مش موبايل مصري واضح'],
   ['no_amount',        'الأوردر مفيهوش مبلغ أو منتج'],
-  ['control_group',    'من نص «البنات بس» في تجربة النص والنص — رسالة ليهم تبوّظ المقارنة'],
+  ['control_group',    'من مجموعة «البنات بس» في التجربة (20%) — رسالة ليهم تبوّظ المقارنة'],
 ];
 
 function RecontactCard({ ready, stopped, onQueued, showToast }: {
@@ -772,14 +772,14 @@ export default function WhatsAppPage() {
     if (going && !window.confirm(`نشغّل وضع التجربة على ${phones.length} رقم؟\n\nأي أوردر جديد من الأرقام دي بس هيتحجز ويتبعتله رسالة واتساب. باقي العملاء مش هيتأثروا.`)) return;
     const goingLive = autoMode === 'on' && (auto?.auto_mode !== 'on' || (auto?.control_half !== false) !== autoHalf);
     if (goingLive && !window.confirm(autoHalf
-      ? 'نشغّل الواتساب على نص الأوردرات الجديدة؟\n\n'
-        + '• العميل اللي آخر رقم في موبايله زوجي: أوردره يتحجز ويتبعتله رسالة واتساب.\n'
-        + '• العميل اللي آخر رقم فردي: يروح للبنات زي ما هو، من غير أي رسالة.\n'
+      ? 'نشغّل الواتساب على 80% من الأوردرات الجديدة؟\n\n'
+        + '• العميل اللي آخر رقم في موبايله من 0 لـ 7: أوردره يتحجز ويتبعتله رسالة واتساب.\n'
+        + '• العميل اللي آخر رقم 8 أو 9 (حوالي 20%): يروح للبنات زي ما هو، من غير أي رسالة — دول مقياس المقارنة.\n'
         + '• الرسايل دي لعملاء حقيقيين من دلوقتي.\n'
         + '• للإيقاف في أي وقت: اختار «متوقف» واحفظ.'
       : 'نشغّل الواتساب على كل الأوردرات الجديدة؟\n\n'
         + '• كل أوردر جديد هيتحجز ويتبعتله رسالة واتساب الأول.\n'
-        + '• مفيش نص مع البنات للمقارنة: مش هنعرف نقيس الواتساب فرق في التسليم قد إيه.\n'
+        + '• مفيش مجموعة مع البنات للمقارنة: مش هنعرف نقيس الواتساب فرق في التسليم قد إيه.\n'
         + '• الرسايل دي لعملاء حقيقيين من دلوقتي.\n'
         + '• للإيقاف في أي وقت: اختار «متوقف» واحفظ.')) return;
     setAutoSaving(true);
@@ -787,7 +787,7 @@ export default function WhatsAppPage() {
       const { data: d } = await saveWhatsAppAuto({ auto_mode: autoMode, test_phones: phones, split_test: false, control_half: autoMode === 'on' && autoHalf });
       applyAuto(d, true);
       showToast(d.auto_mode === 'off' ? 'التشغيل اتقفل'
-        : d.auto_mode === 'on' ? (d.control_half ? 'الواتساب شغال على نص الأوردرات ✓' : 'الواتساب شغال على كل الأوردرات ✓') : 'وضع التجربة شغال ✓', 'success');
+        : d.auto_mode === 'on' ? (d.control_half ? 'الواتساب شغال على 80% من الأوردرات ✓' : 'الواتساب شغال على كل الأوردرات ✓') : 'وضع التجربة شغال ✓', 'success');
     } catch (e) {
       setAutoErr(errMsg(e, 'تعذّر الحفظ'));
     } finally {
@@ -1127,9 +1127,9 @@ export default function WhatsAppPage() {
                     : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}>
                   <input type="radio" name="wa-auto-mode" checked={autoMode === 'on' && autoHalf} onChange={() => { setAutoMode('on'); setAutoHalf(true); }} className="mt-1 w-4 h-4 accent-emerald-600 shrink-0" />
                   <span>
-                    <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">شغال على نص الأوردرات (تجربة أسبوع)</span>
+                    <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">شغال على 80% من الأوردرات (تجربة أسبوع)</span>
                     <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                      العميل اللي آخر رقم في موبايله زوجي بيدخل الواتساب، والفردي بيروح للبنات زي ما هو — عشان نقارن الاتنين على التسليم.
+                      4 من كل 5 عملاء بيدخلوا الواتساب، والخامس (آخر رقم في موبايله 8 أو 9) بيروح للبنات زي ما هو — عشان نقارن الاتنين على التسليم.
                     </span>
                   </span>
                 </label>
@@ -1142,7 +1142,7 @@ export default function WhatsAppPage() {
                   <span>
                     <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">شغال على كل العملاء</span>
                     <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                      كل أوردر جديد بيدخل الواتساب الأول. من غير نص مع البنات مفيش مقارنة على التسليم.
+                      كل أوردر جديد بيدخل الواتساب الأول. من غير مجموعة مع البنات مفيش مقارنة على التسليم.
                     </span>
                   </span>
                 </label>

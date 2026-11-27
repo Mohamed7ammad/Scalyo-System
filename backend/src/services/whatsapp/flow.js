@@ -181,11 +181,15 @@ const isWeak = (order) => {
     && bt(order.easyorder_rate).toLowerCase() === 'low';
 };
 
-/* The first live week runs on HALF the customers: the other half is handled by
-   the agents exactly as before, so the two halves can be compared on delivery.
-   The split is by the customer number itself (last digit even = WhatsApp), so
-   one customer is always in the same half, whatever they order. */
-const trialGroup = (waPhone) => (Number(String(waPhone ?? '').slice(-1)) % 2 === 0 ? 'wa' : 'control');
+/* The first live week keeps a CONTROL group: about one customer in five is
+   handled by the agents exactly as before, so the two groups can be compared
+   on delivery (owner, 2026-11-27: 80/20 — use the feature on most orders, keep
+   a yardstick). The split is by the customer number itself — last digit 8 or 9
+   → the agents (measured: 19.1% of orders, over 7 and over 30 days), 0–7 →
+   WhatsApp — so one customer is always in the same group, whatever they order.
+   (The setting is still called control_half: it only means "keep a control".) */
+const CONTROL_DIGITS = ['8', '9'];
+const trialGroup = (waPhone) => (CONTROL_DIGITS.includes(String(waPhone ?? '').slice(-1)) ? 'control' : 'wa');
 
 /**
  * The customer tapped a button (or wrote). Returns what to do:

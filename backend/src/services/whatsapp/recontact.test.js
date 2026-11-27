@@ -59,9 +59,9 @@ test('the half-and-half trial: an agents-only customer who ordered during it is 
   const isControl = recontact.controlCheck(auto);
   const r = recontact.pick({
     orders: [
-      order(1, { Phone: '01011111111', created_at: '2026-11-27T12:00:00Z' }),   // odd, during the trial → control
-      order(2, { Phone: '01011111112', created_at: '2026-11-27T12:00:00Z' }),   // even → the WhatsApp half
-      order(3, { Phone: '01011111113', created_at: '2026-11-26T12:00:00Z' }),   // odd, but BEFORE the trial
+      order(1, { Phone: '01011111119', created_at: '2026-11-27T12:00:00Z' }),   // ends in 9, during the trial → control
+      order(2, { Phone: '01011111112', created_at: '2026-11-27T12:00:00Z' }),   // ends in 2 → the WhatsApp group
+      order(3, { Phone: '01011111118', created_at: '2026-11-26T12:00:00Z' }),   // ends in 8, but BEFORE the trial
     ],
     messaged: new Set(), busy: new Set(), isControl,
   });
@@ -69,7 +69,7 @@ test('the half-and-half trial: an agents-only customer who ordered during it is 
   assert.equal(r.skipped.control_group, 1);
   /* after the trial is closed its control orders stay protected; later orders are free again */
   const closed = recontact.controlCheck({ control_half: true, live_since: '2026-11-27T10:00:00Z', live_until: '2026-12-04T10:00:00Z' });
-  assert.equal(closed({ created_at: '2026-11-30T00:00:00Z' }, '201011111111'), true);
-  assert.equal(closed({ created_at: '2026-12-05T00:00:00Z' }, '201011111111'), false);
-  assert.equal(recontact.controlCheck({ control_half: false, live_since: '2026-11-27T10:00:00Z' })({ created_at: '2026-11-28T00:00:00Z' }, '201011111111'), false);
+  assert.equal(closed({ created_at: '2026-11-30T00:00:00Z' }, '201011111119'), true);
+  assert.equal(closed({ created_at: '2026-12-05T00:00:00Z' }, '201011111119'), false);
+  assert.equal(recontact.controlCheck({ control_half: false, live_since: '2026-11-27T10:00:00Z' })({ created_at: '2026-11-28T00:00:00Z' }, '201011111119'), false);
 });

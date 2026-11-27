@@ -73,7 +73,7 @@ async function planForNewOrder(businessId, rawPhone) {
     const phone = whatsappNumber(rawPhone);
     if (!phone) return null;                                   // not an Egyptian mobile → agents call
     if (auto.auto_mode === 'test' && !auto.test_phones.includes(phone)) return null;
-    /* live on half the customers: the other half stays with the agents alone (the trial's control) */
+    /* live with a control group: about one customer in five stays with the agents alone */
     if (auto.auto_mode === 'on' && auto.control_half && flow.trialGroup(phone) === 'control') return null;
     /* Meta's limit on customers per 24 hours: past it the order simply goes to the agents */
     const used = await deps.flows().customersMessaged24h(businessId);

@@ -11,7 +11,7 @@ pool.query = async () => ({ rows: [], rowCount: 0 });          // nothing here m
 
 const trial = require('./trial');
 
-const WA = '01000000002', AGENTS = '01000000001';              // even last digit → WhatsApp half; odd → agents
+const WA = '01000000002', AGENTS = '01000000009';              // last digit 0–7 → WhatsApp group; 8 or 9 → agents
 
 test('every order counts in its customer\'s half, whatever became of it', () => {
   const r = trial.summarize([

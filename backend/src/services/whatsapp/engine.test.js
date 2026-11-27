@@ -621,14 +621,14 @@ test('the limit is the one META reports for the account: on TIER_2K, 400 custome
   assert.equal(w.tier, 'TIER_2K');
 });
 
-test('live on half the customers: a number ending in an even digit gets WhatsApp, an odd one stays with the agents', async () => {
+test('live with a control group: a number ending in 8 or 9 stays with the agents, every other one gets WhatsApp', async () => {
   const w = world({ half: true });
   assert.ok(await engine.planForNewOrder(1, '01001488462'));
-  assert.ok(await engine.planForNewOrder(1, '+20 100 148 8460'));
-  assert.equal(await engine.planForNewOrder(1, '01001488461'), null);
-  assert.equal(await engine.planForNewOrder(1, '٠١٠٠١٤٨٨٤٦٣'), null, 'the same customer however the number is typed');
-  const all = world();                                            // not a trial → everybody
-  assert.ok(await engine.planForNewOrder(1, '01001488461'));
+  assert.ok(await engine.planForNewOrder(1, '+20 100 148 8461'));
+  assert.equal(await engine.planForNewOrder(1, '01001488468'), null);
+  assert.equal(await engine.planForNewOrder(1, '٠١٠٠١٤٨٨٤٦٩'), null, 'the same customer however the number is typed');
+  const all = world();                                            // no control group → everybody
+  assert.ok(await engine.planForNewOrder(1, '01001488469'));
   void w; void all;
 });
 

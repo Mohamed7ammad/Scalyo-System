@@ -171,11 +171,9 @@ test('who needs a deposit: Bosta «ضعيف» always; EasyOrder «low» only whe
   for (const eo of ['high', 'moderate', 'unknown', null, undefined, '']) assert.equal(flow.isWeak({ DeliveryRate: 'بدون', easyorder_rate: eo }), false, String(eo));
 });
 
-test('the trial half is the customer\u2019s own number: even last digit → WhatsApp, odd → the agents', () => {
-  assert.equal(flow.trialGroup('201001488462'), 'wa');
-  assert.equal(flow.trialGroup('201001488460'), 'wa');
-  assert.equal(flow.trialGroup('201001488461'), 'control');
-  assert.equal(flow.trialGroup('201001488469'), 'control');
+test('the trial group is the customer\u2019s own number: last digit 8 or 9 → the agents (about 20%), 0–7 → WhatsApp', () => {
+  for (const d of '01234567') assert.equal(flow.trialGroup(`20100148846${d}`), 'wa', d);
+  for (const d of '89') assert.equal(flow.trialGroup(`20100148846${d}`), 'control', d);
 });
 
 test('daily limits follow the tier Meta reports; an unknown tier is treated as the smallest (250)', () => {

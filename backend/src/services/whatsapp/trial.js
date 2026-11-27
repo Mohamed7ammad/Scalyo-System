@@ -1,7 +1,7 @@
-/* ── WhatsApp — the half-and-half trial report ───────────────────────────────
-   While the flow is live on half the customers (flow.trialGroup: last digit of
-   the customer's number even → WhatsApp, odd → the agents alone), this compares
-   the two halves on the orders placed since it went live.
+/* ── WhatsApp — the trial report (WhatsApp group vs control group) ────────────
+   While the flow is live with a control group (flow.trialGroup: last digit of
+   the customer's number 8 or 9 → the agents alone, about 20%; 0–7 → WhatsApp),
+   this compares the two groups on the orders placed since it went live.
 
    Every order is counted in the half its CUSTOMER belongs to, whatever happened
    to it afterwards — an order of the WhatsApp half that got no message (daily
