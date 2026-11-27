@@ -177,3 +177,10 @@ test('the trial half is the customer\u2019s own number: even last digit → What
   assert.equal(flow.trialGroup('201001488461'), 'control');
   assert.equal(flow.trialGroup('201001488469'), 'control');
 });
+
+test('daily limits follow the tier Meta reports; an unknown tier is treated as the smallest (250)', () => {
+  assert.deepEqual(flow.dailyLimits('TIER_2K'), { tier: 'TIER_2K', meta: 2000, new_orders: 1900, recontact: 1700, recontact_live: 1200 });
+  assert.deepEqual(flow.dailyLimits('TIER_250'), { tier: 'TIER_250', meta: 250, new_orders: 237, recontact: 212, recontact_live: 150 });
+  for (const t of [null, undefined, '', 'SOMETHING_NEW']) assert.equal(flow.dailyLimits(t).meta, 250, String(t));
+  assert.equal(flow.dailyLimits(' tier_10k ').meta, 10000);
+});

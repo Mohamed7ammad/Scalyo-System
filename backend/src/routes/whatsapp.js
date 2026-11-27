@@ -82,7 +82,13 @@ router.post('/check', authenticate, requireAdmin, async (req, res) => {
       if (!(e instanceof cloud.GraphError)) throw e;
       error = e;
     }
-    const row = await store.saveCheckResult(businessId, { info, error: error?.message });
+    let row = await store.saveCheckResult(businessId, { info, error: error?.message });
+    if (info) {
+      /* the account's daily limit tier comes from Meta too — the limit guard reads the stored value */
+      const limit = await cloud.messagingLimit(settings).catch(() => null);
+      await flows.saveHealth(businessId, { quality: info.quality_rating || null, limit }).catch(() => {});
+      row = (await store.getSettings(businessId)) || row;
+    }
     res.set('Cache-Control', 'no-store');
     if (error) return res.status(400).json({ error: error.message, settings: store.publicSettings(row) });
     res.json({ ok: true, settings: store.publicSettings(row) });
@@ -227,7 +233,7 @@ router.post('/account-link', authenticate, requireAdmin, async (req, res) => {
    test = only orders whose customer number is in the owner's test list enter
    the flow; every other order is untouched. */
 const LIVE_MODE_OPEN = true;    // live on HALF the customers (the trial week)
-const LIVE_ALL_OPEN  = false;   // every customer: after the trial, and after Meta raises the daily limit
+const LIVE_ALL_OPEN  = true;    // every customer — the owner's choice; Meta's limit for this account is read from Meta
 
 async function autoView(businessId) {
   const auto = await flows.getAuto(businessId);
@@ -241,7 +247,7 @@ async function autoView(businessId) {
     configured:  auto.configured,
     live_mode_open: LIVE_MODE_OPEN,
     live_all_open:  LIVE_ALL_OPEN,
-    daily_limit: { meta: flowRules.DEFAULTS.daily_limit, new_orders: flowRules.DEFAULTS.daily_new_orders,
+    daily_limit: { ...flowRules.dailyLimits(auto.messaging_limit),
                    used: auto.configured ? await flows.customersMessaged24h(businessId) : 0 },
     rules: {
       hold_status:      flowRules.HOLD_STATUS,
@@ -292,6 +298,13 @@ router.put('/auto', authenticate, requireAdmin, async (req, res) => {
         return res.status(400).json({ error: `ميتا لسه موافقتش على: ${pending.map((t) => t.title).join('، ')} — استنى الموافقة الأول` });
       }
     }
+    if (mode !== 'off') {
+      /* know Meta's real limit and the number's quality BEFORE anything is sent */
+      const settings = await store.getSettings(businessId);
+      const info = await cloud.checkPhoneNumber(settings).catch(() => null);
+      const limit = await cloud.messagingLimit(settings).catch(() => null);
+      await flows.saveHealth(businessId, { quality: info?.quality_rating || null, limit }).catch(() => {});
+    }
     const saved = await flows.saveAuto(businessId,
       { auto_mode: mode, test_phones: phones, split_test: req.body?.split_test === true, control_half: controlHalf }, actor(req.user));
     console.log(`[whatsapp] automation set to "${saved.auto_mode}" by ${actor(req.user)} (${saved.test_phones.length} test number(s), half=${saved.control_half}, split=${saved.split_test})`);
@@ -321,7 +334,7 @@ router.get('/recontact', authenticate, requireAdmin, async (req, res) => {
     if (!req.query.from && !req.query.to) {
       return res.json({ results, max_days_back: recontact.MAX_DAYS_BACK, today: recontact.cairoDay(new Date()) });
     }
-    const p = await recontact.preview(businessId, { from: req.query.from, to: req.query.to });
+    const p = await recontact.preview(businessId, { from: req.query.from, to: req.query.to, status: req.query.status });
     res.json({ ...p, results, max_days_back: recontact.MAX_DAYS_BACK, today: recontact.cairoDay(new Date()) });
   } catch (err) { fail(res, err, 'تعذّر حساب أوردرات «لا يرد»'); }
 });
@@ -339,8 +352,9 @@ router.post('/recontact', authenticate, requireAdmin, async (req, res) => {
     const confirm = list.templates.find((t) => t.name === 'order_confirm_v1');
     if (confirm?.meta?.status !== 'APPROVED') return res.status(400).json({ error: 'ميتا لسه موافقتش على رسالة التأكيد' });
 
-    const r = await recontact.queue(businessId, { from: req.body?.from, to: req.body?.to, count: req.body?.count });
-    console.log(`[whatsapp] recontact: ${r.queued} «لا يرد» order(s) queued by ${actor(req.user)} (${r.from} → ${r.to}, asked ${r.asked})`);
+    const r = await recontact.queue(businessId, { from: req.body?.from, to: req.body?.to, count: req.body?.count,
+      status: req.body?.status, send_now: req.body?.send_now === true });
+    console.log(`[whatsapp] recontact: ${r.queued} «${recontact.KINDS[r.status].status}» order(s) queued by ${actor(req.user)} (${r.from} → ${r.to}, asked ${r.asked}, first at ${new Date(r.first_at).toISOString()})`);
     res.set('Cache-Control', 'no-store');
     res.json({ ...r, results: await flows.recontactResults(businessId) });
   } catch (err) { fail(res, err, 'تعذّر تجهيز الدفعة'); }

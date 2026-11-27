@@ -31,7 +31,9 @@ const ACTOR = Object.freeze({ label: 'whatsapp', source: 'whatsapp' });
 const NO_COMMISSION = Object.freeze({ commission: false });
 const LATE_SEND_MIN = 45;        // a confirmation this late is not sent — the order goes to the agents
 const LATE_REMINDER_MIN = 6 * 60;
-const RECONTACT_STATUS = 'لا يرد';   // the only status an old order may be messaged in
+const RECONTACT_STATUS = 'لا يرد';
+/* the statuses a batch order may still be in when its message goes: unreached, with its agent */
+const RECONTACT_STATUSES = ['لا يرد', 'جديد'];
 const NO_ANSWER        = 'لا يرد';
 const REVIEW_NEW       = 'مراجعة جديدة';   // a review account's "still to call" (same no-answer cycle as «لا يرد»)
 const isRecontact = (f) => f.kind === 'recontact';
@@ -75,7 +77,7 @@ async function planForNewOrder(businessId, rawPhone) {
     if (auto.auto_mode === 'on' && auto.control_half && flow.trialGroup(phone) === 'control') return null;
     /* Meta's limit on customers per 24 hours: past it the order simply goes to the agents */
     const used = await deps.flows().customersMessaged24h(businessId);
-    if (used >= flow.DEFAULTS.daily_new_orders) {
+    if (used >= flow.dailyLimits(auto.messaging_limit).new_orders) {
       if (Date.now() - lastCapWarnAt > 10 * 60000) {
         lastCapWarnAt = Date.now();
         warn(`daily limit reached (${used} customers in 24 h) — new orders go to the agents until it frees up`);
@@ -216,7 +218,8 @@ async function sendConfirmation(f) {
   const { GraphError } = deps.cloud();
   const recontact = isRecontact(f);
   const cur = await deps.orderStatus().loadOrder(f.business_id, f.order_id);
-  if (!cur || String(cur.status).trim() !== (recontact ? RECONTACT_STATUS : flow.HOLD_STATUS)) {
+  const st = String(cur?.status ?? '').trim();
+  if (!cur || (recontact ? !RECONTACT_STATUSES.includes(st) : st !== flow.HOLD_STATUS)) {
     await deps.flows().markReleased(f.order_id, 'moved');          // someone already handled the order
     return 'moved';
   }
@@ -232,7 +235,7 @@ async function sendConfirmation(f) {
     await logOut(f, 'confirm', TEMPLATE.confirm, sent, null);
     if (recontact) {
       await deps.flows().markRecontactSent(f.order_id, now);
-      log(`order #${f.order_id}: confirmation sent to an old «${RECONTACT_STATUS}» order (stays with its agent)`);
+      log(`order #${f.order_id}: confirmation sent to a waiting «${st}» order (stays with its agent)`);
       return 'sent';
     }
     const s = flow.scheduleAfterSend(now);
@@ -317,6 +320,29 @@ async function tick() {
     running = false;
   }
   return out;
+}
+
+/* Ask Meta how the number is doing — quality and the daily limit tier — and
+   store it: the limit guard and the "2nd reminder stops on low quality" rule
+   read the stored values. One business (the owner just pressed a button) or
+   every business whose flow is on (twice an hour). Two GETs each. Never throws. */
+async function refreshHealth(businessId = null) {
+  let done = 0;
+  try {
+    for (const s of await deps.flows().liveSettings(businessId)) {
+      try {
+        const info = await deps.cloud().checkPhoneNumber(s);
+        const limit = await deps.cloud().messagingLimit(s).catch(() => null);
+        await deps.flows().saveHealth(s.business_id, { quality: info?.quality_rating || null, limit });
+        done += 1;
+      } catch (e) {
+        warn(`health check for business ${s.business_id}:`, e.message);
+      }
+    }
+  } catch (e) {
+    warn('health check:', e.message);
+  }
+  return done;
 }
 
 /* ── the customer answers ─────────────────────────────────────────────────── */
@@ -445,5 +471,5 @@ async function handleFailedStatus(businessId, waMessageId) {
 
 module.exports = {
   TEMPLATE, RECONTACT_STATUS, planForNewOrder, enrollNewOrder, releaseOrder, sendConfirmation, sendReminder, tick,
-  handleInbound, handleFailedStatus, liftNoAnswer, depositAfterConfirm, _setDepsForTests,
+  handleInbound, handleFailedStatus, liftNoAnswer, depositAfterConfirm, refreshHealth, _setDepsForTests,
 };

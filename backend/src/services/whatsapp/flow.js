@@ -39,15 +39,27 @@ const DEFAULTS = Object.freeze({
   quiet_from_hour:    0,      // Cairo
   quiet_until_hour:   10,
   max_messages:       3,
-  /* Meta counts the CUSTOMERS we open a conversation with in any 24 hours (250
-     for a new account). New orders stop a little short of it; the owner's
-     batches to old «لا يرد» orders stop earlier, and earlier still while the
-     flow is live, so the day's new orders always have room. */
-  daily_limit:          250,
-  daily_new_orders:     240,
-  daily_recontact:      230,
-  daily_recontact_live: 150,
 });
+
+/* Meta counts the CUSTOMERS we open a conversation with in any 24 hours, per
+   business portfolio, and says which tier the account is on
+   (whatsapp_business_manager_messaging_limit — read from Meta and stored, never
+   assumed: this account turned out to be TIER_2K, not the 250 of a new one).
+   New orders stop a little short of it; the owner's batches to old «لا يرد»
+   orders stop earlier, and earlier still while the flow is live, so the day's
+   new orders always have room. Unknown tier → the smallest real one, 250. */
+const TIER_CUSTOMERS = { TIER_250: 250, TIER_1K: 1000, TIER_2K: 2000, TIER_10K: 10000, TIER_100K: 100000, TIER_UNLIMITED: 1000000 };
+function dailyLimits(tier) {
+  const key = String(tier ?? '').trim().toUpperCase();
+  const meta = TIER_CUSTOMERS[key] || 250;
+  return {
+    tier: TIER_CUSTOMERS[key] ? key : null,
+    meta,
+    new_orders:     Math.floor(meta * 0.95),
+    recontact:      Math.floor(meta * 0.85),
+    recontact_live: Math.floor(meta * 0.6),
+  };
+}
 
 const bt = (s) => String(s ?? '').replace(/^ +| +$/g, '');
 const isOneOf = (list, status) => list.includes(bt(status));
@@ -257,5 +269,5 @@ function canRemind({ order, flow, cfg = DEFAULTS }) {
 module.exports = {
   HOLD_STATUS, NEW_STATUS, CONFIRMED_STATUS, TAP_DECIDES, REMINDABLE, COMMITTED, DEFAULTS, TAGS,
   cleanParam, formatAmount, amountDue, messageParams, buttonPayload, parsePayload, templateComponents,
-  outsideQuietHours, addMin, variantOf, sendAt, scheduleAfterSend, isWeak, trialGroup, decideTap, replyText, canRemind,
+  outsideQuietHours, addMin, variantOf, sendAt, scheduleAfterSend, isWeak, trialGroup, dailyLimits, decideTap, replyText, canRemind,
 };

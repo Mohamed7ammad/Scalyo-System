@@ -1809,7 +1809,7 @@ export interface WhatsAppAutoResponse {
   configured:     boolean;
   live_mode_open: boolean;
   live_all_open?: boolean;
-  daily_limit?:   { meta: number; new_orders: number; used: number };
+  daily_limit?:   { tier: string | null; meta: number; new_orders: number; recontact: number; recontact_live: number; used: number };
   rules: { hold_status: string; send_delay_min: number; send_delay_b_min: number; hold_min: number;
            reminder1_min: number; reminder2_min: number; quiet_until_hour: number };
   tags:  Record<string, string>;
@@ -1843,7 +1843,9 @@ export interface WhatsAppRecontactPreview {
   today:         string;                       // YYYY-MM-DD, Cairo
   from?:         string;
   to?:           string;
-  found?:        number;                       // no-answer orders in the range
+  status?:       'no_answer' | 'new';          // which waiting orders were counted
+  quiet_until?:  string | null;                // batches wait until then (10:00) unless sent "now"
+  found?:        number;                       // waiting orders in the range
   eligible?:     number;                       // customers we may message
   weak?:         number;
   by_day?:       { day: string; n: number }[];
@@ -1856,9 +1858,10 @@ export interface WhatsAppRecontactQueued {
   from: string; to: string; queued: number; asked: number; first_at: string; last_at: string;
   results: WhatsAppRecontactResults;
 }
-export const getWhatsAppRecontact = (range?: { from: string; to: string }) =>
+export type WhatsAppRecontactKind = 'no_answer' | 'new';
+export const getWhatsAppRecontact = (range?: { from: string; to: string; status?: WhatsAppRecontactKind }) =>
   api.get<WhatsAppRecontactPreview>('/api/whatsapp/recontact', { params: range });
-export const sendWhatsAppRecontact = (data: { from: string; to: string; count: number }) =>
+export const sendWhatsAppRecontact = (data: { from: string; to: string; count: number; status?: WhatsAppRecontactKind; send_now?: boolean }) =>
   api.post<WhatsAppRecontactQueued>('/api/whatsapp/recontact', data);
 
 /** One of our message templates + what Meta says about it (null = not submitted yet). */

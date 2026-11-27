@@ -103,6 +103,13 @@ async function checkPhoneNumber(settings) {
     `${encodeURIComponent(settings.phone_number_id)}?fields=display_phone_number,verified_name,quality_rating`);
 }
 
+/** The account's daily limit tier ("TIER_250", "TIER_2K" …), or null if Meta does not say. */
+async function messagingLimit(settings) {
+  const r = await graph(settings, 'GET',
+    `${encodeURIComponent(settings.phone_number_id)}?fields=whatsapp_business_manager_messaging_limit`);
+  return r?.whatsapp_business_manager_messaging_limit || null;
+}
+
 /* Meta: without a leading "+", the BUSINESS number's country code is prepended
    (a US test number would turn 2010… into +12010…). Always send "+2010…". */
 const withPlus = (to) => (String(to).startsWith('+') ? String(to) : `+${to}`);
@@ -177,5 +184,5 @@ async function subscribeApp(settings) {
   return data?.success === true;
 }
 
-module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, sendTemplate,
+module.exports = { GRAPH, VERSION, GraphError, friendlyMessage, toGraphError, checkPhoneNumber, messagingLimit, sendTemplate,
   listSubscribedApps, subscribeApp, ownApp, listTemplates, createTemplate, friendlyForCode, sendText, _setFetchForTests };

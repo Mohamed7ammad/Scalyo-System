@@ -30,7 +30,9 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false,
     return o;
   };
   const flows = {
-    getAuto: async () => ({ auto_mode: w.mode, test_phones: testPhones, split_test: split, control_half: half, configured: true }),
+    getAuto: async () => ({ auto_mode: w.mode, test_phones: testPhones, split_test: split, control_half: half, messaging_limit: w.tier, configured: true }),
+    liveSettings: async (b) => (b || w.mode !== 'off' ? [{ business_id: 1, phone_number_id: '1', access_token: 't' }] : []),
+    saveHealth: async (b, h) => { w.health = h; if (h.limit) w.tier = h.limit; },
     customersMessaged24h: async () => w.messaged24h,
     confirmedNowWeak: async () => [...w.flows.values()].filter((f) => {
       const o = w.orders.get(f.order_id);
@@ -71,6 +73,8 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false,
     GraphError,
     sendTemplate: async (settings, m) => { if (w.metaFails) throw w.metaFails; w.sentTemplates.push(m); return { message_id: `wamid.T${w.sentTemplates.length}` }; },
     sendText: async (settings, m) => { w.sentTexts.push(m); return { message_id: `wamid.X${w.sentTexts.length}` }; },
+    checkPhoneNumber: async () => { if (w.metaFails) throw w.metaFails; return { quality_rating: w.metaQuality || 'GREEN' }; },
+    messagingLimit: async () => w.metaTier || null,
   };
   const store = {
     getSettings: async () => ({ phone_number_id: '1', access_token: 't', quality_rating: quality }),
@@ -538,6 +542,25 @@ test('after the 30-minute release: the agent marked «لا يرد», then the cu
   assert.equal(w.orders.get(74).wa_tag, 'support');
 });
 
+test('a batch to «جديد» orders nobody called yet: message goes, the order stays «جديد» with its agent; «تأكيد» confirms it', async () => {
+  const w = world({ mode: 'test' });
+  await w.recontact(90, { Status: 'جديد' });
+  await w.recontact(91, { Status: 'جديد' });
+  await w.recontact(92, { Status: 'مؤجل' });                       // she already spoke to the customer → no message
+  assert.equal((await engine.tick()).sent, 2);
+  assert.equal(w.orders.get(90).Status, 'جديد');
+  assert.equal(w.orders.get(90).AssignedTo, 'agent@test');
+  assert.equal(w.flows.get(92).release_reason, 'moved');
+  await w.tap('confirm', 90);
+  assert.equal(w.orders.get(90).Status, 'تم التأكيد');
+  assert.equal(w.orders.get(90).confirmed_via, 'whatsapp');
+  assert.equal(w.orders.get(90).AssignedTo, null);
+  await w.tap('support', 91);
+  assert.equal(w.orders.get(91).Status, 'جديد', 'already on top of her work — only the tag is added');
+  assert.equal(w.orders.get(91).AssignedTo, 'agent@test');
+  assert.equal(w.orders.get(91).wa_tag, 'support');
+});
+
 test('an agent settled the old order before its turn → no message; Meta refusing it changes nothing on the order', async () => {
   const w = world({ mode: 'test' });
   await w.recontact(64);
@@ -572,13 +595,30 @@ test('«متوقف» stops the queued old orders too; a queue the worker missed 
 /* ── going live: Meta's daily limit, the half-and-half trial, late ratings ─── */
 
 test('past the daily limit a new order is not held — it goes to the agents as always', async () => {
-  const w = world();
-  w.messaged24h = 239;
+  const w = world();                                              // tier unknown → the smallest one: 250, we stop at 237
+  w.messaged24h = 236;
   assert.ok(await engine.planForNewOrder(1, '01001488462'), 'one below the limit: still held');
-  w.messaged24h = 240;
+  w.messaged24h = 237;
   assert.equal(await engine.planForNewOrder(1, '01001488462'), null);
   w.messaged24h = 400;
   assert.equal(await engine.planForNewOrder(1, '01001488462'), null);
+});
+
+test('the limit is the one META reports for the account: on TIER_2K, 400 customers is nowhere near it', async () => {
+  const w = world();
+  w.metaTier = 'TIER_2K'; w.metaQuality = 'YELLOW';
+  w.messaged24h = 400;
+  assert.equal(await engine.planForNewOrder(1, '01001488462'), null, 'before Meta was asked: still the cautious 250');
+  assert.equal(await engine.refreshHealth(), 1);
+  assert.deepEqual(w.health, { quality: 'YELLOW', limit: 'TIER_2K' });
+  assert.ok(await engine.planForNewOrder(1, '01001488462'));
+  w.messaged24h = 1899;
+  assert.ok(await engine.planForNewOrder(1, '01001488462'));
+  w.messaged24h = 1900;
+  assert.equal(await engine.planForNewOrder(1, '01001488462'), null);
+  w.metaFails = new GraphError(190, 'token expired');             // Meta unreachable → nothing changes, nothing throws
+  assert.equal(await engine.refreshHealth(), 0);
+  assert.equal(w.tier, 'TIER_2K');
 });
 
 test('live on half the customers: a number ending in an even digit gets WhatsApp, an odd one stays with the agents', async () => {

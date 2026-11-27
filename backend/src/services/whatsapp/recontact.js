@@ -30,9 +30,20 @@ const flows = require('./flowStore');
 const { whatsappNumber, whatsappNumbers } = require('../../utils/phone');
 
 const STATUS        = 'لا يرد';
-const DAILY_LIMIT   = flow.DEFAULTS.daily_limit;        // Meta, new business portfolio — customers in any 24 hours
-const SAFE_LIMIT    = flow.DEFAULTS.daily_recontact;
-const safeLimit = (auto) => (auto?.auto_mode === 'on' ? flow.DEFAULTS.daily_recontact_live : SAFE_LIMIT);
+/* Which waiting orders a batch may take:
+     no_answer — «لا يرد»: the agents called and nobody answered;
+     new       — «جديد»: placed while the flow was not on, nobody has called yet
+                 (the order stays with its agent; her call simply comes after the
+                 message). A customer who ALSO has an old «لا يرد» order is still
+                 messaged about the new one — that is not "somebody reached them". */
+const KINDS = {
+  no_answer: { status: 'لا يرد', notBusy: ['لا يرد'] },
+  new:       { status: 'جديد',   notBusy: ['جديد', 'لا يرد'] },
+};
+const kindOf = (which) => KINDS[which === 'new' ? 'new' : 'no_answer'];
+/* Meta's limit for THIS account (stored from Meta, see flow.dailyLimits); less while the flow is live. */
+const limitsOf  = (auto) => flow.dailyLimits(auto?.messaging_limit);
+const safeLimit = (auto) => (auto?.auto_mode === 'on' ? limitsOf(auto).recontact_live : limitsOf(auto).recontact);
 const MAX_DAYS_BACK = 14;
 const MAX_BATCH     = 150;
 const PER_MINUTE    = 10;       // gentle: the worker also has the day's new orders to send
@@ -85,11 +96,13 @@ function controlCheck(auto) {
 }
 
 /* Three reads, one after the other (the production pooler is small). */
-async function gather(businessId, { from, to }, auto) {
+async function gather(businessId, { from, to }, auto, which = 'no_answer') {
   await flows.ensureSchema();
+  const kind = kindOf(which);
   const { rows: orders } = await pool.query(
     `SELECT o.id, o.business_id, o."FullName", o."Phone", o."ProductName", o.quantity, o."ProductPrice",
             o."City", o."Address", o."Status", o."DeliveryRate", o."depositAmount",
+            to_jsonb(o) ->> 'easyorder_rate' AS easyorder_rate,
             (o."createdAt" AT TIME ZONE 'UTC') AS created_at,
             to_char((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD') AS day
        FROM orders o
@@ -98,7 +111,7 @@ async function gather(businessId, { from, to }, auto) {
         AND ((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Africa/Cairo')::date BETWEEN $3::date AND $4::date
         AND NOT EXISTS (SELECT 1 FROM whatsapp_order_flow f WHERE f.order_id = o.id)
       ORDER BY o."createdAt" DESC, o.id DESC LIMIT 3000`,
-    [businessId, STATUS, from, to]);
+    [businessId, kind.status, from, to]);
 
   const { rows: sent } = await pool.query(
     `SELECT phone FROM whatsapp_order_flow WHERE business_id = $1 AND created_at > NOW() - INTERVAL '30 days'
@@ -109,8 +122,8 @@ async function gather(businessId, { from, to }, auto) {
 
   const { rows: others } = await pool.query(
     `SELECT DISTINCT "Phone" FROM orders
-      WHERE business_id = $1 AND "createdAt" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days' AND btrim("Status") <> $2`,
-    [businessId, STATUS]);
+      WHERE business_id = $1 AND "createdAt" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days' AND btrim("Status") <> ALL($2::text[])`,
+    [businessId, kind.notBusy]);
 
   const messaged = new Set(sent.map((r) => String(r.phone)));
   const busy = new Set();
@@ -121,19 +134,24 @@ async function gather(businessId, { from, to }, auto) {
 async function room(businessId, auto) {
   const used = await flows.customersMessaged24h(businessId);
   const safe = safeLimit(auto);
-  return { limit: DAILY_LIMIT, safe, used, room: Math.max(0, safe - used) };
+  return { limit: limitsOf(auto).meta, safe, used, room: Math.max(0, safe - used) };
 }
 
 /** What the owner sees before sending: how many, from which days, who is left out, how much room today. */
 async function preview(businessId, range, now = new Date()) {
   const r = checkRange(range.from, range.to, now);
+  const which = range.status === 'new' ? 'new' : 'no_answer';
   const auto = await flows.getAuto(businessId);
-  const g = await gather(businessId, r, auto);
+  const g = await gather(businessId, r, auto, which);
   const byDay = new Map();
   for (const c of g.chosen) byDay.set(c.order.day, (byDay.get(c.order.day) || 0) + 1);
   const cap = await room(businessId, auto);
+  const quiet = flow.outsideQuietHours(now);
   return {
     ...r,
+    status:   which,
+    /* batches wait for the morning unless the owner asks for "now" */
+    quiet_until: quiet.getTime() > now.getTime() ? quiet : null,
     found:    g.total,
     eligible: g.chosen.length,
     weak:     g.chosen.filter((c) => flow.isWeak(c.order)).length,
@@ -147,7 +165,7 @@ async function preview(businessId, range, now = new Date()) {
 
 let busyQueueing = false;
 /** Put `count` of them (newest first) in the worker's queue. Nothing is sent from here. */
-async function queue(businessId, { from, to, count }, now = new Date()) {
+async function queue(businessId, { from, to, count, status, send_now }, now = new Date()) {
   const n = parseInt(count, 10);
   if (!Number.isInteger(n) || n < 1) throw badRequest('اكتب عدد العملاء اللي هنبعتلهم');
   if (n > MAX_BATCH) throw badRequest(`أقصى عدد في المرة الواحدة ${MAX_BATCH}`);
@@ -155,13 +173,16 @@ async function queue(businessId, { from, to, count }, now = new Date()) {
   if (busyQueueing) throw badRequest('فيه دفعة بتتجهز دلوقتي — استنى ثواني');
   busyQueueing = true;
   try {
+    const which = status === 'new' ? 'new' : 'no_answer';
     const auto = await flows.getAuto(businessId);
-    const g = await gather(businessId, r, auto);
+    const g = await gather(businessId, r, auto, which);
     const cap = await room(businessId, auto);
-    if (!g.chosen.length) throw badRequest('مفيش أوردرات «لا يرد» ينفع نبعتلها في الأيام دي');
+    if (!g.chosen.length) throw badRequest(`مفيش أوردرات «${kindOf(which).status}» ينفع نبعتلها في الأيام دي`);
     if (cap.room < 1) throw badRequest(`وصلنا حد اليوم (${cap.used} عميل في آخر 24 ساعة) — كمّل بكرة`);
     const take = g.chosen.slice(0, Math.min(n, cap.room));
-    const start = flow.outsideQuietHours(now);
+    /* 00:00–10:00 a batch waits for 10:00, unless the owner chose to send now (his rule for
+       a fresh order is "at any hour"; a batch of older ones is his call each time) */
+    const start = send_now === true ? now : flow.outsideQuietHours(now);
     let queued = 0;
     for (let i = 0; i < take.length; i++) {
       const row = await flows.enroll({
@@ -170,10 +191,10 @@ async function queue(businessId, { from, to, count }, now = new Date()) {
       });
       if (row) queued += 1;
     }
-    return { ...r, queued, asked: n, first_at: start, last_at: flow.addMin(start, Math.floor(Math.max(0, take.length - 1) / PER_MINUTE)) };
+    return { ...r, status: which, queued, asked: n, first_at: start, last_at: flow.addMin(start, Math.floor(Math.max(0, take.length - 1) / PER_MINUTE)) };
   } finally {
     busyQueueing = false;
   }
 }
 
-module.exports = { STATUS, DAILY_LIMIT, SAFE_LIMIT, MAX_DAYS_BACK, MAX_BATCH, PER_MINUTE, checkRange, pick, controlCheck, preview, queue, cairoDay };
+module.exports = { STATUS, KINDS, MAX_DAYS_BACK, MAX_BATCH, PER_MINUTE, checkRange, pick, controlCheck, preview, queue, cairoDay };

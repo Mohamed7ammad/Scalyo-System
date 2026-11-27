@@ -22,6 +22,9 @@ function startWhatsappFlowCron() {
       console.warn('[whatsapp flow] tick failed:', e.message);
     }
   }, { timezone: 'Africa/Cairo' });
+  /* Meta's view of the number (quality + daily limit tier), twice an hour while the flow is on */
+  cron.schedule('7,37 * * * *', () => { engine.refreshHealth().catch(() => {}); }, { timezone: 'Africa/Cairo' });
+  setTimeout(() => { engine.refreshHealth().catch(() => {}); }, 30000);
   console.log('✅  WhatsApp flow: worker started (every minute)');
 }
 

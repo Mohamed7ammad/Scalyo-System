@@ -28,7 +28,8 @@ const FLOW_DDL = `
     ADD COLUMN IF NOT EXISTS split_test  BOOLEAN    NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS control_half BOOLEAN   NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS live_since  TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS live_until  TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS live_until  TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS messaging_limit VARCHAR(24);
   CREATE TABLE IF NOT EXISTS whatsapp_order_flow (
     order_id         INTEGER      PRIMARY KEY,
     business_id      INTEGER      NOT NULL,
@@ -137,13 +138,14 @@ const badRequest = (message) => Object.assign(new Error(message), { status: 400 
 async function getAuto(businessId) {
   await ensureSchema();
   const { rows: [r] } = await pool.query(
-    `SELECT auto_mode, test_phones, split_test, control_half, live_since, live_until,
+    `SELECT auto_mode, test_phones, split_test, control_half, live_since, live_until, messaging_limit,
             (phone_number_id IS NOT NULL AND access_token IS NOT NULL AND waba_id IS NOT NULL) AS configured
        FROM whatsapp_settings WHERE business_id = $1`, [businessId]);
-  if (!r) return { auto_mode: 'off', test_phones: [], split_test: false, control_half: false, live_since: null, live_until: null, configured: false };
+  if (!r) return { auto_mode: 'off', test_phones: [], split_test: false, control_half: false, live_since: null, live_until: null, messaging_limit: null, configured: false };
   return { auto_mode: MODES.includes(r.auto_mode) ? r.auto_mode : 'off', test_phones: r.test_phones || [],
     split_test: r.split_test === true, control_half: r.control_half === true,
-    live_since: r.live_since || null, live_until: r.live_until || null, configured: r.configured === true };
+    live_since: r.live_since || null, live_until: r.live_until || null,
+    messaging_limit: r.messaging_limit || null, configured: r.configured === true };
 }
 
 /* live_since / live_until bracket the live run (the trial report reads them):
@@ -166,6 +168,26 @@ async function saveAuto(businessId, { auto_mode, test_phones, split_test, contro
     [businessId, auto_mode, phones, split_test === true, actor, control_half === true]);
   if (!r) throw badRequest('احفظ مفاتيح ميتا الأول');
   return r;
+}
+
+/* What Meta says about the number right now: its quality (the 2nd reminder stops
+   when it drops) and the account's daily limit tier. A null keeps the old value. */
+async function saveHealth(businessId, { quality = null, limit = null }) {
+  await ensureSchema();
+  await pool.query(
+    `UPDATE whatsapp_settings
+        SET quality_rating = COALESCE($2, quality_rating), messaging_limit = COALESCE($3, messaging_limit), updated_at = updated_at
+      WHERE business_id = $1`, [businessId, quality, limit]);
+}
+
+/* The accounts worth asking Meta about: one business, or every one whose flow is switched on. */
+async function liveSettings(businessId = null) {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT * FROM whatsapp_settings
+      WHERE phone_number_id IS NOT NULL AND access_token IS NOT NULL
+        AND (($1::int IS NOT NULL AND business_id = $1) OR ($1::int IS NULL AND auto_mode <> 'off'))`, [businessId]);
+  return rows;
 }
 
 /* ── one order's diary ────────────────────────────────────────────────────── */
@@ -409,7 +431,7 @@ async function recentFlows(businessId, limit = 30) {
 module.exports = {
   FLOW_DDL, ORDERS_DDL, ORDERS_COLUMNS, MODES, ensureSchema, ensureOrdersColumn, ordersColumnsExist, ordersColumnsReady,
   _markSchemaReadyForTests, showOnOrder,
-  getAuto, saveAuto, enroll, getByOrder, latestByPhone,
+  getAuto, saveAuto, saveHealth, liveSettings, enroll, getByOrder, latestByPhone,
   claimDueSends, markSent, markRecontactSent, markReleased, dueReleases, dueReminders, markReminder, markReply,
   strandedHeldOrders, recentFlows, customersMessaged24h, recontactResults, confirmedWithText, confirmedNowWeak,
 };
