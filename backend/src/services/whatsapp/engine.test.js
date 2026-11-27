@@ -66,6 +66,10 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false,
       if (r.textReplied) f.text_replied = true; return f; },
     strandedHeldOrders: async () => [],
     ensureOrdersColumn: async () => true,
+    setAddress: async (b, id, { address, expected, statuses }) => { const o = w.orders.get(id);
+      if (String(o.Address ?? '').trim() !== String(expected ?? '').trim() || !statuses.includes(o.Status)) return false;
+      o.Address = address; return true; },
+    keepAddressBefore: async (id, before) => { const f = w.flows.get(id); if (f.address_before == null) f.address_before = before; },
     showOnOrder: async (b, id, v) => { const o = w.orders.get(id); if (w.tagFails) throw new Error('orders is locked');
       w.shown.push({ id, ...v, statusThen: o.Status, holderThen: o.AssignedTo });
       if (v.tag) o.wa_tag = v.tag; if (v.note) o.wa_note = v.note; return true; },
@@ -109,6 +113,8 @@ function world({ mode = 'on', testPhones = [], quality = 'GREEN', split = false,
     brandOf: async () => 'Product Pulse', now: () => w.now,
     trackOf: async (b, email) => w.tracks[email] || 'confirmation',
     otherOrders: async (b, orderId) => (w.others && w.others[orderId]) || 0,
+    chatWriters: async (b, phone) => { if (w.writersFail) throw new Error('db down'); return (w.writers && w.writers[phone]) || []; },
+    staffWroteAt: async (b, phone) => { if (w.staffFails) throw new Error('db down'); return (w.staffWrote && w.staffWrote[phone]) || null; },
   });
   w.advance = (min) => { w.now = new Date(w.now.getTime() + min * 60000); };
   w.tap = (action, orderId, from = '201001488462') => engine.handleInbound(1, { kind: 'button', payload: `wa1:${action}:${orderId}`, from, reply: action });
@@ -364,6 +370,193 @@ test('the customer writes instead of tapping → «طلب الدعم», text kep
   assert.equal(w.orders.get(28).wa_note, 'عايز أغيّر العنوان\nشارع 9', 'her words are on the order for the agent');
   assert.equal(w.sentTexts.length, 1);
   assert.deepEqual(await engine.handleInbound(1, { kind: 'text', from: '201999999999', reply: 'hi' }), { handled: false, why: 'no_flow' });
+});
+
+test('in the middle of a conversation with one of our people the automatic «وصلتنا رسالتك» stays quiet', async () => {
+  const w = world();
+  await w.hold(281);
+  await w.sendNow();
+  w.staffWrote = { 201001488462: new Date(w.now.getTime() - 5 * 60000) };     // she asked for the address 5 minutes ago
+  await w.text('82 ش ترسا الهرم برج الزمردة');
+  assert.equal(w.sentTexts.length, 0, 'no «هيرد عليك حد» right after she wrote');
+  assert.equal(w.orders.get(281).wa_note, '82 ش ترسا الهرم برج الزمردة', 'the answer is still kept on the order');
+  assert.equal(w.orders.get(281).Status, 'جديد', 'and the order still reaches an agent');
+  await w.text('الدور التالت');
+  assert.equal(w.sentTexts.length, 0, 'still one acknowledgement at most');
+
+  const old = world();                                                        // she wrote two hours ago: the customer is alone again
+  await old.hold(282);
+  await old.sendNow();
+  old.staffWrote = { 201001488462: new Date(old.now.getTime() - 120 * 60000) };
+  await old.text('عايز أعرف الطلب هيوصل إمتى');
+  assert.equal(old.sentTexts.length, 1);
+
+  const down = world();                                                       // cannot tell → the acknowledgement goes as before
+  await down.hold(283);
+  await down.sendNow();
+  down.staffFails = true;
+  await down.text('عايز أعرف الطلب هيوصل إمتى');
+  assert.equal(down.sentTexts.length, 1);
+});
+
+/* ── the customer writes the address we asked for ─────────────────────────── */
+
+const ADDRESS = '82 ش ترسا الكوم الاخضر برج الزمردة';
+/* a held order with a thin address whose customer tapped «تأكيد»: now «جديد» with agent@test, tagged «العنوان ناقص» */
+async function thin(w, id, over = {}) {
+  await w.hold(id, { City: 'الجيزة', Address: 'هرم', ...over });
+  await w.sendNow();
+  assert.equal((await w.tap('confirm', id)).type, 'agent_needed');
+  assert.equal(w.orders.get(id).wa_tag, 'address');
+  return w.orders.get(id);
+}
+
+test('a thin address: we ask for it ourselves; the customer writes it → in the order, confirmed «واتساب», no commission', async () => {
+  const w = world();
+  const o = await thin(w, 300);
+  assert.match(w.sentTexts.at(-1).body, /اكتبلنا هنا العنوان بالتفصيل/, 'the tap is answered with the question, not «هيتواصل معاك حد»');
+  assert.equal(o.Status, 'جديد');
+  assert.deepEqual(await w.text(ADDRESS), { handled: true, type: 'address_confirmed' });
+  assert.equal(o.Address, `هرم - ${ADDRESS}`, 'what the box held stays in front of the customer’s words');
+  assert.equal(o.Status, 'تم التأكيد');
+  assert.equal(o.AssignedTo, null);
+  assert.equal(o.confirmed_via, 'whatsapp');
+  assert.deepEqual(w.changes.at(-1).effects, { commission: false });
+  assert.equal(w.changes.at(-1).actor.label, 'whatsapp');
+  const f = w.flows.get(300);
+  assert.equal(f.outcome, 'confirmed');
+  assert.equal(f.state, 'done');
+  assert.equal(f.tag, 'address_done');
+  assert.equal(f.address_before, 'هرم', 'the old address is kept in the diary too');
+  assert.equal(o.wa_tag, 'address_done');
+  assert.equal(o.wa_note, ADDRESS);
+  assert.match(w.sentTexts.at(-1).body, /تم تأكيد طلبك/);
+});
+
+test('the address already says what the box held → the customer’s words alone', async () => {
+  const w = world();
+  const o = await thin(w, 301);
+  await w.text('82 ش ترسا هرم برج الزمردة الدور التالت');
+  assert.equal(o.Address, '82 ش ترسا هرم برج الزمردة الدور التالت');
+  assert.equal(o.Status, 'تم التأكيد');
+});
+
+test('the order’s HOLDER asked for the address in the chat → it lands in the box, she confirms and the commission is hers', async () => {
+  const w = world();
+  const o = await thin(w, 302);
+  w.writers = { 201001488462: ['agent@test'] };
+  w.staffWrote = { 201001488462: new Date(w.now.getTime() - 2 * 60000) };
+  const texts = w.sentTexts.length;
+  const changes = w.changes.length;
+  assert.deepEqual(await w.text(ADDRESS), { handled: true, type: 'address_kept' });
+  assert.equal(o.Address, `هرم - ${ADDRESS}`);
+  assert.equal(o.Status, 'جديد', 'not confirmed by the system');
+  assert.equal(o.AssignedTo, 'agent@test');
+  assert.equal(o.confirmed_via, undefined);
+  assert.equal(w.changes.length, changes, 'no status change at all');
+  assert.equal(o.wa_tag, 'address_in');
+  assert.equal(w.flows.get(302).tag, 'address_in');
+  assert.equal(w.flows.get(302).outcome, 'agent_needed');
+  assert.equal(w.sentTexts.length, texts, 'she is in the conversation: nothing automatic is said');
+});
+
+test('the OWNER asked for the address (not the holder) → no agent worked on it: the system confirms', async () => {
+  const w = world();
+  const o = await thin(w, 303);
+  w.writers = { 201001488462: ['owner@test'] };
+  w.staffWrote = { 201001488462: new Date(w.now.getTime() - 60000) };
+  assert.equal((await w.text(ADDRESS)).type, 'address_confirmed');
+  assert.equal(o.Status, 'تم التأكيد');
+  assert.equal(o.confirmed_via, 'whatsapp');
+});
+
+test('we cannot tell who wrote to the customer → the address is kept and a person finishes', async () => {
+  const w = world();
+  const o = await thin(w, 304);
+  w.writersFail = true;
+  assert.equal((await w.text(ADDRESS)).type, 'address_kept');
+  assert.equal(o.Status, 'جديد');
+  assert.equal(o.Address, `هرم - ${ADDRESS}`);
+  assert.equal(o.wa_tag, 'address_in');
+  assert.match(w.sentTexts.at(-1).body, /وصلنا العنوان/);
+});
+
+test('an answer that is not an address stays a message for the agent; the address box is not touched', async () => {
+  const w = world();
+  const o = await thin(w, 305);
+  for (const said of ['هو الطلب هيوصل امتى', 'عايز أغير العنوان', 'الدور التالت', 'خلي الطلب 2 بس', 'رقمي التاني 01012345678 شارع النصر']) {
+    assert.deepEqual(await w.text(said), { handled: true, type: 'text' }, said);
+  }
+  assert.equal(o.Address, 'هرم');
+  assert.equal(o.Status, 'جديد');
+  assert.equal(o.AssignedTo, 'agent@test');
+  assert.equal(o.wa_tag, 'address', 'still waiting for the address');
+  assert.equal((await w.text(ADDRESS)).type, 'address_confirmed', 'and when it does come, it is taken');
+});
+
+test('the address arrives but another guard stops the confirmation → the address is in, a person finishes', async () => {
+  const dup = world();
+  const o = await thin(dup, 306);
+  dup.others = { 306: 1 };                                          // a second order appeared meanwhile
+  assert.equal((await dup.text(ADDRESS)).type, 'address_kept');
+  assert.equal(o.Address, `هرم - ${ADDRESS}`);
+  assert.equal(o.Status, 'جديد');
+  assert.equal(o.AssignedTo, 'agent@test');
+  assert.equal(o.wa_tag, 'dup');
+  assert.match(dup.sentTexts.at(-1).body, /وصلنا العنوان/);
+
+  const weak = world();
+  const p = await thin(weak, 307);
+  p.DeliveryRate = 'ضعيف';                                          // the rating arrived after the tap
+  assert.equal((await weak.text(ADDRESS)).type, 'address_kept');
+  assert.equal(p.Status, 'جديد');
+  assert.equal(p.wa_tag, 'deposit');
+  assert.equal(weak.flows.get(307).outcome, 'deposit_needed');
+
+  const nocity = world();
+  const q = await thin(nocity, 308, { City: '' });
+  assert.equal((await nocity.text(ADDRESS)).type, 'address_kept');
+  assert.equal(q.Status, 'جديد');
+  assert.equal(q.wa_tag, 'address', 'the governorate is still missing');
+});
+
+test('the agent completed the address first → the customer’s message does not overwrite her work', async () => {
+  const w = world();
+  const o = await thin(w, 309);
+  o.Address = 'الهرم - شارع ترسا عمارة 82';
+  assert.deepEqual(await w.text(ADDRESS), { handled: true, type: 'text' });
+  assert.equal(o.Address, 'الهرم - شارع ترسا عمارة 82');
+  assert.equal(o.Status, 'جديد');
+
+  const done = world();                                             // or she already settled the order
+  const p = await thin(done, 310);
+  p.Status = 'تم الرفض';
+  assert.equal((await done.text(ADDRESS)).type, 'text');
+  assert.equal(p.Address, 'هرم');
+  assert.equal(p.Status, 'تم الرفض');
+});
+
+test('she called, «لا يرد», then the address comes → confirmed from there; a request AFTER it reopens the order', async () => {
+  const w = world();
+  const o = await thin(w, 311);
+  o.Status = 'لا يرد';
+  assert.equal((await w.text(ADDRESS)).type, 'address_confirmed');
+  assert.equal(o.Status, 'تم التأكيد');
+  await w.text('شكرا');
+  assert.equal(o.Status, 'تم التأكيد', 'a thank-you changes nothing');
+  await w.text('عايز أغير اللون للأسود');
+  assert.equal(o.Status, 'جديد', 'it must not ship before somebody reads this');
+  assert.equal(o.AssignedTo, 'agent@test');
+  assert.equal(o.wa_tag, 'support');
+});
+
+test('an order that was never stopped for its address: an address-like message is an ordinary message', async () => {
+  const w = world();
+  await w.hold(312);
+  await w.sendNow();
+  assert.deepEqual(await w.text(ADDRESS), { handled: true, type: 'text' });
+  assert.equal(w.orders.get(312).Address, 'الدقي - شارع التحرير 12');
+  assert.equal(w.orders.get(312).wa_tag, 'support');
 });
 
 /* ── reminders ────────────────────────────────────────────────────────────── */

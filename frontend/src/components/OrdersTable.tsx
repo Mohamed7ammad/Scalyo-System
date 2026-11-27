@@ -1967,6 +1967,18 @@ const WA_TAGS: Record<string, { label: string; hint: string; tone: string; when:
     tone: 'bg-amber-500 text-white',
     when: (st) => WA_OPEN.includes(st),
   },
+  address_in: {
+    label: 'كتب العنوان — راجعيه وأكدي',
+    hint: 'العميل داس «تأكيد» وكتب عنوانه على واتساب، والعنوان اتحط في خانة العنوان — راجعيه وأكدي الأوردر',
+    tone: 'bg-emerald-600 text-white',
+    when: (st) => WA_OPEN.includes(st),
+  },
+  address_done: {
+    label: 'كتب العنوان واتأكد',
+    hint: 'العميل داس «تأكيد» وكتب عنوانه على واتساب — العنوان اتحط في الأوردر واتأكد لوحده',
+    tone: 'bg-emerald-600 text-white',
+    when: (st) => st === 'تم التأكيد',
+  },
   lost: {
     label: 'أكد على واتساب — طلب مفقود',
     hint: 'العميل داس «تأكيد» على طلب مفقود — كمّلي المحافظة والعنوان والسعر معاه وبعدين أكدي',

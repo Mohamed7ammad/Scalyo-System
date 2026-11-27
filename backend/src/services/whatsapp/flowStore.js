@@ -57,6 +57,7 @@ const FLOW_DDL = `
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
   );
   ALTER TABLE whatsapp_order_flow ADD COLUMN IF NOT EXISTS kind VARCHAR(12) NOT NULL DEFAULT 'new';
+  ALTER TABLE whatsapp_order_flow ADD COLUMN IF NOT EXISTS address_before TEXT;
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_confirmed_idx ON whatsapp_order_flow (outcome_at) WHERE outcome = 'confirmed';
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_due_idx ON whatsapp_order_flow (state, send_at) WHERE state IN ('pending', 'sending', 'waiting');
   CREATE INDEX IF NOT EXISTS whatsapp_order_flow_phone_idx ON whatsapp_order_flow (business_id, phone, created_at DESC);
@@ -325,6 +326,27 @@ async function showOnOrder(businessId, orderId, { tag = null, note = null }) {
   return rowCount > 0;
 }
 
+/* The customer wrote the address we asked for: it goes in the order's address box.
+   Compare-and-set on what the box held when we read it and on the order still
+   being open — if an agent touched either this very second, hers stands and
+   nothing is written. Like the tag, it moves no status, holder, money or date. */
+async function setAddress(businessId, orderId, { address, expected, statuses }) {
+  const { rowCount } = await pool.query(
+    `UPDATE orders SET "Address" = $3
+      WHERE id = $1 AND business_id = $2
+        AND btrim(COALESCE("Address", '')) = btrim($4::text)
+        AND btrim("Status") = ANY($5::text[])`,
+    [orderId, businessId, String(address).slice(0, 400), String(expected ?? ''), statuses]);
+  return rowCount > 0;
+}
+
+/* What the address box held before the customer's words went in (kept once, never overwritten). */
+async function keepAddressBefore(orderId, before) {
+  await pool.query(
+    `UPDATE whatsapp_order_flow SET address_before = COALESCE(address_before, $2), updated_at = NOW() WHERE order_id = $1`,
+    [orderId, String(before ?? '')]);
+}
+
 /* Safety net: orders still «بانتظار واتساب» long after any hold could last.
    Only the newest 3,000 orders are looked at (a primary-key range, ~1 ms). */
 async function strandedHeldOrders(holdStatus, minutes = 90, limit = 50) {
@@ -430,7 +452,7 @@ async function recentFlows(businessId, limit = 30) {
 
 module.exports = {
   FLOW_DDL, ORDERS_DDL, ORDERS_COLUMNS, MODES, ensureSchema, ensureOrdersColumn, ordersColumnsExist, ordersColumnsReady,
-  _markSchemaReadyForTests, showOnOrder,
+  _markSchemaReadyForTests, showOnOrder, setAddress, keepAddressBefore,
   getAuto, saveAuto, saveHealth, liveSettings, enroll, getByOrder, latestByPhone,
   claimDueSends, markSent, markRecontactSent, markReleased, dueReleases, dueReminders, markReminder, markReply,
   strandedHeldOrders, recentFlows, customersMessaged24h, recontactResults, confirmedWithText, confirmedNowWeak,

@@ -201,6 +201,34 @@ test('media in a message: voice notes and pictures have a file to fetch; text an
   for (const raw of [{ type: 'text', text: { body: 'x' } }, { type: 'location', location: {} }, { type: 'audio', audio: {} }, null, undefined]) assert.equal(flow.mediaOf(raw), null);
 });
 
+test('the address the customer writes: what reads like one, what does not, and what goes in the box', () => {
+  for (const yes of ['82 ش ترسا الكوم الاخضر هرم برج الزمرده', '٥ شارع النصر بجوار مسجد الرحمن', 'قرية ميت غمر بيت الحاج محمد جنب المدرسة',
+    'بالشارع الرئيسي امام البنك الاهلي', 'للعمارة رقم 5 والدور التاني في فيصل', 'غرب اربيلا عماره ٢١٤ حي ٤/٣']) assert.equal(flow.looksLikeAddress(yes), true, yes);
+  for (const no of ['الدور التالت', 'خلي الطلب 2 بس', 'عايز اغير العنوان', 'هو الطلب هيوصل امتى', 'شارع النصر فين؟', 'تمام شكرا يا فندم',
+    'رقمي التاني 01012345678 شارع النصر', 'رقمي ٠١٠ ١٢٣٤ ٥٦٧٨ شارع النصر', 'وفية اسعار اقل ف السوق', 'ابعتوه على عنوان الشغل في مدينة نصر',
+    'مش هستلم من البيت خالص', '', null, 'ش'.repeat(400)]) assert.equal(flow.looksLikeAddress(no), false, String(no).slice(0, 40));
+
+  assert.equal(flow.mergeAddress('هرم', '82 ش ترسا هرم برج'), '82 ش ترسا هرم برج', 'already said');
+  assert.equal(flow.mergeAddress('ش الهرم', 'عمارة 12\nالدور التالت'), 'ش الهرم - عمارة 12 الدور التالت');
+  assert.equal(flow.mergeAddress(' . ', 'عمارة 12 الدور التالت'), 'عمارة 12 الدور التالت', 'punctuation alone is not an address');
+  assert.equal(flow.mergeAddress(null, '  عمارة 12  '), 'عمارة 12');
+
+  const order = { Status: 'جديد', City: 'الجيزة', Address: 'هرم' };
+  const text = '82 ش ترسا الكوم الاخضر برج الزمردة';
+  assert.deepEqual(flow.addressAnswer({ order, flow: { tag: 'address' }, text }), { address: `هرم - ${text}` });
+  assert.equal(flow.addressAnswer({ order, flow: { tag: 'support' }, text }), null, 'we never asked this customer for an address');
+  assert.equal(flow.addressAnswer({ order, flow: null, text }), null);
+  assert.equal(flow.addressAnswer({ order: { ...order, Status: 'تم الرفض' }, flow: { tag: 'address' }, text }), null, 'the order is settled');
+  assert.equal(flow.addressAnswer({ order: { ...order, Address: 'الهرم - شارع ترسا 82' }, flow: { tag: 'address' }, text }), null, 'already completed');
+  assert.equal(flow.addressAnswer({ order, flow: { tag: 'address' }, text: 'هو الطلب هيوصل امتى' }), null);
+  assert.equal(flow.addressAnswer({ order, flow: { tag: 'address' }, text: 'شكرا لك على تواصلك مع ورشة النجارة بجوار المسجد' }), null, 'their phone’s auto-reply');
+
+  const ok = { Status: 'جديد', DeliveryRate: 'بدون', City: 'الجيزة', Address: 'الدقي - شارع التحرير 12' };
+  assert.deepEqual(flow.decideTap({ action: 'confirm', order: { ...ok, Address: 'هرم' } }), { type: 'agent_needed', tag: 'address', release: true, reply: 'address' });
+  assert.match(flow.replyText('address'), /اكتبلنا هنا العنوان بالتفصيل/);
+  assert.match(flow.replyText('address_kept', { brand: 'Product Pulse' }), /وصلنا العنوان.*\n.*فريق Product Pulse/);
+});
+
 test('what stops «تأكيد» from confirming by itself: an earlier request, a second order, a thin address', () => {
   const ok = { Status: 'جديد', DeliveryRate: 'بدون', City: 'الجيزة', Address: 'الدقي - شارع التحرير 12' };
   assert.equal(flow.confirmBlocker({ order: ok, flow: { tag: null }, otherOrders: 0 }), null);

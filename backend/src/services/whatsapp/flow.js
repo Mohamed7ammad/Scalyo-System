@@ -248,7 +248,8 @@ function decideTap({ action, order, flow = null, otherOrders = 0 }) {
   if (action === 'confirm') {
     if (isWeak(order)) return { type: 'deposit_needed', tag: 'deposit', release: true, reply: 'deposit' };
     const why = confirmBlocker({ order, flow, otherOrders });
-    if (why) return { type: 'agent_needed', tag: why, release: true, reply: 'deposit' };
+    /* a thin address is the one thing the customer can fix by writing: we ask for it (addressAnswer below) */
+    if (why) return { type: 'agent_needed', tag: why, release: true, reply: why === 'address' ? 'address' : 'deposit' };
     return { type: 'confirm', release: true, reply: 'confirmed' };
   }
   if (action === 'cancel') return { type: 'cancel_requested', tag: 'cancel', release: true, reply: 'cancel' };
@@ -266,6 +267,8 @@ const TAGS = Object.freeze({
   reconfirm:            'أكد بعد ما طلب دعم أو إلغاء',
   dup:                  'أكد، وعنده أوردر تاني',
   address:              'أكد، والعنوان ناقص',
+  address_in:           'كتب العنوان — راجعيه وأكدي',
+  address_done:         'كتب العنوان واتأكد',
   lost:                 'أكد على واتساب — طلب مفقود',
 });
 
@@ -293,6 +296,67 @@ function typedAction(text) {
   if (TYPED.confirm.includes(t)) return 'confirm';
   if (TYPED.cancel.includes(t)) return 'cancel';
   return null;
+}
+
+/* ── the customer writes the address ────────────────────────────────────────
+   «تأكيد» was stopped by a thin address only (tag 'address') and we asked for
+   it. A written answer that reads like an address goes into the order; anything
+   we are not sure of stays a message for a person. Erring towards "a person
+   reads it" is the safe side: a wrong address is a shipment that comes back.
+
+   It reads like an address when it has a word addresses are built from (street,
+   building, floor, next to…), is long enough, and has none of the words of a
+   question, a change of mind or a request. A phone number inside → a person. */
+const ADDRESS_TEXT_MIN = 15;
+const ADDRESS_TEXT_MAX = 300;
+const ADDRESS_WORDS = new Set([
+  'ش', 'شارع', 'عماره', 'عمارات', 'عماير', 'برج', 'ابراج', 'دور', 'شقه', 'بجوار', 'جنب', 'امام', 'قصاد', 'قدام', 'خلف', 'ورا',
+  'قريه', 'مركز', 'مدينه', 'حي', 'منطقه', 'مساكن', 'عزبه', 'كفر', 'نجع', 'ميدان', 'طريق', 'محطه', 'موقف', 'مسجد', 'جامع', 'كنيسه',
+  'مدرسه', 'صيدليه', 'مستشفي', 'منزل', 'بيت', 'فيلا', 'كوبري', 'بلوك', 'ناصيه', 'نزله', 'مدخل', 'قسم', 'نادي', 'بنك', 'مجاوره',
+  'حاره', 'زقاق', 'درب', 'عطفه', 'متفرع', 'تقاطع', 'كمبوند', 'سنتر', 'مول', 'سوق', 'بنزينه', 'مخبز', 'فرن', 'عزب', 'شياخه',
+]);
+const NOT_ADDRESS_WORDS = new Set([
+  'الغاء', 'الغي', 'الغو', 'الغوا', 'الغيه', 'كنسل', 'كام', 'بكام', 'سعر', 'السعر', 'سعره', 'امتي', 'متي', 'ليه', 'ازاي', 'هل', 'ممكن',
+  'استفسار', 'اتصل', 'اتصلوا', 'اتصلي', 'كلمني', 'كلموني', 'يكلمني', 'اغير', 'تغيير', 'غيروا', 'غيرو', 'استبدال', 'بدل', 'لون', 'اللون',
+  'مقاس', 'المقاس', 'تاجيل', 'اجل', 'اجلوا', 'بكره', 'مش', 'لا', 'مو', 'عايز', 'عاوز', 'عايزه', 'عاوزه', 'اريد', 'محتاج', 'محتاجه',
+  'ابعتلي', 'هبعت', 'هبعتلك', 'هبعتلكم', 'لوكيشن', 'اللوكيشن', 'غلط', 'جنيه', 'خصم', 'عرض', 'الساعه', 'مسافر', 'مسافره', 'استلم',
+  'هستلم', 'استني', 'استنوا', 'لسه', 'بعدين', 'ضمان', 'اصلي', 'معاينه', 'اعاين', 'افتح', 'مقدم', 'عربون', 'فودافون', 'كاش', 'تحويل',
+  'اسعار', 'الاسعار', 'اقل', 'ارخص', 'غالي', 'اغلي', 'ابعت', 'ابعتوا', 'ابعتوه', 'ابعته', 'ابعتهولي', 'وصلوه', 'شكرا',
+]);
+const latinDigits = (s) => String(s).replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+  .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06F0));
+/* «بالشارع» / «والدور» / «للعماره» are the same words with a letter in front */
+const isAddressWord = (w) => ADDRESS_WORDS.has(w) || ADDRESS_WORDS.has(w.replace(/^ال/, ''))
+  || (w.length > 4 && ADDRESS_WORDS.has(w.replace(/^[وبلف]/, '').replace(/^ل?ل/, '').replace(/^ال/, '')));
+function looksLikeAddress(text) {
+  const raw = String(text ?? '');
+  if (/[?؟]/.test(raw)) return false;                              // a question
+  const t = normText(raw);
+  if (t.length < ADDRESS_TEXT_MIN || t.length > ADDRESS_TEXT_MAX) return false;
+  if (/\d{9,}/.test(latinDigits(t).replace(/(\d) (?=\d)/g, '$1'))) return false;   // a phone number: a person reads it
+  const words = t.split(' ');
+  if (words.length < 3) return false;
+  if (words.some((w) => NOT_ADDRESS_WORDS.has(w))) return false;
+  return words.some(isAddressWord);
+}
+
+/* What goes in the address box: the customer's words; what was there before stays
+   in front of them unless they already say it (nothing the order had is dropped). */
+function mergeAddress(before, text) {
+  const next = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, ADDRESS_TEXT_MAX);
+  const old = bt(String(before ?? '').replace(/\s+/g, ' '));
+  const o = normText(old);
+  if (!o || normText(next).includes(o)) return next;
+  return `${old} - ${next}`;
+}
+
+/** The address the customer just wrote for this order, or null (then it is an ordinary message). */
+function addressAnswer({ order, flow, text }) {
+  if (bt(flow?.tag) !== 'address') return null;                        // we are not waiting for an address
+  if (!isOneOf(TAP_DECIDES, order?.Status)) return null;               // somebody already settled the order
+  if (bt(order.Address).length >= MIN_ADDRESS_CHARS) return null;      // somebody already completed the address
+  if (isAutoReply(text) || !looksLikeAddress(text)) return null;
+  return { address: mergeAddress(order.Address, text) };
 }
 
 /* A reply that only says "fine / thanks" — nothing an agent has to act on.
@@ -345,6 +409,10 @@ function replyText(key, { brand = '' } = {}) {
       return `تم تأكيد طلبك ✅\nهنجهزه ونسلمه لشركة الشحن، وهيوصلك خلال يومين. المندوب هيتصل بيك قبل ما ييجي، فخلّي تليفونك متاح.${b ? `\nشكرًا لثقتك في ${b} 🙏` : ''}`;
     case 'deposit':
       return `استلمنا تأكيدك ✅\nهيتواصل معاك حد من ${team} قريب عشان نكمّل الطلب.`;
+    case 'address':
+      return 'استلمنا تأكيدك ✅\nبس العنوان اللي عندنا ناقص، والمندوب مش هيعرف يوصل بيه.\nاكتبلنا هنا العنوان بالتفصيل: المنطقة، الشارع، رقم العمارة والدور، وأقرب علامة مميزة.';
+    case 'address_kept':
+      return `وصلنا العنوان ✅\nهيتواصل معاك حد من ${team} قريب عشان نكمّل الطلب.`;
     case 'cancel':
       return 'وصلنا طلب الإلغاء.\nلو فيه حاجة نقدر نساعدك فيها (السعر، ميعاد التوصيل، أو أي استفسار) اكتبهالنا هنا، وهيتواصل معاك حد من فريقنا.';
     case 'support':
@@ -370,4 +438,5 @@ module.exports = {
   cleanParam, formatAmount, amountDue, messageParams, buttonPayload, parsePayload, templateComponents,
   outsideQuietHours, addMin, variantOf, sendAt, scheduleAfterSend, isWeak, trialGroup, dailyLimits, decideTap, replyText, canRemind,
   normText, typedAction, isAck, isAutoReply, mediaOf, confirmBlocker, MIN_ADDRESS_CHARS,
+  looksLikeAddress, mergeAddress, addressAnswer,
 };

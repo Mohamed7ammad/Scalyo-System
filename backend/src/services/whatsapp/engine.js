@@ -35,6 +35,9 @@ const RECONTACT_STATUS = 'لا يرد';
 /* the statuses a batch order may still be in when its message goes: unreached, with its agent */
 const RECONTACT_STATUSES = ['لا يرد', 'جديد'];
 const NO_ANSWER        = 'لا يرد';
+/* a person of ours wrote to the customer this recently → the conversation is theirs,
+   the automatic «وصلتنا رسالتك» stays quiet */
+const STAFF_TALKING_MIN = 30;
 const REVIEW_NEW       = 'مراجعة جديدة';   // a review account's "still to call" (same no-answer cycle as «لا يرد»)
 const isRecontact = (f) => f.kind === 'recontact';
 
@@ -62,6 +65,23 @@ let deps = {
           AND btrim(p."Status") = ANY($4::text[])`,
       [businessId, orderId, phone, ['جديد', 'لا يرد', 'مراجعة جديدة', 'مؤجل', 'معلق حتي الدفع', flow.HOLD_STATUS, flow.CONFIRMED_STATUS, 'تم الشحن']]);
     return r?.n || 0;
+  },
+  /* when did one of OUR PEOPLE last write to this customer from the chat? (null = never) */
+  staffWroteAt: async (businessId, phone) => {
+    const { rows: [r] } = await pool.query(
+      `SELECT MAX(created_at) AS at FROM whatsapp_messages
+        WHERE business_id = $1 AND phone = $2 AND direction = 'out' AND kind = 'chat' AND status <> 'failed'`,
+      [businessId, String(phone)]);
+    return r?.at || null;
+  },
+  /* which of OUR PEOPLE wrote to this customer from the chat since `since` (lower-cased emails) */
+  chatWriters: async (businessId, phone, since) => {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT lower(btrim(created_by)) AS who FROM whatsapp_messages
+        WHERE business_id = $1 AND phone = $2 AND direction = 'out' AND kind = 'chat' AND status <> 'failed'
+          AND created_by IS NOT NULL AND created_at >= COALESCE($3::timestamptz, NOW() - INTERVAL '24 hours')`,
+      [businessId, String(phone), since || null]);
+    return rows.map((r) => r.who);
   },
   brandOf:     async (businessId) => {
     const { rows: [bp] } = await pool.query('SELECT brand_name FROM business_profile WHERE id = $1', [businessId]);
@@ -452,6 +472,81 @@ async function handleTap(f, action) {
   return { handled: false, why: 'conflict' };
 }
 
+/* Did one of our people write to this customer in the last half hour? Unknown → no (the acknowledgement goes). */
+async function staffIsTalking(f) {
+  try {
+    const at = await deps.staffWroteAt(f.business_id, f.phone);
+    return !!at && (deps.now() - new Date(at)) / 60000 <= STAFF_TALKING_MIN;
+  } catch (e) {
+    warn(`last staff message of order #${f.order_id}:`, e.message);
+    return false;
+  }
+}
+
+/* «تأكيد» was stopped by a thin address only, we asked for it, and the customer
+   writes it. The address goes into the order (nothing it had is dropped), then:
+     • nobody of ours spoke to the customer → the order is confirmed exactly like
+       a tap: «واتساب», no commission — after the other guards are asked again
+       (a second order, a weak rating → a person, with the address already in);
+     • the order's HOLDER wrote to the customer from the chat → it is her work:
+       the address is in the box, she presses «تأكيد» and the commission is hers.
+   Returns null when this is not such an answer → it is an ordinary message. */
+async function handleAddress(f, ev) {
+  const os = deps.orderStatus();
+  const flows = deps.flows();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const cur = await os.loadOrder(f.business_id, f.order_id);
+    if (!cur) return null;
+    const a = flow.addressAnswer({ order: cur.row, flow: f, text: ev.reply });
+    if (!a) return null;
+    const status = String(cur.status).trim();
+    const holder = String(cur.row.AssignedTo ?? '').trim().toLowerCase();
+    /* cannot tell who wrote → the safe side: a person finishes it */
+    const writers = await deps.chatWriters(f.business_id, f.phone, f.outcome_at || null).catch(() => null);
+    const hers = writers === null || (!!holder && writers.includes(holder));
+    let d = { type: 'agent_needed', tag: 'address_in' };
+    if (!hers) {
+      const others = await deps.otherOrders(f.business_id, f.order_id, cur.row.Phone).catch(() => 0);
+      d = flow.decideTap({ action: 'confirm', order: { ...cur.row, Address: a.address }, flow: f, otherOrders: others });
+    }
+
+    if (d.type === 'confirm') {
+      const labelled = await flows.ensureOrdersColumn();
+      const r = await os.changeStatus({
+        businessId: f.business_id, orderId: f.order_id, from: cur.status, to: flow.CONFIRMED_STATUS,
+        fields: { Address: a.address, AssignedTo: null, ...(labelled ? { confirmed_via: 'whatsapp' } : {}) },
+        actor: ACTOR, effects: NO_COMMISSION,
+      });
+      if (!r.ok) {
+        if (r.code === 'STATUS_CONFLICT') continue;                // an agent moved it this very second → decide again
+        warn(`confirm of order #${f.order_id} after its address failed: ${r.code}`);
+        return null;                                               // the message is still kept, as an ordinary one
+      }
+      await flows.keepAddressBefore(f.order_id, cur.row.Address).catch((e) => warn('address diary:', e.message));
+      const m = await flows.markReply(f.order_id, { outcome: 'confirmed', tag: 'address_done', text: ev.reply || null, done: true, textReplied: true });
+      await showOnOrder(f, { tag: 'address_done', note: m?.customer_text || ev.reply || null });
+      log(`order #${f.order_id}: customer wrote the address → confirmed on WhatsApp`);
+      await reply(f, 'confirmed');
+      return { handled: true, type: 'address_confirmed' };
+    }
+
+    /* the address is in; a person finishes */
+    const saved = await flows.setAddress(f.business_id, f.order_id, { address: a.address, expected: cur.row.Address, statuses: flow.TAP_DECIDES });
+    if (!saved) return null;                                       // she edited it this very second → hers stands
+    await flows.keepAddressBefore(f.order_id, cur.row.Address).catch((e) => warn('address diary:', e.message));
+    const tag = d.tag || 'address_in';
+    await showOnOrder(f, { tag });
+    if (status === flow.HOLD_STATUS) await releaseOrder(f.business_id, f.order_id, tag);
+    else if (status === NO_ANSWER) await liftNoAnswer(f, cur);
+    const m = await flows.markReply(f.order_id, { outcome: d.type === 'deposit_needed' ? d.type : null, tag, text: ev.reply || null, textReplied: true });
+    await showOnOrder(f, { note: m?.customer_text || ev.reply || null });
+    log(`order #${f.order_id}: customer wrote the address → in the order, ${hers ? 'its agent confirms' : `a person finishes (${tag})`}`);
+    if (!(await staffIsTalking(f))) await reply(f, 'address_kept');
+    return { handled: true, type: 'address_kept' };
+  }
+  return null;
+}
+
 /* Free text (or a voice note, a picture…) instead of a button = «طلب الدعم». */
 async function handleText(f, ev) {
   const flows = deps.flows();
@@ -470,7 +565,8 @@ async function handleText(f, ev) {
   /* «بعت رسالة صوتية» tells her to listen first; it never hides a deposit / cancel tag */
   let tag = null;
   if (voice) tag = !f.tag || f.tag === 'support' ? 'voice' : null;
-  else if ((open || reopen) && !f.tag) tag = 'support';
+  /* «كتب العنوان واتأكد» says nothing once the order is open again: she must see he asked for something */
+  else if ((open || reopen) && (!f.tag || (reopen && f.tag === 'address_done'))) tag = 'support';
   await showOnOrder(f, { tag });
   if (status === flow.HOLD_STATUS) await releaseOrder(f.business_id, f.order_id, 'support');
   else if (status === NO_ANSWER) await liftNoAnswer(f, cur);
@@ -480,7 +576,9 @@ async function handleText(f, ev) {
     outcome: reopen || (open && !f.outcome) ? 'support_requested' : null, textReplied: true,
   });
   await showOnOrder(f, { note: r?.customer_text || ev.reply || null });
-  if (firstText) await reply(f, 'text');                        // one acknowledgement, not one per message
+  /* one acknowledgement, not one per message — and none at all in the middle of a
+     conversation with one of our people: «هيرد عليك حد» right after she wrote is wrong */
+  if (firstText && !(await staffIsTalking(f))) await reply(f, 'text');
   return { handled: true, type: 'text' };
 }
 
@@ -513,6 +611,10 @@ async function handleInbound(businessId, ev) {
       await deps.media().enqueue({ businessId, orderId: f.order_id, waMessageId: ev.wa_message_id,
         kind: media.kind, mediaId: media.id, mime: media.mime, at: ev.at || null })
         .catch((e) => warn(`media of order #${f.order_id} not queued:`, e.message));
+    }
+    if (ev.kind === 'text' && !media) {
+      const done = await handleAddress(f, ev);                    // the address we asked for
+      if (done) return done;
     }
     return await handleText(f, ev);
   } catch (e) {
