@@ -7,6 +7,7 @@
    come back to the browser — only "saved ✓ …last 4". */
 
 import { useCallback, useEffect, useState } from 'react';
+import WhatsAppQuickReplies from '@/components/WhatsAppQuickReplies';
 import {
   getWhatsAppSettings,
   saveWhatsAppSettings,
@@ -1230,6 +1231,9 @@ export default function WhatsAppPage() {
       {/* 6 — one message to the old «لا يرد» orders */}
       <RecontactCard ready={!!s.configured && !!auto} stopped={auto?.auto_mode === 'off'}
         onQueued={() => loadAuto(false)} showToast={showToast} />
+
+      {/* 7 — the ready replies the agents pick from in the chat */}
+      {s.configured && <WhatsAppQuickReplies showToast={showToast} />}
 
       {/* Log */}
       <div className={card}>

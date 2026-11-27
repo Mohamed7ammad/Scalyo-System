@@ -1831,6 +1831,48 @@ export const getWhatsAppOrderMedia = (orderId: number) =>
 export const getWhatsAppMediaBlob = (id: number) =>
   api.get<Blob>(`/api/whatsapp/media/${id}`, { responseType: 'blob' });
 
+/* ── The conversation on the order: the agent answers the customer in writing ──
+   Everything goes out from the one business number; only the agent holding the
+   order may write (the server decides and says why not). */
+export interface WhatsAppChatMessage {
+  id: number; dir: 'in' | 'out'; at: string; order_id: number | null;
+  type: 'text' | 'system' | 'tap' | 'reaction' | 'media' | 'other';
+  text: string; status: string | null; by: string | null; tapped: string | null;
+  media: { id: number; kind: WhatsAppMediaItem['kind']; status: WhatsAppMediaItem['status'] } | null;
+  error?: boolean;
+}
+export interface WhatsAppQuickReply {
+  id: number; title: string; body: string; category: string; for_tags: string[];
+  product?: boolean;                 // true = shown only for the product in this order
+  product_match?: string | null; sort?: number; active?: boolean; updated_by?: string | null; updated_at?: string;
+}
+export type WhatsAppChatWhy = 'unconfigured' | 'closed' | 'not_holder' | 'other_order' | 'window' | 'never_wrote';
+export interface WhatsAppChatThread {
+  order: { id: number; status: string; holder: string | null; name: string; product: string; amount: string;
+    quantity: number | null; city: string; tag: string | null };
+  messages: WhatsAppChatMessage[];
+  window: { open: boolean; until: string | null };
+  can_reply: boolean; why: WhatsAppChatWhy | null; reply_order_id: number | null;
+  replies?: WhatsAppQuickReply[]; suggested?: number[]; vars?: Record<string, string>;
+}
+export interface WhatsAppInboxItem { order_id: number; unread: number; last_in_at: string | null; name: string; tag: string | null }
+export const getWhatsAppChat = (orderId: number, opts: { seen?: boolean; light?: boolean } = {}) =>
+  api.get<WhatsAppChatThread>(`/api/whatsapp/chat/${orderId}`, {
+    params: { ...(opts.seen ? { seen: 1 } : {}), ...(opts.light ? { light: 1 } : {}) } });
+export const sendWhatsAppChat = (orderId: number, text: string) =>
+  api.post<{ message: WhatsAppChatMessage }>(`/api/whatsapp/chat/${orderId}/send`, { text });
+export const getWhatsAppInbox = () => api.get<{ items: WhatsAppInboxItem[] }>('/api/whatsapp/chat/inbox');
+/* the owner's own list of ready replies */
+export type WhatsAppQuickReplyInput = Pick<WhatsAppQuickReply, 'title' | 'body' | 'category' | 'for_tags'> &
+  { product_match?: string | null; sort?: number; active?: boolean };
+export const getWhatsAppQuickReplies = () =>
+  api.get<{ replies: WhatsAppQuickReply[]; tags: Record<string, string> }>('/api/whatsapp/chat/replies');
+export const saveWhatsAppQuickReply = (id: number | null, body: WhatsAppQuickReplyInput) =>
+  id ? api.put<{ replies: WhatsAppQuickReply[] }>(`/api/whatsapp/chat/replies/${id}`, body)
+     : api.post<{ replies: WhatsAppQuickReply[] }>('/api/whatsapp/chat/replies', body);
+export const deleteWhatsAppQuickReply = (id: number) =>
+  api.delete<{ replies: WhatsAppQuickReply[] }>(`/api/whatsapp/chat/replies/${id}`);
+
 /* The half-and-half trial: the WhatsApp half against the agents-only half, since the flow went live. */
 export interface WhatsAppTrialGroup {
   orders: number; confirmed: number; wa_confirmed: number; rejected: number; no_answer: number; open: number;

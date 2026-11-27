@@ -227,12 +227,12 @@ async function fetchOneMedia(m) {
 
 /* ── the worker ───────────────────────────────────────────────────────────── */
 
-async function logOut(f, kind, template, sent, error) {
+async function logOut(f, kind, template, sent, error, payload = null) {
   return deps.store().logOutbound({
     businessId: f.business_id, orderId: f.order_id, kind, phone: f.phone, template,
     waMessageId: sent?.message_id || null, status: sent ? 'sent' : 'failed',
     errorCode: Number.isInteger(error?.code) ? error.code : null, errorText: error?.metaMessage || error?.message || null,
-    createdBy: 'whatsapp',
+    createdBy: 'whatsapp', payload,
   }).catch((e) => warn('message log:', e.message));
 }
 
@@ -388,10 +388,10 @@ async function reply(f, key) {
   try {
     const settings = await deps.store().getSettings(f.business_id);
     const sent = await deps.cloud().sendText(settings, { to: f.phone, body: text });
-    await logOut(f, 'reply', null, sent, null);
+    await logOut(f, 'reply', null, sent, null, { body: text });   // the chat screen shows what we answered
   } catch (e) {
     if (!(e instanceof GraphError)) throw e;
-    await logOut(f, 'reply', null, null, e);
+    await logOut(f, 'reply', null, null, e, { body: text });
   }
 }
 

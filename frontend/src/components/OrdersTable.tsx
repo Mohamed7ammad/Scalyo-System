@@ -3,6 +3,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } from 'react';
 import PhoneCall from '@/components/PhoneCall';
 import WhatsAppMedia from '@/components/WhatsAppMedia';
+import { WhatsAppChatButton, WhatsAppChatHost } from '@/components/WhatsAppChat';
 import ProductStopDialog from '@/components/ProductStopDialog';
 import AutoGrowTextarea from '@/components/AutoGrowTextarea';
 import { serverNow, onServerClockChange } from '@/lib/serverClock';
@@ -709,8 +710,27 @@ function OrdersTable({
     onReopenOrder: setPendingReopen,
   });
 
+  /* The chat's «تأكيد / مؤجل / رفض» buttons obey the row's own status control:
+     same options, same 15-minute wait, same queue lock — and they go through the
+     same handler. An order that is not on this screen gets no buttons. */
+  const chatActionsFor = (id: number): string[] | null => {
+    const o = orders.find((x) => x.id === id);
+    if (!o || lostMode) return null;
+    const st = normStatus(o.Status);
+    if (st === 'جديد' && minutesSince(o.createdAt, now) < NEW_ORDER_COOLDOWN_MIN) return [];
+    if (queueLocked && QUEUE_LOCK_STATUSES.has(st)) return [];
+    const options = inlineStatusOptions(o.Status);
+    if (!options.includes(st)) return [];
+    return ['تم التأكيد', 'مؤجل', 'تم الرفض'].filter((s) => s !== st && options.includes(s));
+  };
+  const chatAct = (id: number, status: string) => {
+    const o = orders.find((x) => x.id === id);
+    if (o) handleStatusChange(o, status);
+  };
+
   return (
     <>
+      <WhatsAppChatHost actionsFor={chatActionsFor} onAct={chatAct} />
       {isMobile ? (
         /* ── Phone: order cards, scrolled by the page (virtualized) ──────── */
         <div>
@@ -2195,6 +2215,9 @@ const OrderRow = memo(function OrderRow({
 
       {/* What the customer asked for on WhatsApp (see component) */}
       <WhatsAppTagBadge order={order} />
+
+      {/* The written conversation — only on an order that has one (lib/whatsappChatStore) */}
+      <WhatsAppChatButton orderId={order.id} />
 
       {/* Product badge */}
       {order.ProductName && (

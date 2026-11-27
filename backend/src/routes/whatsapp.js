@@ -18,6 +18,7 @@ const flowRules        = require('../services/whatsapp/flow');
 const recontact        = require('../services/whatsapp/recontact');
 const trial            = require('../services/whatsapp/trial');
 const media            = require('../services/whatsapp/mediaStore');
+const chat             = require('../services/whatsapp/chat');
 const { hasAnyRole }   = require('../utils/roles');
 const { whatsappNumbers } = require('../utils/phone');
 const pool             = require('../config/db');
@@ -348,6 +349,82 @@ router.get('/media/:id', authenticate, async (req, res) => {
       'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600' });
     res.end(f.bytes);
   } catch (err) { fail(res, err, 'تعذّر تحميل الملف'); }
+});
+
+/* ── the conversation on the order (services/whatsapp/chat.js) ───────────────
+   Reading: whoever may open the order. Writing: the agent holding it (the
+   newest open order when the customer has two), or the admin. */
+const orderIdOf = (req) => { const n = parseInt(req.params.orderId, 10); return Number.isInteger(n) && n > 0 ? n : null; };
+const brandOf = async (businessId) => {
+  const { rows: [bp] } = await pool.query('SELECT brand_name FROM business_profile WHERE id = $1', [businessId]);
+  return bp?.brand_name || '';
+};
+const chatFail = (res, err, fallback) => {
+  if (err.status && err.status < 500) return res.status(err.status).json({ error: err.message, code: err.code || null });
+  if (err.status === 502) return res.status(502).json({ error: err.message, code: err.code || 'META' });
+  return fail(res, err, fallback);
+};
+
+router.get('/chat/inbox', authenticate, async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await chat.inbox(req.user.business_id, req.user, { all: hasAnyRole(req.user, 'admin', 'supervisor') }) });
+  } catch (err) { chatFail(res, err, 'تعذّر تحميل المحادثات'); }
+});
+
+/* the owner's list of ready replies — he edits them himself */
+router.get('/chat/replies', authenticate, requireAdmin, async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json({ replies: await chat.listReplies(req.user.business_id), tags: flowRules.TAGS });
+  } catch (err) { chatFail(res, err, 'تعذّر تحميل الردود الجاهزة'); }
+});
+router.post('/chat/replies', authenticate, requireAdmin, async (req, res) => {
+  try {
+    await chat.saveReply(req.user.business_id, null, req.body || {}, actor(req.user));
+    res.json({ replies: await chat.listReplies(req.user.business_id) });
+  } catch (err) { chatFail(res, err, 'تعذّر حفظ الرد'); }
+});
+router.put('/chat/replies/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'رقم غير صحيح' });
+    await chat.saveReply(req.user.business_id, id, req.body || {}, actor(req.user));
+    res.json({ replies: await chat.listReplies(req.user.business_id) });
+  } catch (err) { chatFail(res, err, 'تعذّر حفظ الرد'); }
+});
+router.delete('/chat/replies/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'رقم غير صحيح' });
+    await chat.deleteReply(req.user.business_id, id);
+    console.log(`[whatsapp chat] ready reply #${id} deleted by ${actor(req.user)}`);
+    res.json({ replies: await chat.listReplies(req.user.business_id) });
+  } catch (err) { chatFail(res, err, 'تعذّر مسح الرد'); }
+});
+
+router.get('/chat/:orderId', authenticate, async (req, res) => {
+  try {
+    const orderId = orderIdOf(req);
+    if (!orderId) return res.status(400).json({ error: 'رقم الأوردر غير صحيح' });
+    if (!(await mayOpenOrder(req.user, orderId))) return res.status(403).json({ error: 'الأوردر ده مش معاكي' });
+    res.set('Cache-Control', 'no-store');
+    const light = req.query.light === '1';
+    res.json(await chat.thread(req.user.business_id, orderId, req.user, {
+      isAdmin: hasAnyRole(req.user, 'admin'), seen: req.query.seen === '1', light,
+      brand: light ? '' : await brandOf(req.user.business_id).catch(() => '') }));
+  } catch (err) { chatFail(res, err, 'تعذّر تحميل المحادثة'); }
+});
+
+router.post('/chat/:orderId/send', authenticate, async (req, res) => {
+  try {
+    const orderId = orderIdOf(req);
+    if (!orderId) return res.status(400).json({ error: 'رقم الأوردر غير صحيح' });
+    if (!(await mayOpenOrder(req.user, orderId))) return res.status(403).json({ error: 'الأوردر ده مش معاكي' });
+    const message = await chat.send(req.user.business_id, orderId, req.user, req.body?.text, { isAdmin: hasAnyRole(req.user, 'admin') });
+    res.set('Cache-Control', 'no-store');
+    res.json({ message });
+  } catch (err) { chatFail(res, err, 'تعذّر إرسال الرسالة'); }
 });
 
 /* The half-and-half trial: the WhatsApp half against the agents-only half,
