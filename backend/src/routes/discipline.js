@@ -20,6 +20,7 @@
      GET  /live                            live board for the Team Leader grid
      GET  /alerts                          tiny snapshot for the dashboard-wide alert toasts
      PATCH /agents/:id/track               { track: 'confirmation' | 'review' | null }
+     PATCH /agents/:id/main-account        { main_account_id | null } — review account → same girl
      POST /reinstate { user_id }           lift today's withdrawal
      GET  /review-queue                    «لا يرد» queue: what a distribution would do now,
                                            the review accounts, the last distribution
@@ -114,6 +115,10 @@ router.patch('/agents/:id/track', authenticate, requireAdminOrTeamLeader, handle
   const track = raw === null || raw === '' || raw === undefined ? null : String(raw);
   return svc.setAgentTrack(req.user.business_id, req.params.id, track);
 }));
+
+/* A review account → its owner's main account (same girl), or null. */
+router.patch('/agents/:id/main-account', authenticate, requireAdminOrTeamLeader, handle((req) =>
+  svc.setMainAccount(req.user.business_id, req.params.id, req.body?.main_account_id ?? null)));
 
 router.post('/reinstate', authenticate, requireAdminOrTeamLeader, handle((req) => {
   if (!req.body?.user_id) throw new svc.DisciplineError(400, 'user_id مطلوب');

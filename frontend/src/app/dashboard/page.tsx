@@ -18,6 +18,7 @@ import {
 } from '@/lib/api';
 import OrdersTable from '@/components/OrdersTable';
 import ProductStopDialog from '@/components/ProductStopDialog';
+import SplitOrdersDialog from '@/components/SplitOrdersDialog';
 import { getShortName, countsByShortName, activeByShortName, visibleProductPills, withPinned, mergeFirstPage } from '@/lib/orderListMerge';
 /* NOTE: `xlsx` (SheetJS) is intentionally NOT imported at module level — it is
    a ~446 KB chunk that was shipping with the page's first load and stalling
@@ -50,6 +51,8 @@ const PASSED_SHIPPING = ['تم الشحن', 'تم التوصيل', 'جاري ا�
    states so the admin sees every failed delivery for one agent in a single
    view (pull tracking numbers → audit the confirmation call recordings). */
 const RETURNS_AUDIT_FILTER = 'مرتجعات (تدقيق)';
+/* Tabs where «توزيع بالأعداد» shows (the server moves only these statuses). */
+const SPLIT_TABS = ['لا يرد', 'مراجعة جديدة'];
 const RETURNS_AUDIT_STATUSES = ['جاري الإعادة', 'تم الإرجاع'];
 
 /* «مغلق» — orders the owner closed (won't ship). Admin-only virtual tab; they
@@ -260,6 +263,7 @@ export default function DashboardPage() {
   const [xferTargetId,  setXferTargetId]  = useState<number | ''>('');
   const [xferSaving,    setXferSaving]    = useState(false);
   const [bulkDeleting,  setBulkDeleting]  = useState(false);
+  const [showSplit,     setShowSplit]     = useState(false);   // «توزيع بالأعداد»
   /* ── CSV bulk import ─────────────────────────────────────────── */
   const [showCsvModal,  setShowCsvModal]  = useState(false);
   const [csvParsed,     setCsvParsed]     = useState<Partial<Order>[]>([]);
@@ -2306,6 +2310,25 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* ── «توزيع بالأعداد» — the current filter, split by counts ── */}
+        {showSplit && (
+          <SplitOrdersDialog
+            filters={{
+              status: activeFilter, dateFrom: serverFilters.dateFrom, dateTo: serverFilters.dateTo,
+              product: serverFilters.product, agent: serverFilters.agent, search: serverFilters.search,
+            }}
+            filterLabel={[
+              `«${activeFilter}»`,
+              startDate || endDate ? `من ${startDate || 'الأول'} لـ ${endDate || 'النهارده'}` : 'كل التواريخ',
+              serverFilters.product ? `منتج: ${serverFilters.product}` : '',
+              serverFilters.agent ? `مع: ${serverFilters.agent.split('@')[0]}` : '',
+              serverFilters.search ? `بحث: ${serverFilters.search}` : '',
+            ].filter(Boolean).join(' · ')}
+            onClose={() => setShowSplit(false)}
+            onDone={(msg) => { setShowSplit(false); setSelectedIds([]); showToast(msg, 'success'); fetchOrders(true); }}
+          />
+        )}
+
         {/* ── Transfer Selected Modal ──────────────────────────────── */}
         {showXferModal && (
           <div
@@ -3650,6 +3673,24 @@ export default function DashboardPage() {
                     d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
                 </svg>
                 نقل {selectedIds.length} طلب محدد
+              </button>
+            )}
+
+            {/* ── «توزيع بالأعداد» — split the «لا يرد» of the current filter by counts ── */}
+            {canReassign && !lostMode && SPLIT_TABS.includes(activeFilter) && (
+              <button
+                onClick={() => setShowSplit(true)}
+                className="inline-flex items-center gap-2 px-4 py-2
+                  bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                  text-white rounded-xl text-sm font-semibold
+                  shadow-md shadow-indigo-500/20
+                  transition-all duration-150 active:scale-95"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                </svg>
+                توزيع بالأعداد
               </button>
             )}
 

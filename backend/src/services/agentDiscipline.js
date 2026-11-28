@@ -124,6 +124,9 @@ class DisciplineError extends Error {
 const schemaReady = (async () => {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_track VARCHAR(20)`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMPTZ`);
+  /* A review account's main account = the same girl (Dina → مريم). Used by
+     «توزيع بالأعداد» so an order never goes back to the same person. */
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS main_account_id VARCHAR`);
   /* (Re)create the CHECK whenever it is missing or predates 'both'. */
   await pool.query(`
     DO $$ BEGIN
@@ -456,6 +459,31 @@ async function setAgentTrack(businessId, userId, track) {
     [track, String(userId), businessId]
   );
   if (!rows.length) throw new DisciplineError(404, 'الموظفة غير موجودة أو ليست موظفة تأكيد');
+  return rows[0];
+}
+
+/* Link a review account to its owner's main account (null = none). One level
+   only: the main account can't itself point to another. */
+async function setMainAccount(businessId, userId, mainId) {
+  const id = String(userId);
+  const main = mainId === null || mainId === undefined || mainId === '' ? null : String(mainId);
+  if (main === id) throw new DisciplineError(400, 'الحساب مينفعش يتربط بنفسه');
+  const isAgent = `'agent' = ANY(COALESCE(roles, ARRAY[role]))`;
+  if (main) {
+    const { rows: [m] } = await pool.query(
+      `SELECT id, main_account_id FROM users WHERE id::text = $1 AND business_id = $2 AND ${isAgent}`, [main, businessId]);
+    if (!m) throw new DisciplineError(404, 'الحساب الأساسي مش موجود');
+    if (m.main_account_id) throw new DisciplineError(400, 'الحساب ده نفسه تابع لحساب تاني — اختاري الحساب الأساسي');
+    const { rows: [{ n }] } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM users WHERE business_id = $1 AND main_account_id = $2`, [businessId, id]);
+    if (n) throw new DisciplineError(400, 'فيه حسابات تابعة للحساب ده — مينفعش يبقى تابع هو كمان');
+  }
+  const { rows } = await pool.query(
+    `UPDATE users SET main_account_id = $1
+      WHERE id::text = $2 AND business_id = $3 AND ${isAgent}
+      RETURNING id, email, COALESCE(NULLIF(TRIM(name), ''), SPLIT_PART(email, '@', 1)) AS name, main_account_id`,
+    [main, id, businessId]);
+  if (!rows.length) throw new DisciplineError(404, 'الموظفة غير موجودة');
   return rows[0];
 }
 
@@ -1130,7 +1158,7 @@ async function liveBoard(businessId) {
         ORDER BY sort_order, due_time`, [businessId]),
     pool.query(
       `SELECT u.id, COALESCE(NULLIF(TRIM(u.name), ''), SPLIT_PART(u.email, '@', 1)) AS name, u.email,
-              u.agent_track, COALESCE(u.is_absent, FALSE) AS is_absent,
+              u.agent_track, COALESCE(u.is_absent, FALSE) AS is_absent, u.main_account_id,
               FLOOR(EXTRACT(EPOCH FROM (NOW() - u.last_action_at)))::int AS seconds_since_action,
               d.id AS daily_log_id, d.status, d.started_at, d.withdrawn_at, d.withdrawn_checkpoint,
               d.orders_withdrawn, d.reinstated_at, d.reinstated_by
@@ -1173,6 +1201,7 @@ async function liveBoard(businessId) {
       const b = a.daily_log_id ? brkByLog.get(a.daily_log_id) : null;
       return {
         id: a.id, name: a.name, email: a.email, track: a.agent_track, is_absent: a.is_absent,
+        main_account_id: a.main_account_id ?? null,
         scheduled_today: !!a.daily_log_id,
         status: a.status ?? null,
         started_at: a.started_at, withdrawn_at: a.withdrawn_at, withdrawn_checkpoint: a.withdrawn_checkpoint,
@@ -1247,7 +1276,7 @@ async function listAgents(businessId) {
 
 module.exports = {
   schemaReady, DisciplineError, AGENT_TRACKS, CHECKPOINT_TRACKS, trackCovers, trackCoversSql, DEFAULT_CHECKPOINTS,
-  listCheckpoints, updateCheckpoint, setAgentTrack, listAgents, listWorkWindows, setWorkWindows, DEFAULT_WORK_WINDOWS,
+  listCheckpoints, updateCheckpoint, setAgentTrack, setMainAccount, listAgents, listWorkWindows, setWorkWindows, DEFAULT_WORK_WINDOWS,
   DAY_TYPES, DEFAULT_FRIDAY_CHECKPOINTS, DEFAULT_FRIDAY_WINDOWS,
   seedToday, getAgentState, checkIn, autoCheckInFromWork, startBreak, endBreak, reinstate, stillHere, liveBoard, alertSnapshot,
   closeExpiredBreaks, enforceCheckpoints,

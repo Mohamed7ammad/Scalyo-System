@@ -18,7 +18,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  getDisciplineLive, setDisciplineTrack, reinstateDisciplineAgent, userHasRole, trackCovers,
+  getDisciplineLive, setDisciplineTrack, setAgentMainAccount, reinstateDisciplineAgent, userHasRole, trackCovers,
   DisciplineBoard, DisciplineBoardAgent, DisciplineTrack,
 } from '@/lib/api';
 import DisciplineScheduleEditor from '@/components/DisciplineScheduleEditor';
@@ -135,6 +135,18 @@ export default function TeamMonitorPage() {
     setBusyId(a.id);
     try { await setDisciplineTrack(a.id, track); setToast(track ? `تم تسجيل ${a.name} (${TRACK_LABEL[track]})` : `تم إلغاء تسجيل ${a.name}`); await load(); }
     catch (e) { setToast(errMsg(e, 'تعذّر الحفظ')); }
+    finally { setBusyId(null); }
+  };
+
+  /* A review account → the same girl's main account («توزيع بالأعداد» never sends an order back to her). */
+  const changeMain = async (a: DisciplineBoardAgent, value: string) => {
+    setBusyId(a.id);
+    try {
+      await setAgentMainAccount(a.id, value || null);
+      const m = board?.agents.find((x) => x.id === value);
+      setToast(m ? `${a.name} = حساب مراجعة ${m.name}` : `${a.name} مش مربوط بحد`);
+      await load();
+    } catch (e) { setToast(errMsg(e, 'تعذّر الحفظ')); }
     finally { setBusyId(null); }
   };
 
@@ -286,6 +298,16 @@ export default function TeamMonitorPage() {
                     <option value="review">مراجعة فقط</option>
                     <option value="both">تأكيد ومراجعة</option>
                   </select>
+                  {a.track === 'review' && (
+                    <select value={a.main_account_id ?? ''} disabled={busyId === a.id} onChange={(e) => changeMain(a, e.target.value)}
+                      title="حساب المراجعة ده تبع مين؟ — في «توزيع بالأعداد» الأوردر مبيرجعش لنفس البنت"
+                      className="px-2 py-1.5 rounded-lg text-sm border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 max-w-[9rem]">
+                      <option value="">تبع: —</option>
+                      {(board?.agents ?? []).filter((m) => m.id !== a.id && m.track !== 'review' && !m.main_account_id).map((m) => (
+                        <option key={m.id} value={m.id}>تبع: {m.name}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               ))}
             </div>

@@ -388,6 +388,33 @@ export const autoDistributeOrders = (lost = false) =>
 export const transferOrders = (orderIds: number[], targetAgentId: number) =>
   api.post<TransferResult>('/api/orders/transfer', { orderIds, targetAgentId });
 
+/* «توزيع بالأعداد» — split the «لا يرد» orders of the current filter by exact
+   counts; an order never goes back to the girl (person) holding it. */
+export interface SplitFilters {
+  status?: string; dateFrom?: string; dateTo?: string; product?: string; agent?: string; search?: string; lost?: boolean;
+}
+export interface SplitAgent {
+  id: string; name: string; email: string; track: string | null; is_absent: boolean;
+  person: string; person_name: string; held: number;
+}
+export interface SplitPlanRow { id: string; name: string; count: number; from: Record<string, number> }
+export interface SplitResult {
+  dryRun: boolean;
+  total?: number;
+  other_status?: number;
+  statuses?: string[];
+  holders?: { key: string; name: string; count: number }[];
+  agents?: SplitAgent[];
+  count?: number;
+  plan?: SplitPlanRow[];
+  moved?: number;
+  raced?: number;
+}
+export const splitOrders = (body: {
+  filters: SplitFilters; count?: number; newest?: boolean;
+  allocations?: { agentId: string; count: number }[]; dryRun: boolean;
+}) => api.post<SplitResult>('/api/orders/split', body);
+
 export interface InventoryItem {
   id: number;
   ProductName: string;
@@ -2778,6 +2805,7 @@ export interface DisciplineBoardAgent {
   email:                string;
   track:                DisciplineTrack | null;
   is_absent:            boolean;
+  main_account_id?:     string | null;   // review account → the same girl's main account
   scheduled_today:      boolean;
   status:               DisciplineDayStatus | null;
   started_at:           string | null;
@@ -2823,6 +2851,9 @@ export const getDisciplineLive = () =>
   api.get<DisciplineBoard>('/api/discipline/live');
 export const setDisciplineTrack = (userId: string, track: DisciplineTrack | null) =>
   api.patch(`/api/discipline/agents/${userId}/track`, { track });
+/* A review account → the same girl's main account (null = none). */
+export const setAgentMainAccount = (userId: string, mainAccountId: string | null) =>
+  api.patch(`/api/discipline/agents/${userId}/main-account`, { main_account_id: mainAccountId });
 export const reinstateDisciplineAgent = (userId: string) =>
   api.post<DisciplineState>('/api/discipline/reinstate', { user_id: userId });
 

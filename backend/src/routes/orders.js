@@ -6,6 +6,7 @@ const { agentAllowsProduct, assignProductAware } = require('../utils/productRout
 const { hasRole } = require('../utils/roles');
 const noAnswer = require('../services/noAnswerCycles');   // «لا يرد» cycles: schema/trigger + terminal guard
 const postponed = require('../services/postponedCallbacks');   // «مؤجل» limits / rebalance / expiry
+const orderSplit = require('../services/orderSplit');           // «توزيع بالأعداد»
 
 /* The one shared order writer (compare-and-set + stock / ledger side effects) —
    PATCH /:id and the WhatsApp bot both go through it. */
@@ -1612,6 +1613,32 @@ router.post('/transfer', authenticate, requireAdminOrPermission('reassign_orders
     });
   } catch (err) {
     console.error('[transfer]', err);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+/* ── POST /api/orders/split — «توزيع بالأعداد» (admin / reassigning TL) ───────
+   Splits the «لا يرد» / «مراجعة جديدة» orders of the CURRENT list filter between
+   the agents she picks, an exact count each; an order never goes back to the
+   person holding it. Body: { filters: {status, dateFrom, dateTo, product, agent,
+   search, lost}, count, newest, allocations: [{agentId, count}], dryRun }.
+   No allocations → the summary (total, who holds them, the agents).
+   See services/orderSplit.js. */
+router.post('/split', authenticate, requireAdminOrPermission('reassign_orders'), async (req, res) => {
+  try {
+    await require('../services/agentDiscipline').schemaReady;   // users.main_account_id
+    const f = req.body?.filters && typeof req.body.filters === 'object' ? req.body.filters : {};
+    const query = {};
+    for (const k of ['status', 'dateFrom', 'dateTo', 'product', 'agent', 'search', 'lost']) {
+      if (f[k] !== undefined && f[k] !== null && f[k] !== '') query[k] = String(f[k]);
+    }
+    const scope = buildOrderScope({ user: req.user, query }, { reconfirm: false, resend: false });
+    res.json(await orderSplit.splitOrders(pool, {
+      businessId: req.user.business_id, scope, body: req.body, actor: req.user,
+    }));
+  } catch (err) {
+    if (err instanceof orderSplit.SplitError) return res.status(err.status).json({ error: err.message });
+    console.error('[split]', err);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
