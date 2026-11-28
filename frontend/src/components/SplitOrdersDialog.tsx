@@ -54,11 +54,14 @@ export default function SplitOrdersDialog({ filters, filterLabel, onClose, onDon
   const ready = Number.isInteger(count) && count > 0 && count <= total && allocations.length > 0 && sum === count;
 
   const evenly = () => {
-    const list = agents.filter((a) => (quota[a.id] ?? '').trim() !== '');
-    if (!list.length || !Number.isInteger(count)) { setError('اكتبي أي رقم قدام البنات اللي هتاخد، وبعدين دوسي «بالتساوي»'); return; }
+    /* 2+ girls with a number → split between them only; otherwise between everyone shown. */
+    const typed = agents.filter((a) => (quota[a.id] ?? '').trim() !== '');
+    const list = typed.length >= 2 ? typed : agents;
+    if (!list.length) return;
+    if (!Number.isInteger(count) || count < 1) { setError('اكتبي عدد الطلبات اللي هتتوزع الأول'); return; }
     const base = Math.floor(count / list.length);
     let extra = count - base * list.length;
-    const next = { ...quota };
+    const next: Record<string, string> = {};
     for (const a of list) { next[a.id] = String(base + (extra > 0 ? 1 : 0)); if (extra > 0) extra -= 1; }
     setQuota(next); setError('');
   };
@@ -140,8 +143,14 @@ export default function SplitOrdersDialog({ filters, filterLabel, onClose, onDon
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">كل بنت تاخد كام (سيبي الخانة فاضية للي مش هتاخد)</p>
-                  <button type="button" onClick={evenly} className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline">بالتساوي</button>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button type="button" onClick={() => { setQuota({}); setError(''); }} className="text-xs font-semibold text-slate-500 dark:text-slate-400 hover:underline">مسح</button>
+                    <button type="button" onClick={evenly} className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline">بالتساوي</button>
+                  </div>
                 </div>
+                <p className="-mt-1 mb-2 text-[11px] text-slate-400">
+                  «بالتساوي» بتقسم على كل البنات — ولو عايزة بنات معينين بس: حطي أي رقم قدامهم الأول وبعدين دوسي «بالتساوي».
+                </p>
                 <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-100 dark:border-slate-800 rounded-xl">
                   {agents.map((a) => {
                     const linked = a.person_name !== a.name;
